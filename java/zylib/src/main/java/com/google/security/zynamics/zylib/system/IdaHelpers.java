@@ -22,18 +22,8 @@ import java.util.ArrayList;
 
 /** Contains a few simple methods that are useful for dealing with IDA and command line handling */
 public final class IdaHelpers {
-  public static final String IDA32_EXECUTABLE;
-  public static final String IDA64_EXECUTABLE;
-
-  static {
-    if (SystemHelpers.isRunningWindows()) {
-      IDA32_EXECUTABLE = "ida.exe";
-      IDA64_EXECUTABLE = "ida64.exe";
-    } else {
-      IDA32_EXECUTABLE = "ida";
-      IDA64_EXECUTABLE = "ida64";
-    }
-  }
+  public static final String IDA_EXECUTABLE =
+      SystemHelpers.isRunningWindows() ? "ida.exe" : "ida";
 
   /**
    * Exports an IDB using BinExport to a .BinExport file.

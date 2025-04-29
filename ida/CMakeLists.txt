@@ -18,8 +18,9 @@ if(APPLE)
   add_definitions(-DGOOGLE_PROTOBUF_NO_RDTSC)
 endif()
 
-# Plugins will be named "bindiffX_ida.so" and "bindiffX_ida64.so" (or .dll or
-# .dylib), where X is the release number.
+# IDA 9.0 only supports 64bit, so there's no distinction anymore between
+# the plugin prefixes. So, plugin will be "bindiffX_ida.so" 
+# (or .dll or .dylib), where X is the release number.
 add_ida_plugin(${bindiff_ida_plugin_name}
   bindiff_icon.cc
   bindiff_icon.h

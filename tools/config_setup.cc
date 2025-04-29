@@ -139,8 +139,7 @@ absl::Status PerUserSetup(const Config& config) {
   NA_RETURN_IF_ERROR(CreateOrUpdateLinkWithFallback(
       JoinPath(bindiff_dir, kBinDiffIdaProPluginsPrefix, plugin_basename),
       JoinPath(idapro_app_data_plugin_path, plugin_basename)));
-  plugin_basename =
-      absl::StrFormat("bindiff%s_ida64%s", kBinDiffRelease, kLibrarySuffix);
+
   NA_RETURN_IF_ERROR(CreateOrUpdateLinkWithFallback(
       JoinPath(bindiff_dir, kBinDiffIdaProPluginsPrefix, plugin_basename),
       JoinPath(idapro_app_data_plugin_path, plugin_basename)));
@@ -150,8 +149,7 @@ absl::Status PerUserSetup(const Config& config) {
   NA_RETURN_IF_ERROR(CreateOrUpdateLinkWithFallback(
       JoinPath(bindiff_dir, kBinDiffIdaProPluginsPrefix, plugin_basename),
       JoinPath(idapro_app_data_plugin_path, plugin_basename)));
-  plugin_basename = absl::StrFormat("binexport%s_ida64%s",
-                                    kBinDiffBinExportRelease, kLibrarySuffix);
+
   NA_RETURN_IF_ERROR(CreateOrUpdateLinkWithFallback(
       JoinPath(bindiff_dir, kBinDiffIdaProPluginsPrefix, plugin_basename),
       JoinPath(idapro_app_data_plugin_path, plugin_basename)));

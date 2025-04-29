@@ -14,17 +14,17 @@
 
 package com.google.security.zynamics.bindiff.utils;
 
-import com.google.common.base.Ascii;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
 import com.google.security.zynamics.bindiff.BinDiffProtos.Config.IdaProOptions;
 import com.google.security.zynamics.bindiff.config.Config;
 import com.google.security.zynamics.bindiff.exceptions.DifferException;
 import com.google.security.zynamics.bindiff.resources.Constants;
 import com.google.security.zynamics.zylib.io.FileUtils;
 import com.google.security.zynamics.zylib.system.IdaHelpers;
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 
 public class ExternalAppUtils {
 
@@ -59,14 +59,6 @@ public class ExternalAppUtils {
     final String extension = FileUtils.getFileExtension(inFile);
     final IdaProOptions ida = Config.getInstance().getIda();
 
-    String idaExe;
-    if (Ascii.equalsIgnoreCase(extension, Constants.IDB64_EXTENSION)) {
-      idaExe = IdaHelpers.IDA64_EXECUTABLE;
-    } else if (Ascii.equalsIgnoreCase(extension, Constants.IDB32_EXTENSION)) {
-      idaExe = IdaHelpers.IDA32_EXECUTABLE;
-    } else {
-      return null;
-    }
-    return Paths.get(ida.getDirectory(), idaExe).toFile();
+    return Paths.get(ida.getDirectory(), IdaHelpers.IDA_EXECUTABLE).toFile();
   }
 }

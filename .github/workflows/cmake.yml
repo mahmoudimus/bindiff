@@ -1,6 +1,6 @@
 name: cmake-build
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 env:
   BUILD_TYPE: Release
@@ -12,7 +12,7 @@ jobs:
       matrix:
         include:
         - os: ubuntu-22.04
-        - os: macos-12
+        - os: macos-14
         - os: windows-2022
     runs-on: ${{ matrix.os }}
 
@@ -22,12 +22,18 @@ jobs:
         path: bindiff
     - uses: actions/checkout@v4
       with:
-        repository: google/binexport
+        repository: ${{ github.actor }}/binexport
         path: binexport
+        ref: fork
 
     - name: Install ninja-build tool
       uses: turtlesec-no/get-ninja@1.1.0
+      if: matrix.os != 'macos-14'
 
+    - name: Install ninja on macos
+      run: brew install ninja
+      if: matrix.os == 'macos-14'
+             
     - name: Create Build Environment
       env:
         IDASDK_SECRET: ${{ secrets.IDASDK_SECRET }}
@@ -39,12 +45,14 @@ jobs:
         mv binexport/ida/idasdk/idasdk*.gpg \
            ida/idasdk/
         binexport/.github/scripts/decrypt_secret.sh
-        unzip -q "${{ runner.workspace }}/build/idasdk_teams82.zip" \
+        unzip -q "${{ runner.workspace }}/build/idasdk91.zip" \
               -d "${{ runner.workspace }}/build/"
 
     - name: Enable Developer Command Prompt (Windows)
       if: matrix.os == 'windows-2022'
       uses: ilammy/msvc-dev-cmd@v1.12.1
+      with:
+        sdk: "10.0.22621.0"
 
     - name: Enable mold linker (Linux)
       if: matrix.os == 'ubuntu-22.04'
@@ -56,7 +64,7 @@ jobs:
       run: |
         cmake "${{ github.workspace }}/bindiff" -G Ninja \
           "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}" \
-          "-DIdaSdk_ROOT_DIR=${{ runner.workspace }}/build/idasdk_teams82"
+          "-DIdaSdk_ROOT_DIR=${{ runner.workspace }}/build/idasdk91"
 
     - name: Build
       working-directory: ${{ runner.workspace }}/build
@@ -69,10 +77,11 @@ jobs:
       run: ctest --build-config "${BUILD_TYPE}" --output-on-failure -R '^[A-Z]'
 
     - name: Upload Build Artifacts
-      uses: actions/upload-artifact@v3.1.2
+      uses: actions/upload-artifact@v4
       with:
         name: BinDiff-${{ runner.os }}
+        if-no-files-found: ignore
         path: |
-          ${{ runner.workspace }}/build/bindiff
+          ${{ runner.workspace }}/build/bindiff*
           ${{ runner.workspace }}/build/ida/bindiff*
           ${{ runner.workspace }}/build/tools/bindiff*
