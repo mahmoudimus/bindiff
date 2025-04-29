@@ -24,7 +24,7 @@ jobs:
       with:
         repository: ${{ github.actor }}/binexport
         path: binexport
-        ref: fork
+        ref: test
 
     - name: Install ninja-build tool
       uses: turtlesec-no/get-ninja@1.1.0
