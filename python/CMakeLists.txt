@@ -21,6 +21,8 @@ cmake_minimum_required(VERSION 3.20)
 add_library(bindiff_python_wrappers STATIC
   bindiff/wrappers.cc
   bindiff/wrappers.h
+  bindiff/results_wrapper.cc
+  bindiff/results_wrapper.h
 )
 
 target_link_libraries(bindiff_python_wrappers
@@ -29,6 +31,12 @@ target_link_libraries(bindiff_python_wrappers
   absl::status
   absl::strings
 )
+
+# Conditionally link IDA plugin Results if available
+if(TARGET bindiff_ida_results)
+  target_link_libraries(bindiff_python_wrappers bindiff_ida_results)
+  target_compile_definitions(bindiff_python_wrappers PRIVATE BINDIFF_IDA_PLUGIN=1)
+endif()
 
 set_target_properties(bindiff_python_wrappers PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION ${BINDIFF_ENABLE_IPO}
@@ -45,6 +53,10 @@ install(
     bindiff/results.py
     bindiff/wrappers.h
     bindiff/wrappers.cc
+    bindiff/results_wrapper.h
+    bindiff/results_wrapper.cc
+    bindiff/ida_plugin.pxd
+    bindiff/ida_plugin.pyx
   DESTINATION python/bindiff
 )
 
@@ -62,6 +74,13 @@ install(
     examples/analyze_results.py
     examples/pyside6_viewer.py
   DESTINATION python/examples
+)
+
+install(
+  FILES
+    ida_plugin/bindiff_plugin.py
+    ida_plugin/README.md
+  DESTINATION python/ida_plugin
 )
 
 # Optional: Build Python extension directly with CMake

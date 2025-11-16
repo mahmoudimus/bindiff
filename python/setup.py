@@ -118,6 +118,19 @@ extensions = [
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
     ),
+    Extension(
+        "bindiff.ida_plugin",
+        sources=[
+            "bindiff/ida_plugin.pyx",
+            "bindiff/results_wrapper.cc",
+        ],
+        include_dirs=include_dirs,
+        library_dirs=library_dirs,
+        libraries=libraries,
+        language="c++",
+        extra_compile_args=extra_compile_args,
+        extra_link_args=extra_link_args,
+    ),
 ]
 
 # Cythonize with Cython 3.0+ features
