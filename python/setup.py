@@ -17,13 +17,24 @@
 Setup script for BinDiff Python interface.
 
 This script builds Cython extensions for BinDiff's C++ core.
+Supports platform detection and debug mode via DEBUG environment variable.
 """
 
+import functools
 import os
+import platform
+import re
 import sys
 from pathlib import Path
 from setuptools import setup, Extension
 from Cython.Build import cythonize
+
+# Platform detection
+OSTYPE = platform.system()
+ARCH = platform.processor() or platform.machine()
+x64 = platform.architecture()[0] == "64bit"
+COMPILER_OPTIMIZATION_LEVEL = re.compile(r"-O[0-3]\b")
+DEBUG_MODE = os.environ.get("DEBUG", "0") == "1"
 
 # Determine paths
 PYTHON_DIR = Path(__file__).parent.resolve()
@@ -86,22 +97,72 @@ libraries = [
     "bindiff_version",
 ]
 
-# Extra compile arguments
-extra_compile_args = [
-    "-std=c++17",
-    "-O3",
-]
 
-# Platform-specific settings
-if sys.platform == "darwin":
-    extra_compile_args.extend(["-stdlib=libc++", "-mmacosx-version-min=10.15"])
-elif sys.platform == "linux":
-    extra_compile_args.append("-fPIC")
+def compile_args(debug_mode=False):
+    """Return platform-specific compilation arguments."""
+    debug_flags = []
+    base_args = ["-std=c++17"]
 
-# Extra link arguments
-extra_link_args = []
-if sys.platform == "darwin":
-    extra_link_args.extend(["-stdlib=libc++", "-mmacosx-version-min=10.15"])
+    if OSTYPE == "Windows":
+        if debug_mode:
+            debug_flags = ["/Z7", "/Od"]
+        return base_args + ["/TP", "/EHa"] + debug_flags
+
+    elif OSTYPE == "Linux":
+        if debug_mode:
+            debug_flags = ["-g", "-O0", "-Wall", "-Wextra"]
+        else:
+            debug_flags = ["-O3"]
+        return base_args + ["-fPIC"] + debug_flags + [
+            "-Wno-stringop-truncation",
+            "-Wno-catch-value",
+            "-Wno-unused-variable",
+        ]
+
+    elif OSTYPE == "Darwin":
+        ignore_warnings = [
+            "-Wno-unused-variable",
+            "-Wno-nullability-completeness",
+            "-Wno-sign-compare",
+        ]
+        if debug_mode:
+            debug_flags = [
+                "-g", "-fno-omit-frame-pointer", "-O0", "-ggdb",
+                "-UNDEBUG", "-Wall", "-Wno-deprecated-declarations"
+            ]
+            # Remove any -O[0-3] flags from CFLAGS if in debug mode
+            cflags = os.environ.get("CFLAGS", "")
+            cflags = COMPILER_OPTIMIZATION_LEVEL.sub("", cflags)
+            cflags = "-O0 " + cflags.strip()
+            os.environ["CFLAGS"] = cflags.strip()
+        else:
+            debug_flags = ["-O3"]
+
+        return base_args + [
+            "-stdlib=libc++",
+            "-mmacosx-version-min=10.15"
+        ] + debug_flags + ignore_warnings
+
+    return base_args
+
+
+def link_args(debug_mode=False):
+    """Return platform-specific linker arguments."""
+    if OSTYPE == "Darwin":
+        args = ["-stdlib=libc++", "-mmacosx-version-min=10.15"]
+        if debug_mode:
+            args.append("-g")
+        return args
+    elif OSTYPE == "Linux":
+        return ["-g"] if debug_mode else []
+    elif OSTYPE == "Windows":
+        return ["/DEBUG"] if debug_mode else []
+    return []
+
+
+# Extra compile and link arguments
+extra_compile_args = compile_args(DEBUG_MODE)
+extra_link_args = link_args(DEBUG_MODE)
 
 # Define extensions
 extensions = [
@@ -138,12 +199,32 @@ compiler_directives = {
     "language_level": "3",
     "embedsignature": True,
     "binding": True,
+    "boundscheck": False if not DEBUG_MODE else True,
+    "wraparound": False if not DEBUG_MODE else True,
+    # Debug-only directives
+    "profile": DEBUG_MODE,
+    "linetrace": DEBUG_MODE,
 }
+
+# Debug mode macros
+macros = []
+if DEBUG_MODE:
+    macros.append(("CYTHON_TRACE", "1"))
+    macros.append(("CYTHON_CLINE_IN_TRACEBACK", "1"))
+    if sys.version_info >= (3, 13):
+        macros.append(("CYTHON_USE_SYS_MONITORING", "1"))
+    if sys.version_info < (3, 12):
+        macros.append(("CYTHON_PROFILE", "1"))
+
+    # Add macros to extensions
+    for ext in extensions:
+        ext.define_macros = macros
 
 setup(
     ext_modules=cythonize(
         extensions,
         compiler_directives=compiler_directives,
-        annotate=True,  # Generate HTML annotation files
+        annotate=DEBUG_MODE,  # Generate HTML annotation files in debug mode
+        gdb_debug=DEBUG_MODE,
     ),
 )
