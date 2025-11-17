@@ -33,49 +33,47 @@ int DiffBinaries(const std::string& primary_path,
                  const std::string& secondary_path,
                  const std::string& output_database) {
   try {
-    // Load call graphs from BinExport files
-    ChangeHistory change_history;
-    FlowGraphs primary_flow_graphs;
-    FlowGraphInfos primary_flow_graph_infos;
-    FlowGraphs secondary_flow_graphs;
-    FlowGraphInfos secondary_flow_graph_infos;
-    InstructionCache instruction_cache;
+    // Setup variables for diff operation
+    const MatchingSteps call_graph_steps = GetDefaultMatchingSteps();
+    const MatchingStepsFlowGraph basic_block_steps =
+        GetDefaultMatchingStepsBasicBlock();
+    Instruction::Cache instruction_cache;
+    FlowGraphs flow_graphs1;
+    FlowGraphs flow_graphs2;
+    CallGraph call_graph1;
+    CallGraph call_graph2;
+    ScopedCleanup cleanup(&flow_graphs1, &flow_graphs2, &instruction_cache);
 
-    FixedPoints fixed_points;
-    FlowGraphInfos fixed_point_infos;
-    ScopedCleanup cleanup(primary_flow_graphs, secondary_flow_graphs);
-
-    // Read binaries
-    CallGraph primary_call_graph;
-    auto status = Read(primary_path, &primary_call_graph, &primary_flow_graphs,
-                      &primary_flow_graph_infos, &instruction_cache);
+    // Read primary binary
+    auto status = Read(primary_path, &call_graph1, &flow_graphs1,
+                      /*flow_graph_infos=*/nullptr, &instruction_cache);
     if (!status.ok()) {
       return -1;
     }
 
-    CallGraph secondary_call_graph;
-    status = Read(secondary_path, &secondary_call_graph, &secondary_flow_graphs,
-                 &secondary_flow_graph_infos, &instruction_cache);
+    // Read secondary binary
+    status = Read(secondary_path, &call_graph2, &flow_graphs2,
+                 /*flow_graph_infos=*/nullptr, &instruction_cache);
     if (!status.ok()) {
       return -2;
     }
 
-    // Run diff
-    MatchingContext context(primary_call_graph, secondary_call_graph,
-                           primary_flow_graphs, secondary_flow_graphs,
-                           fixed_points);
-    Diff(&context, change_history);
+    // Perform diff
+    FixedPoints fixed_points;
+    MatchingContext context(call_graph1, call_graph2, flow_graphs1,
+                           flow_graphs2, fixed_points);
+    Diff(&context, call_graph_steps, basic_block_steps);
 
     // Write results to database
-    DatabaseWriter writer(SqliteDatabase::Connect(output_database).value(),
-                         output_database, primary_call_graph.GetFilePath(),
-                         secondary_call_graph.GetFilePath());
-    Counts counts;
-    status = writer.Write(primary_call_graph, secondary_call_graph,
-                         primary_flow_graphs, secondary_flow_graphs,
-                         fixed_points, &counts);
-    if (!status.ok()) {
+    auto database_writer = DatabaseWriter::Create(output_database);
+    if (!database_writer.ok()) {
       return -3;
+    }
+
+    status = (*database_writer)->Write(call_graph1, call_graph2, flow_graphs1,
+                                       flow_graphs2, fixed_points);
+    if (!status.ok()) {
+      return -4;
     }
 
     return 0;  // Success
