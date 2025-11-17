@@ -32,6 +32,7 @@ jobs:
             - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
               uses: actions/checkout@v4
               with:
+                  path: bindiff
                   submodules: recursive
                   persist-credentials: false
 
@@ -58,6 +59,7 @@ jobs:
             - name: Build BinDiff (Linux)
               if: runner.os == 'Linux'
               run: |
+                  cd bindiff
                   mkdir -p build && cd build
                   cmake .. \
                     -DCMAKE_BUILD_TYPE=Release \
@@ -67,6 +69,7 @@ jobs:
             - name: Build BinDiff (macOS)
               if: runner.os == 'macOS'
               run: |
+                  cd bindiff
                   mkdir -p build && cd build
                   cmake .. \
                     -DCMAKE_BUILD_TYPE=Release \
@@ -76,6 +79,7 @@ jobs:
             - name: Build BinDiff (Windows)
               if: runner.os == 'Windows'
               run: |
+                  cd bindiff
                   mkdir build
                   cd build
                   cmake .. `
@@ -85,14 +89,14 @@ jobs:
 
             - name: Build Python bindings
               run: |
-                  cd python
+                  cd bindiff/python
                   python -m build --wheel --no-isolation
               env:
                   DEBUG: "0"
 
             - name: Test import
               run: |
-                  cd python
+                  cd bindiff/python
                   pip install dist/*.whl
                   python -c "import bindiff; print(f'BinDiff version: {bindiff.__version__}')"
 
@@ -100,7 +104,7 @@ jobs:
               uses: actions/upload-artifact@v4
               with:
                   name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}
-                  path: python/dist/*.whl
+                  path: bindiff/python/dist/*.whl
                   retention-days: 7
 
     build-ida-plugin:
@@ -114,6 +118,7 @@ jobs:
             - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
               uses: actions/checkout@v4
               with:
+                  path: bindiff
                   submodules: recursive
                   persist-credentials: false
 
@@ -139,6 +144,7 @@ jobs:
 
             - name: Build BinDiff
               run: |
+                  cd bindiff
                   mkdir -p build && cd build
                   cmake .. \
                     -DCMAKE_BUILD_TYPE=Release \
@@ -147,19 +153,19 @@ jobs:
 
             - name: Build Python bindings (standalone mode)
               run: |
-                  cd python
+                  cd bindiff/python
                   python setup.py build_ext --inplace
                   pip install -e .
 
             - name: Test IDA plugin imports
               run: |
-                  cd python
+                  cd bindiff/python
                   python -c "from bindiff.ida_plugin import BindiffResults, Match, PortCommentsKind"
                   python -c "print('IDA plugin bindings imported successfully')"
 
             - name: Create plugin package
               run: |
-                  cd python
+                  cd bindiff/python
                   mkdir -p bindiff-plugin
                   cp ida_plugin/bindiff_plugin.py bindiff-plugin/
                   cp ida_plugin/README.md bindiff-plugin/
@@ -170,7 +176,7 @@ jobs:
               uses: actions/upload-artifact@v4
               with:
                   name: bindiff-ida-plugin
-                  path: python/bindiff-ida-plugin.tar.gz
+                  path: bindiff/python/bindiff-ida-plugin.tar.gz
                   retention-days: 7
 
     test-imports:

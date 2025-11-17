@@ -54,6 +54,7 @@ jobs:
             - name: Checkout code
               uses: actions/checkout@v4
               with:
+                  path: bindiff
                   submodules: recursive
                   ref: ${{ steps.version.outputs.tag }}
 
@@ -79,6 +80,7 @@ jobs:
             - name: Build BinDiff (Linux)
               if: runner.os == 'Linux'
               run: |
+                  cd bindiff
                   mkdir -p build && cd build
                   cmake .. -DCMAKE_BUILD_TYPE=Release -DBINDIFF_BUILD_TESTING=OFF
                   cmake --build . -j$(nproc)
@@ -86,6 +88,7 @@ jobs:
             - name: Build BinDiff (macOS)
               if: runner.os == 'macOS'
               run: |
+                  cd bindiff
                   mkdir -p build && cd build
                   cmake .. -DCMAKE_BUILD_TYPE=Release -DBINDIFF_BUILD_TESTING=OFF
                   cmake --build . -j$(sysctl -n hw.ncpu)
@@ -93,6 +96,7 @@ jobs:
             - name: Build BinDiff (Windows)
               if: runner.os == 'Windows'
               run: |
+                  cd bindiff
                   mkdir build
                   cd build
                   cmake .. -DCMAKE_BUILD_TYPE=Release -DBINDIFF_BUILD_TESTING=OFF
@@ -100,26 +104,26 @@ jobs:
 
             - name: Build Python wheel
               run: |
-                  cd python
+                  cd bindiff/python
                   python -m build --wheel --no-isolation
 
             - name: Create IDA plugin standalone file
               shell: bash
               run: |
-                  cd python
+                  cd bindiff/python
                   cp ida_plugin/bindiff_plugin.py bindiff_plugin_${{ steps.version.outputs.version }}.py
 
             - name: Upload wheel
               uses: actions/upload-artifact@v4
               with:
                   name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}-${{ steps.version.outputs.version }}
-                  path: python/dist/*.whl
+                  path: bindiff/python/dist/*.whl
 
             - name: Upload IDA plugin
               uses: actions/upload-artifact@v4
               with:
                   name: ida-plugin-${{ matrix.os }}-${{ steps.version.outputs.version }}
-                  path: python/bindiff_plugin_${{ steps.version.outputs.version }}.py
+                  path: bindiff/python/bindiff_plugin_${{ steps.version.outputs.version }}.py
 
     create-release:
         needs: build-release
