@@ -89,9 +89,10 @@ jobs:
                   cmake .. `
                     -DCMAKE_BUILD_TYPE=Release `
                     -DBINDIFF_BUILD_TESTING=OFF `
-                    -DCMAKE_VERBOSE_MAKEFILE=ON
-                  # Limit parallel jobs to avoid OOM
-                  cmake --build . --config Release --parallel 2
+                    -DCMAKE_VERBOSE_MAKEFILE=ON `
+                    -DCMAKE_CXX_FLAGS="/bigobj /Zm200"
+                  # Single-threaded build to avoid MSVC internal compiler errors (C1001)
+                  cmake --build . --config Release --parallel 1
 
             - name: Build Python bindings
               run: |
