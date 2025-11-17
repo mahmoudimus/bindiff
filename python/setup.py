@@ -85,17 +85,59 @@ else:
             include_dirs.append(str(loc))
             break
 
-# Library directories
-library_dirs = [
-    str(BUILD_DIR),
-]
+# Library directories - recursively find all CMake build output directories
+library_dirs = [str(BUILD_DIR)]
+
+# Find all directories containing static libraries
+for subdir in BUILD_DIR.rglob("*"):
+    if subdir.is_dir():
+        # Check if this directory contains any libraries
+        has_libs = any(subdir.glob("*.a")) or any(subdir.glob("*.lib"))
+        if has_libs and str(subdir) not in library_dirs:
+            library_dirs.append(str(subdir))
+
+# Add common subdirectories
+for subdir_name in ["_deps", "lib", "lib64", "Release", "Debug"]:
+    subdir = BUILD_DIR / subdir_name
+    if subdir.exists() and str(subdir) not in library_dirs:
+        library_dirs.append(str(subdir))
+
+# Print diagnostic info
+if os.environ.get("VERBOSE_BUILD"):
+    print(f"\n{'='*60}")
+    print(f"BinDiff Python Build Configuration")
+    print(f"{'='*60}")
+    print(f"Platform: {OSTYPE} ({ARCH})")
+    print(f"Python: {sys.version}")
+    print(f"Build directory: {BUILD_DIR}")
+    print(f"\nLibrary search paths ({len(library_dirs)} found):")
+    for libdir in library_dirs[:10]:  # Show first 10
+        print(f"  - {libdir}")
+    if len(library_dirs) > 10:
+        print(f"  ... and {len(library_dirs) - 10} more")
+    print(f"{'='*60}\n")
 
 # Libraries to link
+# Note: Order matters - list dependencies after dependents
 libraries = [
     "bindiff_shared",
     "bindiff_config",
     "bindiff_version",
 ]
+
+# Add required dependencies (abseil, binexport, sqlite)
+# These are typically built by CMake as static libraries
+if OSTYPE != "Windows":
+    libraries.extend([
+        "binexport_shared",
+        "sqlite",
+    ])
+else:
+    # Windows uses different naming
+    libraries.extend([
+        "binexport_shared",
+        "sqlite3",
+    ])
 
 
 def compile_args(debug_mode=False):

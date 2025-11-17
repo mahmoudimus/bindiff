@@ -63,8 +63,10 @@ jobs:
                   mkdir -p build && cd build
                   cmake .. \
                     -DCMAKE_BUILD_TYPE=Release \
-                    -DBINDIFF_BUILD_TESTING=OFF
-                  cmake --build . -j$(nproc)
+                    -DBINDIFF_BUILD_TESTING=OFF \
+                    -DCMAKE_VERBOSE_MAKEFILE=ON
+                  # Limit parallel jobs to avoid OOM
+                  cmake --build . -j2
 
             - name: Build BinDiff (macOS)
               if: runner.os == 'macOS'
@@ -73,8 +75,10 @@ jobs:
                   mkdir -p build && cd build
                   cmake .. \
                     -DCMAKE_BUILD_TYPE=Release \
-                    -DBINDIFF_BUILD_TESTING=OFF
-                  cmake --build . -j$(sysctl -n hw.ncpu)
+                    -DBINDIFF_BUILD_TESTING=OFF \
+                    -DCMAKE_VERBOSE_MAKEFILE=ON
+                  # Limit parallel jobs to avoid OOM
+                  cmake --build . -j2
 
             - name: Build BinDiff (Windows)
               if: runner.os == 'Windows'
@@ -84,8 +88,10 @@ jobs:
                   cd build
                   cmake .. `
                     -DCMAKE_BUILD_TYPE=Release `
-                    -DBINDIFF_BUILD_TESTING=OFF
-                  cmake --build . --config Release
+                    -DBINDIFF_BUILD_TESTING=OFF `
+                    -DCMAKE_VERBOSE_MAKEFILE=ON
+                  # Limit parallel jobs to avoid OOM
+                  cmake --build . --config Release --parallel 2
 
             - name: Build Python bindings
               run: |
@@ -93,6 +99,7 @@ jobs:
                   python -m build --wheel --no-isolation
               env:
                   DEBUG: "0"
+                  VERBOSE_BUILD: "1"
 
             - name: Test import
               run: |
@@ -148,14 +155,18 @@ jobs:
                   mkdir -p build && cd build
                   cmake .. \
                     -DCMAKE_BUILD_TYPE=Release \
-                    -DBINDIFF_BUILD_TESTING=OFF
-                  cmake --build . -j$(nproc)
+                    -DBINDIFF_BUILD_TESTING=OFF \
+                    -DCMAKE_VERBOSE_MAKEFILE=ON
+                  # Limit parallel jobs to avoid OOM
+                  cmake --build . -j2
 
             - name: Build Python bindings (standalone mode)
               run: |
                   cd bindiff/python
                   python setup.py build_ext --inplace
                   pip install -e .
+              env:
+                  VERBOSE_BUILD: "1"
 
             - name: Test IDA plugin imports
               run: |
