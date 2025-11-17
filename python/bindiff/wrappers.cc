@@ -22,7 +22,9 @@
 #include "third_party/zynamics/bindiff/differ.h"
 #include "third_party/zynamics/bindiff/flow_graph.h"
 #include "third_party/zynamics/bindiff/instruction.h"
+#include "third_party/zynamics/bindiff/match/call_graph.h"
 #include "third_party/zynamics/bindiff/match/context.h"
+#include "third_party/zynamics/bindiff/match/flow_graph.h"
 #include "third_party/zynamics/bindiff/reader.h"
 #include "third_party/zynamics/bindiff/sqlite.h"
 
