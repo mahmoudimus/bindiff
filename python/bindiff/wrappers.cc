@@ -28,289 +28,59 @@
 
 namespace security::bindiff {
 
-// CallGraphWrapper implementation
-CallGraphWrapper::CallGraphWrapper(CallGraph* graph) : graph_(graph) {}
-
-std::string CallGraphWrapper::GetFilePath() const {
-  return graph_->GetFilePath();
-}
-
-std::string CallGraphWrapper::GetExeFilename() const {
-  return graph_->GetExeFilename();
-}
-
-std::string CallGraphWrapper::GetExeHash() const {
-  return graph_->GetExeHash();
-}
-
-int CallGraphWrapper::GetNumFunctions() const {
-  return boost::num_vertices(graph_->GetGraph());
-}
-
-std::vector<uint64_t> CallGraphWrapper::GetFunctionAddresses() const {
-  std::vector<uint64_t> addresses;
-  const auto& graph = graph_->GetGraph();
-
-  for (auto [it, end] = boost::vertices(graph); it != end; ++it) {
-    addresses.push_back(graph_->GetAddress(*it));
-  }
-
-  return addresses;
-}
-
-FunctionInfo CallGraphWrapper::GetFunctionInfo(uint64_t address) const {
-  FunctionInfo info{};
-
-  auto vertex = graph_->GetVertex(address);
-  if (vertex == CallGraph::kInvalidVertex) {
-    return info;
-  }
-
-  const auto& graph = graph_->GetGraph();
-
-  info.address = address;
-  info.name = graph_->GetName(vertex);
-  info.demangled_name = graph_->GetDemangledName(vertex);
-  info.md_index = graph_->GetMdIndex(vertex);
-
-  // Get flow graph if available
-  auto* flow_graph = graph_->GetFlowGraph(vertex);
-  if (flow_graph) {
-    const auto& fg = flow_graph->GetGraph();
-    info.basic_block_count = boost::num_vertices(fg);
-    info.edge_count = boost::num_edges(fg);
-
-    // Count instructions
-    int instruction_count = 0;
-    for (auto [it, end] = boost::vertices(fg); it != end; ++it) {
-      instruction_count += flow_graph->GetInstructions(*it).size();
-    }
-    info.instruction_count = instruction_count;
-  }
-
-  return info;
-}
-
-bool CallGraphWrapper::HasFunction(uint64_t address) const {
-  return graph_->GetVertex(address) != CallGraph::kInvalidVertex;
-}
-
-int CallGraphWrapper::GetNumBasicBlocks() const {
-  int count = 0;
-  const auto& graph = graph_->GetGraph();
-
-  for (auto [it, end] = boost::vertices(graph); it != end; ++it) {
-    auto* flow_graph = graph_->GetFlowGraph(*it);
-    if (flow_graph) {
-      count += boost::num_vertices(flow_graph->GetGraph());
-    }
-  }
-
-  return count;
-}
-
-int CallGraphWrapper::GetNumEdges() const {
-  int count = 0;
-  const auto& graph = graph_->GetGraph();
-
-  for (auto [it, end] = boost::vertices(graph); it != end; ++it) {
-    auto* flow_graph = graph_->GetFlowGraph(*it);
-    if (flow_graph) {
-      count += boost::num_edges(flow_graph->GetGraph());
-    }
-  }
-
-  return count;
-}
-
-int CallGraphWrapper::GetNumInstructions() const {
-  int count = 0;
-  const auto& graph = graph_->GetGraph();
-
-  for (auto [it, end] = boost::vertices(graph); it != end; ++it) {
-    auto* flow_graph = graph_->GetFlowGraph(*it);
-    if (flow_graph) {
-      const auto& fg = flow_graph->GetGraph();
-      for (auto [bb_it, bb_end] = boost::vertices(fg); bb_it != bb_end; ++bb_it) {
-        count += flow_graph->GetInstructions(*bb_it).size();
-      }
-    }
-  }
-
-  return count;
-}
-
-// FlowGraphWrapper implementation
-FlowGraphWrapper::FlowGraphWrapper(FlowGraph* graph) : graph_(graph) {}
-
-uint64_t FlowGraphWrapper::GetAddress() const {
-  return graph_->GetEntryPointAddress();
-}
-
-std::string FlowGraphWrapper::GetName(const CallGraph& call_graph) const {
-  auto vertex = call_graph.GetVertex(GetAddress());
-  if (vertex != CallGraph::kInvalidVertex) {
-    return call_graph.GetName(vertex);
-  }
-  return "";
-}
-
-int FlowGraphWrapper::GetNumBasicBlocks() const {
-  return boost::num_vertices(graph_->GetGraph());
-}
-
-int FlowGraphWrapper::GetNumEdges() const {
-  return boost::num_edges(graph_->GetGraph());
-}
-
-int FlowGraphWrapper::GetNumInstructions() const {
-  int count = 0;
-  const auto& graph = graph_->GetGraph();
-
-  for (auto [it, end] = boost::vertices(graph); it != end; ++it) {
-    count += graph_->GetInstructions(*it).size();
-  }
-
-  return count;
-}
-
-std::vector<uint64_t> FlowGraphWrapper::GetBasicBlockAddresses() const {
-  std::vector<uint64_t> addresses;
-  const auto& graph = graph_->GetGraph();
-
-  for (auto [it, end] = boost::vertices(graph); it != end; ++it) {
-    addresses.push_back(graph_->GetAddress(*it));
-  }
-
-  return addresses;
-}
-
-BasicBlockInfo FlowGraphWrapper::GetBasicBlockInfo(uint64_t address) const {
-  BasicBlockInfo info{};
-
-  auto vertex = graph_->GetVertex(address);
-  if (vertex == FlowGraph::kInvalidVertex) {
-    return info;
-  }
-
-  info.address = address;
-  info.instruction_count = graph_->GetInstructions(vertex).size();
-  info.md_index = graph_->GetMdIndex(vertex);
-
-  return info;
-}
-
-bool FlowGraphWrapper::HasBasicBlock(uint64_t address) const {
-  return graph_->GetVertex(address) != FlowGraph::kInvalidVertex;
-}
-
-uint64_t FlowGraphWrapper::GetEntryPointAddress() const {
-  return graph_->GetEntryPointAddress();
-}
-
-// FixedPointWrapper implementation
-FixedPointWrapper::FixedPointWrapper(const FixedPoint& fixed_point)
-    : fixed_point_(fixed_point) {}
-
-uint64_t FixedPointWrapper::GetPrimaryAddress() const {
-  return fixed_point_.GetPrimary() ?
-         fixed_point_.GetPrimary()->GetEntryPointAddress() : 0;
-}
-
-uint64_t FixedPointWrapper::GetSecondaryAddress() const {
-  return fixed_point_.GetSecondary() ?
-         fixed_point_.GetSecondary()->GetEntryPointAddress() : 0;
-}
-
-double FixedPointWrapper::GetSimilarity() const {
-  return fixed_point_.GetSimilarity();
-}
-
-double FixedPointWrapper::GetConfidence() const {
-  return fixed_point_.GetConfidence();
-}
-
-int FixedPointWrapper::GetAlgorithm() const {
-  return fixed_point_.GetMatchingStep();
-}
-
-int FixedPointWrapper::GetFlags() const {
-  return fixed_point_.GetFlags();
-}
-
-int FixedPointWrapper::GetNumBasicBlockMatches() const {
-  return fixed_point_.GetBasicBlockFixedPoints().size();
-}
-
-std::vector<std::pair<uint64_t, uint64_t>>
-FixedPointWrapper::GetBasicBlockMatches() const {
-  std::vector<std::pair<uint64_t, uint64_t>> matches;
-
-  for (const auto& bb_fp : fixed_point_.GetBasicBlockFixedPoints()) {
-    matches.emplace_back(bb_fp.GetPrimaryAddress(),
-                         bb_fp.GetSecondaryAddress());
-  }
-
-  return matches;
-}
-
-// High-level diff function
+// Simple diff function that runs BinDiff on two files
 int DiffBinaries(const std::string& primary_path,
                  const std::string& secondary_path,
                  const std::string& output_database) {
   try {
-    // Create call graphs and instruction cache
-    CallGraph call_graph1;
-    CallGraph call_graph2;
-    FlowGraphs flow_graphs1;
-    FlowGraphs flow_graphs2;
-    FlowGraphInfos flow_graph_infos1;
-    FlowGraphInfos flow_graph_infos2;
-    Instruction::Cache instruction_cache;
+    // Load call graphs from BinExport files
+    ChangeHistory change_history;
+    FlowGraphs primary_flow_graphs;
+    FlowGraphInfos primary_flow_graph_infos;
+    FlowGraphs secondary_flow_graphs;
+    FlowGraphInfos secondary_flow_graph_infos;
+    InstructionCache instruction_cache;
 
-    // Read primary binary
-    auto status = Read(primary_path, &call_graph1, &flow_graphs1,
-                      &flow_graph_infos1, &instruction_cache);
+    FixedPoints fixed_points;
+    FlowGraphInfos fixed_point_infos;
+    ScopedCleanup cleanup(primary_flow_graphs, secondary_flow_graphs);
+
+    // Read binaries
+    CallGraph primary_call_graph;
+    auto status = Read(primary_path, &primary_call_graph, &primary_flow_graphs,
+                      &primary_flow_graph_infos, &instruction_cache);
     if (!status.ok()) {
       return -1;
     }
 
-    // Read secondary binary
-    status = Read(secondary_path, &call_graph2, &flow_graphs2,
-                 &flow_graph_infos2, &instruction_cache);
+    CallGraph secondary_call_graph;
+    status = Read(secondary_path, &secondary_call_graph, &secondary_flow_graphs,
+                 &secondary_flow_graph_infos, &instruction_cache);
     if (!status.ok()) {
       return -2;
     }
 
-    // Perform diff
-    FixedPoints fixed_points;
-    MatchingContext context(call_graph1, call_graph2,
-                           flow_graphs1, flow_graphs2,
+    // Run diff
+    MatchingContext context(primary_call_graph, secondary_call_graph,
+                           primary_flow_graphs, secondary_flow_graphs,
                            fixed_points);
-
-    MatchingSteps call_graph_steps;
-    MatchingStepsFlowGraph flow_graph_steps;
-    GetDefaultMatchingSteps(&call_graph_steps, &flow_graph_steps);
-
-    Diff(&context, call_graph_steps, flow_graph_steps);
+    Diff(&context, change_history);
 
     // Write results to database
-    auto writer = DatabaseWriter::Create(output_database,
-                                        DatabaseWriter::Options());
-    if (!writer.ok()) {
-      return -3;
-    }
-
-    status = (*writer)->Write(call_graph1, call_graph2,
-                             flow_graphs1, flow_graphs2,
-                             fixed_points);
+    DatabaseWriter writer(SqliteDatabase::Connect(output_database).value(),
+                         output_database, primary_call_graph.GetFilePath(),
+                         secondary_call_graph.GetFilePath());
+    Counts counts;
+    status = writer.Write(primary_call_graph, secondary_call_graph,
+                         primary_flow_graphs, secondary_flow_graphs,
+                         fixed_points, &counts);
     if (!status.ok()) {
-      return -4;
+      return -3;
     }
 
     return 0;  // Success
   } catch (...) {
-    return -99;
+    return -99;  // Unknown error
   }
 }
 

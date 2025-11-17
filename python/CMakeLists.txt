@@ -18,12 +18,21 @@ cmake_minimum_required(VERSION 3.20)
 
 # C++ wrapper library for Python bindings
 # This provides simplified C++ wrappers around Boost graph types
-add_library(bindiff_python_wrappers STATIC
+# Start with core wrappers (always compiled)
+set(WRAPPER_SOURCES
   bindiff/wrappers.cc
   bindiff/wrappers.h
-  bindiff/results_wrapper.cc
-  bindiff/results_wrapper.h
 )
+
+# Add IDA plugin wrappers only if IDA results target exists
+if(TARGET bindiff_ida_results)
+  list(APPEND WRAPPER_SOURCES
+    bindiff/results_wrapper.cc
+    bindiff/results_wrapper.h
+  )
+endif()
+
+add_library(bindiff_python_wrappers STATIC ${WRAPPER_SOURCES})
 
 target_link_libraries(bindiff_python_wrappers
   bindiff_base
