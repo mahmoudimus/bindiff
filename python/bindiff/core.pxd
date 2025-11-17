@@ -11,22 +11,8 @@ from libcpp.vector cimport vector
 from libcpp.pair cimport pair
 
 cdef extern from "python/bindiff/wrappers.h" namespace "security::bindiff":
-    # Data structures
-    cdef cppclass FunctionInfo:
-        unsigned long long address
-        string name
-        string demangled_name
-        int basic_block_count
-        int edge_count
-        int instruction_count
-        double md_index
-
-    cdef cppclass BasicBlockInfo:
-        unsigned long long address
-        int instruction_count
-        double md_index
-
-    cdef cppclass MatchInfo:
+    # C++ structs (internal use only - not exposed to Python)
+    ctypedef struct MatchInfo:
         unsigned long long primary_address
         unsigned long long secondary_address
         string primary_name
@@ -38,7 +24,7 @@ cdef extern from "python/bindiff/wrappers.h" namespace "security::bindiff":
         bool is_manual
         int flags
 
-    cdef cppclass StatisticsInfo:
+    ctypedef struct StatisticsInfo:
         int primary_function_count
         int secondary_function_count
         int matched_function_count
@@ -51,42 +37,6 @@ cdef extern from "python/bindiff/wrappers.h" namespace "security::bindiff":
         int primary_edge_count
         int secondary_edge_count
         int matched_edge_count
-
-    # Wrapper classes (declarations only - actual classes are in C++)
-    cdef cppclass CallGraphWrapper:
-        CallGraphWrapper(...)
-        string GetFilePath()
-        string GetExeFilename()
-        string GetExeHash()
-        int GetNumFunctions()
-        vector[unsigned long long] GetFunctionAddresses()
-        FunctionInfo GetFunctionInfo(unsigned long long address)
-        bool HasFunction(unsigned long long address)
-        int GetNumBasicBlocks()
-        int GetNumEdges()
-        int GetNumInstructions()
-
-    cdef cppclass FlowGraphWrapper:
-        FlowGraphWrapper(...)
-        unsigned long long GetAddress()
-        int GetNumBasicBlocks()
-        int GetNumEdges()
-        int GetNumInstructions()
-        vector[unsigned long long] GetBasicBlockAddresses()
-        BasicBlockInfo GetBasicBlockInfo(unsigned long long address)
-        bool HasBasicBlock(unsigned long long address)
-        unsigned long long GetEntryPointAddress()
-
-    cdef cppclass FixedPointWrapper:
-        FixedPointWrapper(...)
-        unsigned long long GetPrimaryAddress()
-        unsigned long long GetSecondaryAddress()
-        double GetSimilarity()
-        double GetConfidence()
-        int GetAlgorithm()
-        int GetFlags()
-        int GetNumBasicBlockMatches()
-        vector[pair[unsigned long long, unsigned long long]] GetBasicBlockMatches()
 
     # High-level functions
     int DiffBinaries(const string& primary_path,
