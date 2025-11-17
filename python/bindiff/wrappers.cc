@@ -318,57 +318,57 @@ int DiffBinaries(const std::string& primary_path,
 std::vector<MatchInfo> LoadMatches(const std::string& database_path) {
   std::vector<MatchInfo> matches;
 
-  auto db_or = SqliteDatabase::Connect(database_path);
-  if (!db_or.ok()) {
-    return matches;  // Return empty on error
-  }
-  auto db = std::move(db_or).value();
+  try {
+    auto db = *SqliteDatabase::Connect(database_path);
 
-  // Query matches
-  const char* query = R"(
-    SELECT
-      f1.address AS primary_address,
-      f2.address AS secondary_address,
-      f1.name AS primary_name,
-      f2.name AS secondary_name,
-      m.similarity,
-      m.confidence,
-      m.algorithm,
-      m.evaluate,
-      m.flags
-    FROM function AS f1
-    INNER JOIN functionmatch AS m ON f1.id = m.function1id
-    INNER JOIN function AS f2 ON f2.id = m.function2id
-    ORDER BY m.similarity DESC
-  )";
+    // Query matches
+    const char* query = R"(
+      SELECT
+        f1.address AS primary_address,
+        f2.address AS secondary_address,
+        f1.name AS primary_name,
+        f2.name AS secondary_name,
+        m.similarity,
+        m.confidence,
+        m.algorithm,
+        m.evaluate,
+        m.flags
+      FROM function AS f1
+      INNER JOIN functionmatch AS m ON f1.id = m.function1id
+      INNER JOIN function AS f2 ON f2.id = m.function2id
+      ORDER BY m.similarity DESC
+    )";
 
-  SqliteStatement stmt = db.StatementOrThrow(query);
+    SqliteStatement stmt = db.StatementOrThrow(query);
 
-  for (stmt.ExecuteOrThrow(); stmt.GotData(); stmt.ExecuteOrThrow()) {
-    MatchInfo info;
-    std::string primary_name, secondary_name;
-    int64_t primary_addr = 0, secondary_addr = 0;
-    int algorithm_id = 0, evaluate = 0, flags = 0;
+    for (stmt.ExecuteOrThrow(); stmt.GotData(); stmt.ExecuteOrThrow()) {
+      MatchInfo info;
+      std::string primary_name, secondary_name;
+      int64_t primary_addr = 0, secondary_addr = 0;
+      int algorithm_id = 0, evaluate = 0, flags = 0;
 
-    stmt.Into(&primary_addr)
-        .Into(&secondary_addr)
-        .Into(&primary_name)
-        .Into(&secondary_name)
-        .Into(&info.similarity)
-        .Into(&info.confidence)
-        .Into(&algorithm_id)
-        .Into(&evaluate)
-        .Into(&flags);
+      stmt.Into(&primary_addr)
+          .Into(&secondary_addr)
+          .Into(&primary_name)
+          .Into(&secondary_name)
+          .Into(&info.similarity)
+          .Into(&info.confidence)
+          .Into(&algorithm_id)
+          .Into(&evaluate)
+          .Into(&flags);
 
-    info.primary_address = static_cast<uint64_t>(primary_addr);
-    info.secondary_address = static_cast<uint64_t>(secondary_addr);
-    info.primary_name = primary_name;
-    info.secondary_name = secondary_name;
-    info.algorithm_id = algorithm_id;
-    info.is_manual = (evaluate != 0);
-    info.flags = flags;
+      info.primary_address = static_cast<uint64_t>(primary_addr);
+      info.secondary_address = static_cast<uint64_t>(secondary_addr);
+      info.primary_name = primary_name;
+      info.secondary_name = secondary_name;
+      info.algorithm_id = algorithm_id;
+      info.is_manual = (evaluate != 0);
+      info.flags = flags;
 
-    matches.push_back(std::move(info));
+      matches.push_back(std::move(info));
+    }
+  } catch (...) {
+    // Return empty on error
   }
 
   return matches;
@@ -378,97 +378,97 @@ std::vector<MatchInfo> LoadMatches(const std::string& database_path) {
 StatisticsInfo LoadStatistics(const std::string& database_path) {
   StatisticsInfo stats{};
 
-  auto db_or = SqliteDatabase::Connect(database_path);
-  if (!db_or.ok()) {
-    return stats;  // Return zeros on error
-  }
-  auto db = std::move(db_or).value();
+  try {
+    auto db = *SqliteDatabase::Connect(database_path);
 
-  // Get function counts
-  {
-    SqliteStatement func_stmt = db.StatementOrThrow(
-        "SELECT file, COUNT(*) FROM function GROUP BY file ORDER BY file");
+    // Get function counts
+    {
+      SqliteStatement func_stmt = db.StatementOrThrow(
+          "SELECT file, COUNT(*) FROM function GROUP BY file ORDER BY file");
 
-    int file_idx = 1;
-    for (func_stmt.ExecuteOrThrow(); func_stmt.GotData();
-         func_stmt.ExecuteOrThrow()) {
-      int file = 0, count = 0;
-      func_stmt.Into(&file).Into(&count);
-      if (file_idx == 1) {
-        stats.primary_function_count = count;
-      } else {
-        stats.secondary_function_count = count;
+      int file_idx = 1;
+      for (func_stmt.ExecuteOrThrow(); func_stmt.GotData();
+           func_stmt.ExecuteOrThrow()) {
+        int file = 0, count = 0;
+        func_stmt.Into(&file).Into(&count);
+        if (file_idx == 1) {
+          stats.primary_function_count = count;
+        } else {
+          stats.secondary_function_count = count;
+        }
+        file_idx++;
       }
-      file_idx++;
     }
-  }
 
-  // Get matched function count
-  {
-    SqliteStatement match_stmt =
-        db.StatementOrThrow("SELECT COUNT(*) FROM functionmatch");
-    match_stmt.ExecuteOrThrow();
-    if (match_stmt.GotData()) {
-      match_stmt.Into(&stats.matched_function_count);
-    }
-  }
-
-  // Get basic block counts
-  {
-    SqliteStatement bb_stmt = db.StatementOrThrow(
-        "SELECT file, COUNT(*) FROM basicblock GROUP BY file ORDER BY file");
-
-    int file_idx = 1;
-    for (bb_stmt.ExecuteOrThrow(); bb_stmt.GotData();
-         bb_stmt.ExecuteOrThrow()) {
-      int file = 0, count = 0;
-      bb_stmt.Into(&file).Into(&count);
-      if (file_idx == 1) {
-        stats.primary_basic_block_count = count;
-      } else {
-        stats.secondary_basic_block_count = count;
+    // Get matched function count
+    {
+      SqliteStatement match_stmt =
+          db.StatementOrThrow("SELECT COUNT(*) FROM functionmatch");
+      match_stmt.ExecuteOrThrow();
+      if (match_stmt.GotData()) {
+        match_stmt.Into(&stats.matched_function_count);
       }
-      file_idx++;
     }
-  }
 
-  // Get matched basic block count
-  {
-    SqliteStatement bb_match_stmt =
-        db.StatementOrThrow("SELECT COUNT(*) FROM basicblockmatch");
-    bb_match_stmt.ExecuteOrThrow();
-    if (bb_match_stmt.GotData()) {
-      bb_match_stmt.Into(&stats.matched_basic_block_count);
-    }
-  }
+    // Get basic block counts
+    {
+      SqliteStatement bb_stmt = db.StatementOrThrow(
+          "SELECT file, COUNT(*) FROM basicblock GROUP BY file ORDER BY file");
 
-  // Get instruction counts
-  {
-    SqliteStatement inst_stmt = db.StatementOrThrow(
-        "SELECT file, COUNT(*) FROM instruction GROUP BY file ORDER BY file");
-
-    int file_idx = 1;
-    for (inst_stmt.ExecuteOrThrow(); inst_stmt.GotData();
-         inst_stmt.ExecuteOrThrow()) {
-      int file = 0, count = 0;
-      inst_stmt.Into(&file).Into(&count);
-      if (file_idx == 1) {
-        stats.primary_instruction_count = count;
-      } else {
-        stats.secondary_instruction_count = count;
+      int file_idx = 1;
+      for (bb_stmt.ExecuteOrThrow(); bb_stmt.GotData();
+           bb_stmt.ExecuteOrThrow()) {
+        int file = 0, count = 0;
+        bb_stmt.Into(&file).Into(&count);
+        if (file_idx == 1) {
+          stats.primary_basic_block_count = count;
+        } else {
+          stats.secondary_basic_block_count = count;
+        }
+        file_idx++;
       }
-      file_idx++;
     }
-  }
 
-  // Get matched instruction count
-  {
-    SqliteStatement inst_match_stmt =
-        db.StatementOrThrow("SELECT COUNT(*) FROM instructionmatch");
-    inst_match_stmt.ExecuteOrThrow();
-    if (inst_match_stmt.GotData()) {
-      inst_match_stmt.Into(&stats.matched_instruction_count);
+    // Get matched basic block count
+    {
+      SqliteStatement bb_match_stmt =
+          db.StatementOrThrow("SELECT COUNT(*) FROM basicblockmatch");
+      bb_match_stmt.ExecuteOrThrow();
+      if (bb_match_stmt.GotData()) {
+        bb_match_stmt.Into(&stats.matched_basic_block_count);
+      }
     }
+
+    // Get instruction counts
+    {
+      SqliteStatement inst_stmt = db.StatementOrThrow(
+          "SELECT file, COUNT(*) FROM instruction GROUP BY file ORDER BY file");
+
+      int file_idx = 1;
+      for (inst_stmt.ExecuteOrThrow(); inst_stmt.GotData();
+           inst_stmt.ExecuteOrThrow()) {
+        int file = 0, count = 0;
+        inst_stmt.Into(&file).Into(&count);
+        if (file_idx == 1) {
+          stats.primary_instruction_count = count;
+        } else {
+          stats.secondary_instruction_count = count;
+        }
+        file_idx++;
+      }
+    }
+
+    // Get matched instruction count
+    {
+      SqliteStatement inst_match_stmt =
+          db.StatementOrThrow("SELECT COUNT(*) FROM instructionmatch");
+      inst_match_stmt.ExecuteOrThrow();
+      if (inst_match_stmt.GotData()) {
+        inst_match_stmt.Into(&stats.matched_instruction_count);
+      }
+    }
+  } catch (...) {
+    // Return zeros on error
   }
 
   return stats;
