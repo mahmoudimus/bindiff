@@ -1,19 +1,32 @@
-version: '3.8'
-
 services:
   idapro-tests:
-    # Use the same IDA Pro image as ida-sigmaker
-    image: ghcr.io/mahmoudimus/ida-sigmaker/idapro-tests:latest
+    image: ghcr.io/mahmoudimus/idapro-linux:idapro-tests@sha256:6acc4756c48d3eecfbb85904361365e6f138844f784a93827597074d3d451ab2
+    entrypoint: ["python3"]
+    working_dir: /work
     environment:
-      - TZ=America/Los_Angeles
+      - CONTAINER_TIMEZONE=America/Los_Angeles
       - DISPLAY=host.docker.internal:0
-      - QT_QPA_PLATFORM=offscreen
-      - QT_DEBUG_PLUGINS=0
-      - LIBGL_ALWAYS_SOFTWARE=1
+      - QT_X11_NO_MITSHM=1
+      - LIBGL_ALWAYS_INDIRECT=1
+      - IDAUSR=/root/.idapro
+      - PYTHONPATH=/app/ida/python:/work
+      - PYTHONWARNINGS=ignore
     volumes:
       - ./bindiff:/root/.idapro/plugins/bindiff:ro
-      - ./tests:/work:ro
-      - ./out:/out
+      - ./:/work
+
+  idapro-tests-9.2:
+    image: ghcr.io/mahmoudimus/idapro-linux:idapro-tests-9.2@sha256:541790eb853f2a46ff713476c596cb3164d719bc33d5d3c4027687d5d9e2f1ba
+    entrypoint: ["python3"]
     working_dir: /work
-    entrypoint: ["/usr/bin/python3"]
-    command: ["-m", "unittest", "discover", ".", "-p", "test_*.py", "-v"]
+    environment:
+      - CONTAINER_TIMEZONE=America/Los_Angeles
+      - DISPLAY=host.docker.internal:0
+      - QT_X11_NO_MITSHM=1
+      - LIBGL_ALWAYS_INDIRECT=1
+      - IDAUSR=/root/.idapro
+      - PYTHONPATH=/app/ida/python:/work
+      - PYTHONWARNINGS=ignore
+    volumes:
+      - ./bindiff:/root/.idapro/plugins/bindiff:ro
+      - ./:/work

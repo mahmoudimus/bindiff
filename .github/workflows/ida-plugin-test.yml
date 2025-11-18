@@ -17,6 +17,9 @@ jobs:
   test-ida-plugin:
     name: Test IDA Plugin in Docker
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: ["idapro-tests", "idapro-tests-9.2"]
 
     steps:
       - name: Checkout code
@@ -65,11 +68,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run IDA plugin tests
-        continue-on-error: true
+      - name: Cache Docker image
+        id: docker-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/docker-cache
+          key: docker-image-${{ runner.os }}-${{ matrix.service }}-${{ hashFiles('bindiff/python/docker-compose.yml') }}
+          restore-keys: |
+            docker-image-${{ runner.os }}-${{ matrix.service }}-
+
+      - name: Load cached Docker image if cache exists
+        if: steps.docker-cache.outputs.cache-hit == 'true'
+        run: |
+          echo "Loading Docker image from cache..."
+          docker load -i /tmp/docker-cache/${{ matrix.service }}.tar || echo "No cached image to load."
+
+      - name: Run IDA plugin tests (${{ matrix.service }})
         run: |
           cd bindiff/python
           # Debug: show what we're mounting
+          echo "=== Testing with ${{ matrix.service }} ==="
           echo "=== Built plugin files ==="
           ls -la bindiff/
           echo ""
@@ -77,8 +95,9 @@ jobs:
           ls -la tests/
           echo ""
           # Run the tests with better error output
-          docker compose run --rm --entrypoint bash idapro-tests -c "
+          docker compose run --rm --entrypoint bash ${{ matrix.service }} -c "
             echo '=== Inside container ==='
+            echo 'IDA Service: ${{ matrix.service }}'
             echo 'Plugin directory:'
             ls -la /root/.idapro/plugins/bindiff/ || echo 'Plugin dir not found!'
             echo ''
@@ -94,4 +113,14 @@ jobs:
             echo ''
             echo 'Running tests:'
             python -m unittest discover tests -p 'test_*.py' -v
-          " || true
+          "
+
+      - name: Save Docker image to cache
+        if: steps.docker-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "Caching docker image for next run..."
+          mkdir -p /tmp/docker-cache
+          # Get the SHA256 digest for the service image
+          IMAGE_DIGEST=$(docker compose config | grep "image:" | grep "${{ matrix.service }}" | awk '{print $2}')
+          echo "Saving image: $IMAGE_DIGEST"
+          docker save "$IMAGE_DIGEST" -o /tmp/docker-cache/${{ matrix.service }}.tar || echo "Failed to save image."
