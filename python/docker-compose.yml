@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  idapro-tests:
+    # Use the same IDA Pro image as ida-sigmaker
+    image: ghcr.io/mahmoudimus/ida-sigmaker/idapro-tests:latest
+    environment:
+      - TZ=America/Los_Angeles
+      - DISPLAY=host.docker.internal:0
+      - QT_QPA_PLATFORM=offscreen
+      - QT_DEBUG_PLUGINS=0
+      - LIBGL_ALWAYS_SOFTWARE=1
+    volumes:
+      - ./bindiff:/root/.idapro/plugins/bindiff:ro
+      - ./tests:/work:ro
+      - ./out:/out
+    working_dir: /work
+    entrypoint: ["/usr/bin/python3"]
+    command: ["-m", "unittest", "discover", ".", "-p", "test_*.py", "-v"]
