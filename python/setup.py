@@ -69,6 +69,19 @@ include_dirs = [
     str(BINEXPORT_DIR / "stubs"),
 ]
 
+# Add CMake-fetched dependencies
+deps_dir = BUILD_DIR / "_deps"
+if deps_dir.exists():
+    # Add absl headers
+    absl_src = deps_dir / "absl-src"
+    if absl_src.exists():
+        include_dirs.append(str(absl_src))
+
+    # Add protobuf headers
+    protobuf_src = deps_dir / "protobuf-src" / "src"
+    if protobuf_src.exists():
+        include_dirs.append(str(protobuf_src))
+
 # Add Boost include directory if available
 boost_include = os.environ.get("BOOST_INCLUDE_DIR")
 if boost_include:
