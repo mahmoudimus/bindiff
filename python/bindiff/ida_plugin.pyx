@@ -36,26 +36,34 @@ class PortCommentsKind(IntEnum):
 class Match:
     """Represents a function match."""
 
-    def __init__(self, desc: 'ida_types.MatchDescription'):
-        self.similarity = desc.similarity
-        self.confidence = desc.confidence
-        self.change_type = ChangeType(desc.change_type)
-        self.address_primary = desc.address_primary
-        self.name_primary = desc.name_primary.decode('utf-8')
-        self.address_secondary = desc.address_secondary
-        self.name_secondary = desc.name_secondary.decode('utf-8')
-        self.comments_ported = desc.comments_ported
-        self.algorithm_name = desc.algorithm_name.decode('utf-8')
-        self.basic_block_count = desc.basic_block_count
-        self.basic_block_count_primary = desc.basic_block_count_primary
-        self.basic_block_count_secondary = desc.basic_block_count_secondary
-        self.edge_count = desc.edge_count
-        self.edge_count_primary = desc.edge_count_primary
-        self.edge_count_secondary = desc.edge_count_secondary
-        self.instruction_count = desc.instruction_count
-        self.instruction_count_primary = desc.instruction_count_primary
-        self.instruction_count_secondary = desc.instruction_count_secondary
-        self.manual = desc.manual
+    def __init__(self, similarity: float, confidence: float, change_type: int,
+                 address_primary: int, name_primary: str,
+                 address_secondary: int, name_secondary: str,
+                 comments_ported: bool, algorithm_name: str,
+                 basic_block_count: int, basic_block_count_primary: int,
+                 basic_block_count_secondary: int, edge_count: int,
+                 edge_count_primary: int, edge_count_secondary: int,
+                 instruction_count: int, instruction_count_primary: int,
+                 instruction_count_secondary: int, manual: bool):
+        self.similarity = similarity
+        self.confidence = confidence
+        self.change_type = ChangeType(change_type)
+        self.address_primary = address_primary
+        self.name_primary = name_primary
+        self.address_secondary = address_secondary
+        self.name_secondary = name_secondary
+        self.comments_ported = comments_ported
+        self.algorithm_name = algorithm_name
+        self.basic_block_count = basic_block_count
+        self.basic_block_count_primary = basic_block_count_primary
+        self.basic_block_count_secondary = basic_block_count_secondary
+        self.edge_count = edge_count
+        self.edge_count_primary = edge_count_primary
+        self.edge_count_secondary = edge_count_secondary
+        self.instruction_count = instruction_count
+        self.instruction_count_primary = instruction_count_primary
+        self.instruction_count_secondary = instruction_count_secondary
+        self.manual = manual
 
     def __repr__(self):
         return (f"Match(0x{self.address_primary:x} '{self.name_primary}' -> "
@@ -66,12 +74,13 @@ class Match:
 class UnmatchedFunction:
     """Represents an unmatched function."""
 
-    def __init__(self, desc: 'ida_types.UnmatchedDescription'):
-        self.address = desc.address
-        self.name = desc.name.decode('utf-8')
-        self.basic_block_count = desc.basic_block_count
-        self.instruction_count = desc.instruction_count
-        self.edge_count = desc.edge_count
+    def __init__(self, address: int, name: str, basic_block_count: int,
+                 instruction_count: int, edge_count: int):
+        self.address = address
+        self.name = name
+        self.basic_block_count = basic_block_count
+        self.instruction_count = instruction_count
+        self.edge_count = edge_count
 
     def __repr__(self):
         return (f"UnmatchedFunction(0x{self.address:x} '{self.name}', "
@@ -81,13 +90,10 @@ class UnmatchedFunction:
 class Statistic:
     """Represents a diff statistic."""
 
-    def __init__(self, desc: 'ida_types.StatisticDescription'):
-        self.name = desc.name.decode('utf-8')
-        self.is_count = desc.is_count
-        if desc.is_count:
-            self.value = desc.count
-        else:
-            self.value = desc.value
+    def __init__(self, name: str, is_count: bool, value: float):
+        self.name = name
+        self.is_count = is_count
+        self.value = value
 
     def __repr__(self):
         if self.is_count:
@@ -149,7 +155,27 @@ cdef class BindiffResults:
             Match object
         """
         cdef ida_types.MatchDescription desc = self._results.get().GetMatchDescription(index)
-        return Match(desc)
+        return Match(
+            similarity=desc.similarity,
+            confidence=desc.confidence,
+            change_type=desc.change_type,
+            address_primary=desc.address_primary,
+            name_primary=desc.name_primary.decode('utf-8'),
+            address_secondary=desc.address_secondary,
+            name_secondary=desc.name_secondary.decode('utf-8'),
+            comments_ported=desc.comments_ported,
+            algorithm_name=desc.algorithm_name.decode('utf-8'),
+            basic_block_count=desc.basic_block_count,
+            basic_block_count_primary=desc.basic_block_count_primary,
+            basic_block_count_secondary=desc.basic_block_count_secondary,
+            edge_count=desc.edge_count,
+            edge_count_primary=desc.edge_count_primary,
+            edge_count_secondary=desc.edge_count_secondary,
+            instruction_count=desc.instruction_count,
+            instruction_count_primary=desc.instruction_count_primary,
+            instruction_count_secondary=desc.instruction_count_secondary,
+            manual=desc.manual
+        )
 
     def get_matches(self) -> List[Match]:
         """Get all matches."""
@@ -187,13 +213,25 @@ cdef class BindiffResults:
         """Get unmatched primary function by index."""
         cdef ida_types.UnmatchedDescription desc = (
             self._results.get().GetUnmatchedDescriptionPrimary(index))
-        return UnmatchedFunction(desc)
+        return UnmatchedFunction(
+            address=desc.address,
+            name=desc.name.decode('utf-8'),
+            basic_block_count=desc.basic_block_count,
+            instruction_count=desc.instruction_count,
+            edge_count=desc.edge_count
+        )
 
     def get_unmatched_secondary(self, index: int) -> UnmatchedFunction:
         """Get unmatched secondary function by index."""
         cdef ida_types.UnmatchedDescription desc = (
             self._results.get().GetUnmatchedDescriptionSecondary(index))
-        return UnmatchedFunction(desc)
+        return UnmatchedFunction(
+            address=desc.address,
+            name=desc.name.decode('utf-8'),
+            basic_block_count=desc.basic_block_count,
+            instruction_count=desc.instruction_count,
+            edge_count=desc.edge_count
+        )
 
     def get_all_unmatched_primary(self) -> List[UnmatchedFunction]:
         """Get all unmatched primary functions."""
@@ -214,7 +252,13 @@ cdef class BindiffResults:
         """Get statistic by index."""
         cdef ida_types.StatisticDescription desc = (
             self._results.get().GetStatisticDescription(index))
-        return Statistic(desc)
+        # Extract the value - use count if is_count is true, otherwise use value
+        cdef double value = desc.count if desc.is_count else desc.value
+        return Statistic(
+            name=desc.name.decode('utf-8'),
+            is_count=desc.is_count,
+            value=value
+        )
 
     def get_all_statistics(self) -> List[Statistic]:
         """Get all statistics."""
