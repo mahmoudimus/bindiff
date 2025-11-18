@@ -197,7 +197,7 @@ def load_matches(database_path: str) -> List[MatchInfo]:
         ...     print(f"{match.primary_name} -> {match.secondary_name}")
     """
     cdef string c_path = database_path.encode('utf-8')
-    cdef vector[core_types.MatchInfo] c_matches = core_types.LoadMatches(c_path)
+    cdef vector[core_types.CMatchInfo] c_matches = core_types.LoadMatches(c_path)
 
     matches = []
     for c_match in c_matches:
@@ -233,7 +233,7 @@ def load_statistics(database_path: str) -> StatisticsInfo:
         >>> print(f"Function similarity: {stats.function_similarity:.2%}")
     """
     cdef string c_path = database_path.encode('utf-8')
-    cdef core_types.StatisticsInfo c_stats = core_types.LoadStatistics(c_path)
+    cdef core_types.CStatisticsInfo c_stats = core_types.LoadStatistics(c_path)
 
     return StatisticsInfo(
         primary_function_count=c_stats.primary_function_count,

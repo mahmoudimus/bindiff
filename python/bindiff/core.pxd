@@ -11,8 +11,8 @@ from libcpp.vector cimport vector
 from libcpp.pair cimport pair
 
 cdef extern from "python/bindiff/wrappers.h" namespace "security::bindiff":
-    # C++ structs (internal use only - not exposed to Python)
-    ctypedef struct MatchInfo:
+    # C++ structs (using different names to avoid conflicts with Python classes)
+    ctypedef struct CMatchInfo "security::bindiff::MatchInfo":
         unsigned long long primary_address
         unsigned long long secondary_address
         string primary_name
@@ -24,7 +24,7 @@ cdef extern from "python/bindiff/wrappers.h" namespace "security::bindiff":
         bool is_manual
         int flags
 
-    ctypedef struct StatisticsInfo:
+    ctypedef struct CStatisticsInfo "security::bindiff::StatisticsInfo":
         int primary_function_count
         int secondary_function_count
         int matched_function_count
@@ -43,5 +43,5 @@ cdef extern from "python/bindiff/wrappers.h" namespace "security::bindiff":
                     const string& secondary_path,
                     const string& output_database) except +
 
-    vector[MatchInfo] LoadMatches(const string& database_path) except +
-    StatisticsInfo LoadStatistics(const string& database_path) except +
+    vector[CMatchInfo] LoadMatches(const string& database_path) except +
+    CStatisticsInfo LoadStatistics(const string& database_path) except +
