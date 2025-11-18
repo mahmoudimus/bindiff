@@ -62,32 +62,35 @@ if not BINEXPORT_DIR.exists():
     sys.exit(1)
 
 # Include directories
+# Note: wrappers.h only uses standard library, but wrappers.cc needs BinDiff headers
 include_dirs = [
-    str(BINDIFF_ROOT),
-    str(BUILD_DIR / "src_include"),
-    str(BUILD_DIR / "gen_include"),
-    str(BINEXPORT_DIR / "stubs"),
+    str(BINDIFF_ROOT),                                             # For python/bindiff/wrappers.h
+    str(BUILD_DIR / "src_include"),                                # For third_party/zynamics/bindiff/*
+    str(BUILD_DIR / "gen_include"),                                # For generated BinDiff headers
+    str(BUILD_DIR / "_deps" / "binexport-build" / "src_include"),  # For third_party/zynamics/binexport/*.h
+    str(BUILD_DIR / "_deps" / "binexport-build" / "gen_include"),  # For third_party/zynamics/binexport/*.pb.h
+    str(BINEXPORT_DIR / "stubs"),                                  # For BinExport stubs
 ]
 
-# Add CMake-fetched dependencies
+# Add dependency headers from CMake _deps
 deps_dir = BUILD_DIR / "_deps"
 if deps_dir.exists():
-    # Add absl headers
+    # Add absl - required by BinDiff headers
     absl_src = deps_dir / "absl-src"
     if absl_src.exists():
         include_dirs.append(str(absl_src))
 
-    # Add protobuf headers
+    # Add protobuf - required by BinDiff headers
     protobuf_src = deps_dir / "protobuf-src" / "src"
     if protobuf_src.exists():
         include_dirs.append(str(protobuf_src))
 
-# Add Boost include directory if available
+# Add Boost - required by call_graph.h
 boost_include = os.environ.get("BOOST_INCLUDE_DIR")
 if boost_include:
     include_dirs.append(boost_include)
 else:
-    # Try to find Boost in common locations
+    # Try common Boost locations
     boost_locations = [
         BUILD_DIR / "_deps" / "boost-src",
         Path("/usr/include"),

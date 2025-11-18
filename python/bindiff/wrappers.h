@@ -16,41 +16,12 @@
 #define PYTHON_BINDIFF_WRAPPERS_H_
 
 #include <cstdint>
-#include <memory>
 #include <string>
 #include <vector>
 
-#include "third_party/zynamics/bindiff/call_graph.h"
-#include "third_party/zynamics/bindiff/flow_graph.h"
-#include "third_party/zynamics/bindiff/fixed_points.h"
-#include "third_party/zynamics/bindiff/match/context.h"
-
 namespace security::bindiff {
 
-// Forward declarations
-class Results;
-class CallGraph;
-class FlowGraph;
-
-// Simplified wrapper for function information
-struct FunctionInfo {
-  uint64_t address;
-  std::string name;
-  std::string demangled_name;
-  int basic_block_count;
-  int edge_count;
-  int instruction_count;
-  double md_index;
-};
-
-// Simplified wrapper for basic block information
-struct BasicBlockInfo {
-  uint64_t address;
-  int instruction_count;
-  double md_index;
-};
-
-// Simplified wrapper for match information
+// Simplified match information struct for Python bindings
 struct MatchInfo {
   uint64_t primary_address;
   uint64_t secondary_address;
@@ -87,80 +58,7 @@ struct StatisticsInfo {
   int matched_edge_count;
 };
 
-// CallGraph wrapper providing Python-friendly interface
-class CallGraphWrapper {
- public:
-  explicit CallGraphWrapper(CallGraph* graph);
-  ~CallGraphWrapper() = default;
-
-  // Basic information
-  std::string GetFilePath() const;
-  std::string GetExeFilename() const;
-  std::string GetExeHash() const;
-  int GetNumFunctions() const;
-
-  // Function access
-  std::vector<uint64_t> GetFunctionAddresses() const;
-  FunctionInfo GetFunctionInfo(uint64_t address) const;
-  bool HasFunction(uint64_t address) const;
-
-  // Statistics
-  int GetNumBasicBlocks() const;
-  int GetNumEdges() const;
-  int GetNumInstructions() const;
-
- private:
-  CallGraph* graph_;  // Non-owning pointer
-};
-
-// FlowGraph wrapper providing Python-friendly interface
-class FlowGraphWrapper {
- public:
-  explicit FlowGraphWrapper(FlowGraph* graph);
-  ~FlowGraphWrapper() = default;
-
-  // Basic information
-  uint64_t GetAddress() const;
-  std::string GetName(const CallGraph& call_graph) const;
-  int GetNumBasicBlocks() const;
-  int GetNumEdges() const;
-  int GetNumInstructions() const;
-
-  // Basic block access
-  std::vector<uint64_t> GetBasicBlockAddresses() const;
-  BasicBlockInfo GetBasicBlockInfo(uint64_t address) const;
-  bool HasBasicBlock(uint64_t address) const;
-
-  // Entry point
-  uint64_t GetEntryPointAddress() const;
-
- private:
-  FlowGraph* graph_;  // Non-owning pointer
-};
-
-// FixedPoint wrapper providing Python-friendly interface
-class FixedPointWrapper {
- public:
-  explicit FixedPointWrapper(const FixedPoint& fixed_point);
-  ~FixedPointWrapper() = default;
-
-  // Match information
-  uint64_t GetPrimaryAddress() const;
-  uint64_t GetSecondaryAddress() const;
-  double GetSimilarity() const;
-  double GetConfidence() const;
-  int GetAlgorithm() const;
-  int GetFlags() const;
-
-  // Basic block matches
-  int GetNumBasicBlockMatches() const;
-  std::vector<std::pair<uint64_t, uint64_t>> GetBasicBlockMatches() const;
-
- private:
-  const FixedPoint& fixed_point_;
-};
-
-// High-level diff function
+// High-level functions for Python bindings
 int DiffBinaries(const std::string& primary_path,
                  const std::string& secondary_path,
                  const std::string& output_database);

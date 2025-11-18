@@ -209,7 +209,7 @@ def load_matches(database_path: str) -> List[MatchInfo]:
             similarity=c_match.similarity,
             confidence=c_match.confidence,
             algorithm_id=c_match.algorithm_id,
-            algorithm_name=c_match.algorithm_name.decode('utf-8') if c_match.algorithm_name else "",
+            algorithm_name=c_match.algorithm_name.decode('utf-8'),
             is_manual=c_match.is_manual,
             flags=c_match.flags
         )
