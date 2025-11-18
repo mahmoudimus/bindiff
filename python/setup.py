@@ -203,6 +203,7 @@ if OSTYPE != "Windows":
         "absl_symbolize",
         "absl_debugging_internal",
         "absl_demangle_internal",
+        "absl_leak_check",
         "absl_vlog_config_internal",
     ])
 else:
