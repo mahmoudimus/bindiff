@@ -147,12 +147,65 @@ if OSTYPE != "Windows":
     libraries.extend([
         "binexport_shared",
         "sqlite",
+        # Protocol Buffers - required by BinExport
+        "protobuf",
+        "utf8_validity",
+        # Abseil libraries - required by bindiff_shared and protobuf
+        # Order matters: list dependencies after dependents
+        "absl_strings",
+        "absl_str_format_internal",
+        "absl_strings_internal",
+        "absl_string_view",
+        "absl_int128",
+        "absl_raw_hash_set",
+        "absl_hashtablez_sampler",
+        "absl_hash",
+        "absl_city",
+        "absl_status",
+        "absl_statusor",
+        "absl_cord",
+        "absl_cordz_info",
+        "absl_cord_internal",
+        "absl_cordz_handle",
+        "absl_cordz_functions",
+        "absl_exponential_biased",
+        "absl_synchronization",
+        "absl_graphcycles_internal",
+        "absl_kernel_timeout_internal",
+        "absl_time",
+        "absl_civil_time",
+        "absl_time_zone",
+        "absl_malloc_internal",
+        "absl_base",
+        "absl_spinlock_wait",
+        "absl_throw_delegate",
+        "absl_raw_logging_internal",
+        "absl_log_severity",
+        "absl_log_internal_check_op",
+        "absl_log_internal_conditions",
+        "absl_log_internal_message",
+        "absl_log_internal_log_sink_set",
+        "absl_log_internal_globals",
+        "absl_log_internal_proto",
+        "absl_log_internal_format",
+        "absl_log_internal_nullguard",
+        "absl_log_sink",
+        "absl_log_globals",
+        "absl_log_initialize",
+        "absl_strerror",
+        "absl_examine_stack",
+        "absl_stacktrace",
+        "absl_symbolize",
+        "absl_debugging_internal",
+        "absl_demangle_internal",
+        "absl_vlog_config_internal",
     ])
 else:
     # Windows uses different naming
     libraries.extend([
         "binexport_shared",
         "sqlite3",
+        # TODO: Add absl libraries for Windows
     ])
 
 
