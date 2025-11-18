@@ -230,6 +230,10 @@ extensions = [
             "bindiff/core.pyx",
             "bindiff/wrappers.cc",
         ],
+        depends=[
+            "bindiff/core.pxd",
+            "bindiff/wrappers.h",
+        ],
         include_dirs=include_dirs,
         library_dirs=library_dirs,
         libraries=libraries,
@@ -242,6 +246,10 @@ extensions = [
         sources=[
             "bindiff/ida_plugin.pyx",
             "bindiff/results_wrapper.cc",
+        ],
+        depends=[
+            "bindiff/ida_plugin.pxd",
+            "bindiff/results_wrapper.h",
         ],
         include_dirs=include_dirs,
         library_dirs=library_dirs,
