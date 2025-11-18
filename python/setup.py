@@ -169,6 +169,11 @@ if OSTYPE != "Windows":
         "absl_cordz_handle",
         "absl_cordz_functions",
         "absl_exponential_biased",
+        # CRC libraries - used by cord and other abseil components
+        "absl_crc_cord_state",
+        "absl_crc32c",
+        "absl_crc_internal",
+        "absl_crc_cpu_detect",
         "absl_synchronization",
         "absl_graphcycles_internal",
         "absl_kernel_timeout_internal",
