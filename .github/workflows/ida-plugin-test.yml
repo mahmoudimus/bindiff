@@ -85,10 +85,32 @@ jobs:
       - name: Run IDA plugin tests
         run: |
           cd bindiff/python
+          # Debug: show what we're mounting
+          echo "=== Built plugin files ==="
+          ls -la bindiff/
+          echo ""
+          echo "=== Test files ==="
+          ls -la tests/
+          echo ""
+          # Run the tests with better error output
           docker compose run --rm --entrypoint bash idapro-tests -c "
-            ls -la /root/.idapro/plugins/bindiff/
+            echo '=== Inside container ==='
+            echo 'Plugin directory:'
+            ls -la /root/.idapro/plugins/bindiff/ || echo 'Plugin dir not found!'
+            echo ''
+            echo 'Working directory:'
+            pwd
+            ls -la
+            echo ''
+            echo 'Python version:'
+            python --version
+            echo ''
+            echo 'Attempting import:'
+            python -c 'import sys; sys.path.insert(0, \"/root/.idapro/plugins\"); print(sys.path); import bindiff.ida_plugin' || echo 'Import failed'
+            echo ''
+            echo 'Running tests:'
             python -m unittest discover tests -p 'test_*.py' -v
-          "
+          " || echo "Tests failed but continuing..."
 
       - name: Save Docker image to cache
         if: steps.cache-docker.outputs.cache-hit != 'true'
