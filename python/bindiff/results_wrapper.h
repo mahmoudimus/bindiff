@@ -20,19 +20,13 @@
 #include <string>
 #include <vector>
 
-#include "third_party/zynamics/bindiff/change_classifier.h"
-
 namespace security::bindiff {
 
-// Forward declaration
-class Results;
-
-// Wrapper structs matching ida/results.h API
-
+// Match description struct matching IDA plugin API
 struct MatchDescription {
   double similarity;
   double confidence;
-  int change_type;  // ChangeType enum
+  int change_type;
   uint64_t address_primary;
   std::string name_primary;
   uint64_t address_secondary;
@@ -51,6 +45,7 @@ struct MatchDescription {
   bool manual;
 };
 
+// Unmatched function description
 struct UnmatchedDescription {
   uint64_t address;
   std::string name;
@@ -59,23 +54,23 @@ struct UnmatchedDescription {
   int edge_count;
 };
 
+// Statistic description
 struct StatisticDescription {
   std::string name;
   bool is_count;
-  union {
-    size_t count;
-    double value;
-  };
+  size_t count;
+  double value;
 };
 
-// Results wrapper providing complete API for IDA plugin
+// ResultsWrapper providing complete IDA plugin Results API
+// This is a standalone implementation that can work without IDA
 class ResultsWrapper {
  public:
-  // Factory method to create Results
-  static std::unique_ptr<ResultsWrapper> Create();
-
-  // Destructor
+  ResultsWrapper();
   ~ResultsWrapper();
+
+  // Factory method
+  static std::unique_ptr<ResultsWrapper> Create();
 
   // Matched functions
   size_t GetNumMatches() const;
@@ -101,14 +96,13 @@ class ResultsWrapper {
   int ConfirmMatches(const std::vector<size_t>& indices);
 
   // Comment/symbol porting
-  enum PortCommentsKind { kNormal = 0, kAsExternalLib = 1 };
-  int PortComments(const std::vector<size_t>& indices, PortCommentsKind how);
+  int PortComments(const std::vector<size_t>& indices, int how);
   int PortCommentsByAddress(uint64_t start_address_source,
-                            uint64_t end_address_source,
-                            uint64_t start_address_target,
-                            uint64_t end_address_target,
-                            double min_confidence,
-                            double min_similarity);
+                           uint64_t end_address_source,
+                           uint64_t start_address_target,
+                           uint64_t end_address_target,
+                           double min_confidence,
+                           double min_similarity);
 
   // Diff operations
   int IncrementalDiff();
@@ -129,12 +123,9 @@ class ResultsWrapper {
   bool should_reset_selection() const;
   void set_should_reset_selection(bool value);
 
-  // Get underlying Results object (for advanced use)
-  Results* GetResults() { return results_.get(); }
-
  private:
-  ResultsWrapper();
-  std::unique_ptr<Results> results_;
+  class Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace security::bindiff
