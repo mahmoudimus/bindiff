@@ -2,7 +2,9 @@ name: IDA Plugin Tests
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - 'claude/**'
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
     branches: [main]
