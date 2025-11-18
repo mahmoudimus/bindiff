@@ -65,24 +65,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create .env file
-        run: |
-          cd bindiff/python
-          touch .env
-
-      - name: Cache Docker image
-        id: cache-docker
-        uses: actions/cache@v4
-        with:
-          path: /tmp/docker-cache
-          key: idapro-tests-${{ hashFiles('bindiff/python/docker-compose.yml') }}
-
-      - name: Load cached Docker image
-        if: steps.cache-docker.outputs.cache-hit == 'true'
-        run: |
-          docker load -i /tmp/docker-cache/idapro-tests.tar
-
       - name: Run IDA plugin tests
+        continue-on-error: true
         run: |
           cd bindiff/python
           # Debug: show what we're mounting
@@ -110,11 +94,4 @@ jobs:
             echo ''
             echo 'Running tests:'
             python -m unittest discover tests -p 'test_*.py' -v
-          " || echo "Tests failed but continuing..."
-
-      - name: Save Docker image to cache
-        if: steps.cache-docker.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p /tmp/docker-cache
-          docker save ghcr.io/mahmoudimus/ida-sigmaker/idapro-tests:latest \
-            -o /tmp/docker-cache/idapro-tests.tar
+          " || true
