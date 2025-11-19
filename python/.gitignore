@@ -1,0 +1,19 @@
+# Cython generated files
+*.cpp
+*.c
+*.so
+*.pyd
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

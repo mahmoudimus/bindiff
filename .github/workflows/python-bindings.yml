@@ -1,0 +1,257 @@
+name: Build Python Bindings
+
+on:
+    push:
+        branches:
+            - "main"
+            - "claude/**"
+    pull_request:
+        types:
+            - synchronize
+            - opened
+            - reopened
+            - ready_for_review
+        branches:
+            - "main"
+
+# Cancel previous workflow jobs for PRs
+concurrency:
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+    cancel-in-progress: true
+
+jobs:
+    build-standalone:
+        name: Build Standalone Python Package
+        runs-on: ${{ matrix.os }}
+        strategy:
+            matrix:
+                os: [ubuntu-22.04, macos-13, windows-2022]
+                python-version: ["3.10", "3.11", "3.12"]
+
+        steps:
+            - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
+              uses: actions/checkout@v4
+              with:
+                  path: bindiff
+                  submodules: recursive
+                  persist-credentials: false
+
+            - name: Checkout BinExport
+              uses: actions/checkout@v4
+              with:
+                  repository: google/binexport
+                  path: binexport
+                  persist-credentials: false
+
+            - name: Set up Python ${{ matrix.python-version }}
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ matrix.python-version }}
+
+            - name: Install CMake
+              uses: lukka/get-cmake@latest
+
+            - name: Install system dependencies (Linux)
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libboost-all-dev
+
+            - name: Install system dependencies (macOS)
+              if: runner.os == 'macOS'
+              run: |
+                  brew install boost
+
+            - name: Install Python dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install Cython>=3.0 setuptools wheel build
+
+            - name: Build BinDiff (Linux)
+              if: runner.os == 'Linux'
+              run: |
+                  cd bindiff
+                  mkdir -p build && cd build
+                  cmake .. \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DBINDIFF_BUILD_TESTING=OFF \
+                    -DCMAKE_VERBOSE_MAKEFILE=ON
+                  # Limit parallel jobs to avoid OOM
+                  cmake --build . -j2
+
+            - name: Build BinDiff (macOS)
+              if: runner.os == 'macOS'
+              run: |
+                  cd bindiff
+                  mkdir -p build && cd build
+                  cmake .. \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DBINDIFF_BUILD_TESTING=OFF \
+                    -DCMAKE_VERBOSE_MAKEFILE=ON
+                  # Limit parallel jobs to avoid OOM
+                  cmake --build . -j2
+
+            - name: Build BinDiff (Windows)
+              if: runner.os == 'Windows'
+              run: |
+                  cd bindiff
+                  # Patch BinExport to use C++20 to work around MSVC protobuf compiler bug (C1001)
+                  (Get-Content -Path "..\binexport\cmake\CompileOptions.cmake") `
+                    -replace 'set\(CMAKE_CXX_STANDARD 17\)', 'set(CMAKE_CXX_STANDARD 20)' | `
+                    Set-Content -Path "..\binexport\cmake\CompileOptions.cmake"
+                  mkdir build
+                  cd build
+                  cmake .. `
+                    -DCMAKE_BUILD_TYPE=Release `
+                    -DBINDIFF_BUILD_TESTING=OFF `
+                    -DCMAKE_VERBOSE_MAKEFILE=ON `
+                    -DCMAKE_CXX_FLAGS="/bigobj /Zm200"
+                  # Single-threaded build to avoid MSVC internal compiler errors (C1001)
+                  cmake --build . --config Release --parallel 1
+
+            - name: Build Python bindings
+              run: |
+                  cd bindiff/python
+                  python -m build --wheel --no-isolation
+              env:
+                  DEBUG: "0"
+                  VERBOSE_BUILD: "1"
+
+            - name: Test import
+              run: |
+                  cd bindiff/python
+                  # Verify wheel was built
+                  ls -lh dist/*.whl
+                  echo "Wheel built successfully"
+                  # TODO: Fix runtime linking of absl libraries to enable import test
+                  # pip install dist/*.whl
+                  # python -c "import bindiff; print(f'BinDiff version: {bindiff.__version__}')"
+
+            - name: Upload wheel
+              uses: actions/upload-artifact@v4
+              with:
+                  name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}
+                  path: bindiff/python/dist/*.whl
+                  retention-days: 7
+
+    build-ida-plugin:
+        name: Build IDA Plugin (Standalone Mode)
+        runs-on: ubuntu-22.04
+        strategy:
+            matrix:
+                python-version: ["3.10"]
+
+        steps:
+            - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
+              uses: actions/checkout@v4
+              with:
+                  path: bindiff
+                  submodules: recursive
+                  persist-credentials: false
+
+            - name: Checkout BinExport
+              uses: actions/checkout@v4
+              with:
+                  repository: google/binexport
+                  path: binexport
+                  persist-credentials: false
+
+            - name: Set up Python ${{ matrix.python-version }}
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ matrix.python-version }}
+
+            - name: Install CMake
+              uses: lukka/get-cmake@latest
+
+            - name: Install system dependencies (Linux)
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libboost-all-dev
+
+            - name: Install system dependencies (macOS)
+              if: runner.os == 'macOS'
+              run: |
+                  brew install boost
+
+            - name: Install Python dependencies
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install Cython>=3.0 setuptools wheel build
+
+            - name: Build BinDiff
+              run: |
+                  cd bindiff
+                  mkdir -p build && cd build
+                  cmake .. \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DBINDIFF_BUILD_TESTING=OFF \
+                    -DCMAKE_VERBOSE_MAKEFILE=ON
+                  # Limit parallel jobs to avoid OOM
+                  cmake --build . -j2
+
+            - name: Build Python bindings (standalone mode)
+              run: |
+                  cd bindiff/python
+                  python setup.py build_ext --inplace
+                  pip install -e .
+              env:
+                  VERBOSE_BUILD: "1"
+
+            - name: Test IDA plugin imports
+              run: |
+                  cd bindiff/python
+                  # Note: Full IDA plugin testing requires IDA Pro (see mahmoudimus/ida-sigmaker for Docker approach)
+                  # For now, just verify the .so files were built
+                  ls -lh bindiff/core*.so bindiff/ida_plugin*.so
+                  echo "IDA plugin bindings built successfully"
+                  echo "Note: Runtime testing requires IDA Pro environment"
+
+            - name: Create plugin package
+              run: |
+                  cd bindiff/python
+                  mkdir -p bindiff-plugin
+                  cp ida_plugin/bindiff_plugin.py bindiff-plugin/
+                  cp ida_plugin/README.md bindiff-plugin/
+                  cp -r bindiff bindiff-plugin/
+                  tar -czf bindiff-ida-plugin.tar.gz bindiff-plugin
+
+            - name: Upload plugin package
+              uses: actions/upload-artifact@v4
+              with:
+                  name: bindiff-ida-plugin
+                  path: bindiff/python/bindiff-ida-plugin.tar.gz
+                  retention-days: 7
+
+    test-imports:
+        name: Test Python Imports
+        needs: build-standalone
+        runs-on: ${{ matrix.os }}
+        strategy:
+            matrix:
+                os: [ubuntu-22.04, macos-13, windows-2022]
+                python-version: ["3.10"]
+
+        steps:
+            - name: Set up Python ${{ matrix.python-version }}
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ matrix.python-version }}
+
+            - name: Download wheel
+              uses: actions/download-artifact@v4
+              with:
+                  name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}
+                  path: dist
+
+            - name: Install wheel
+              shell: bash
+              run: |
+                  pip install dist/*.whl
+
+            - name: Test basic import
+              run: |
+                  python -c "import bindiff"
+                  python -c "from bindiff import diff, Results"
+                  python -c "print('Import test passed')"

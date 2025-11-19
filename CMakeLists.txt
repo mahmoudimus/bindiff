@@ -387,3 +387,6 @@ endif(IdaSdk_FOUND)
 # Utility programs. For now, only contains a tool to modify the BinDiff
 # config from the installer/package scripts.
 add_subdirectory(tools)
+
+# Python bindings
+add_subdirectory(python)
