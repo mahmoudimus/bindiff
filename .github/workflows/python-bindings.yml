@@ -101,6 +101,7 @@ jobs:
                     -DCMAKE_BUILD_TYPE=Release `
                     -DBINDIFF_BUILD_TESTING=OFF `
                     -DCMAKE_VERBOSE_MAKEFILE=ON `
+                    -DCMAKE_CXX_STANDARD=20 `
                     -DCMAKE_CXX_FLAGS="/bigobj /Zm200"
                   # Single-threaded build to avoid MSVC internal compiler errors (C1001)
                   cmake --build . --config Release --parallel 1
