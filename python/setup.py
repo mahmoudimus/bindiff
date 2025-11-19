@@ -192,6 +192,7 @@ if OSTYPE != "Windows":
         "absl_log_internal_log_sink_set",
         "absl_log_internal_globals",
         "absl_log_internal_proto",
+        "absl_log_internal_structured_proto",
         "absl_log_internal_format",
         "absl_log_internal_nullguard",
         "absl_log_sink",
@@ -203,6 +204,9 @@ if OSTYPE != "Windows":
         "absl_symbolize",
         "absl_debugging_internal",
         "absl_demangle_internal",
+        "absl_demangle_rust",
+        "absl_decode_rust_punycode",
+        "absl_utf8_for_code_point",
         "absl_leak_check",
         "absl_vlog_config_internal",
     ])
