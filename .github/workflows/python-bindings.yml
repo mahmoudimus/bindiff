@@ -95,13 +95,16 @@ jobs:
               if: runner.os == 'Windows'
               run: |
                   cd bindiff
+                  # Patch BinExport to use C++20 to work around MSVC protobuf compiler bug (C1001)
+                  (Get-Content -Path "..\binexport\cmake\CompileOptions.cmake") `
+                    -replace 'set\(CMAKE_CXX_STANDARD 17\)', 'set(CMAKE_CXX_STANDARD 20)' | `
+                    Set-Content -Path "..\binexport\cmake\CompileOptions.cmake"
                   mkdir build
                   cd build
                   cmake .. `
                     -DCMAKE_BUILD_TYPE=Release `
                     -DBINDIFF_BUILD_TESTING=OFF `
                     -DCMAKE_VERBOSE_MAKEFILE=ON `
-                    -DCMAKE_CXX_STANDARD=20 `
                     -DCMAKE_CXX_FLAGS="/bigobj /Zm200"
                   # Single-threaded build to avoid MSVC internal compiler errors (C1001)
                   cmake --build . --config Release --parallel 1
