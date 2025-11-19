@@ -105,7 +105,11 @@ else:
 library_dirs = [str(BUILD_DIR)]
 
 # Find all directories containing static libraries
+# Note: Skip symlinks to avoid infinite loops on Windows (CMake creates circular symlinks)
 for subdir in BUILD_DIR.rglob("*"):
+    # Skip symlinks to avoid circular reference issues
+    if subdir.is_symlink():
+        continue
     if subdir.is_dir():
         # Check if this directory contains any libraries
         has_libs = any(subdir.glob("*.a")) or any(subdir.glob("*.lib"))
