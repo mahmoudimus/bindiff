@@ -43,13 +43,13 @@ class TestBinDiffIDAPlugin(unittest.TestCase):
     def test_create_results_wrapper(self):
         """Test that ResultsWrapper can be instantiated."""
         from bindiff.ida_plugin import BindiffResults
-        
-        # Create a results wrapper instance
-        results = BindiffResults()
+
+        # Create a results wrapper instance using the factory method
+        results = BindiffResults.create()
         self.assertIsNotNone(results)
-        
+
         # Should start with no matches
-        self.assertEqual(results.num_matches(), 0)
+        self.assertEqual(results.num_matches, 0)
 
     def test_port_comments_enum(self):
         """Test that PortCommentsKind enum values are accessible."""
