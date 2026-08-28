@@ -201,10 +201,16 @@ if os.environ.get("VERBOSE_BUILD"):
 # Passing full paths also removes the need to get -l ordering right.
 def _static_libraries(build_dir):
     """Every static archive CMake built, minus the test-only ones."""
-    # gtest/gmock/benchmark are only linked by test binaries, and their *_main
-    # variants define main(). The LTO probe directories hold throwaway objects.
+    # Test-only and build-tool archives have no business in a runtime
+    # extension: the *_main variants define main(), bindiff_test_util and
+    # binexport_testing are gtest fixtures, and protoc is the protobuf
+    # *compiler*, not its runtime (libprotobuf and upb are). --start-group only
+    # pulls objects that resolve something, so these contributed nothing
+    # anyway, but naming them keeps an accident from linking one in.
+    # The LTO probe directories hold throwaway objects.
     skip_names = ("gtest", "gtest_main", "gmock", "gmock_main",
-                  "benchmark", "benchmark_main")
+                  "benchmark", "benchmark_main",
+                  "bindiff_test_util", "binexport_testing", "protoc")
     skip_path_parts = ("CMakeFiles", "_CMakeLTOTest-C", "_CMakeLTOTest-CXX")
 
     found = {}
