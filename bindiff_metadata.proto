@@ -1,0 +1,147 @@
+// Copyright 2011-2024 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Per-function metadata that BinExport does not carry.
+//
+// This is a *sidecar*: "foo.BinExport" is accompanied by "foo.BinExport.meta",
+// and binexport2.proto is left exactly as upstream ships it. Extending
+// BinExport's own schema would mean carrying a fork of google/binexport and
+// rebasing it forever; a separate file costs nothing and can be absent, in
+// which case BinDiff behaves exactly as it does today.
+//
+// Why this exists: BinExport is disassembly-level. It has no types, no stack
+// frame layout, and nothing from the decompiler. Those are real signals that
+// the matching engine currently cannot see. The sidecar is produced during the
+// export pass, which is the one moment IDA and Hex-Rays are already open.
+//
+// The design constraint is extensibility. Binary-similarity work does not
+// agree on a feature shape: prototypes and frame layouts are exact keys,
+// asm2vec/jTrans/PalmTree produce dense embeddings compared by cosine
+// distance, and fuzzy-hash approaches compare by edit distance. A schema with
+// a fixed field per feature would need changing for each new one, and every
+// change would ripple into the C++ loader. So features are *named and
+// self-describing*: a new one is a new name, and the matching steps that
+// consume them are generic over that name. Adding jTrans later should be a
+// config entry, not a schema change.
+
+syntax = "proto3";
+
+package security.bindiff;
+
+option java_package = "com.google.security.zynamics.bindiff";
+option java_outer_classname = "BinDiffMetadataProtos";
+
+// How two values of a feature are compared. This lives with the data rather
+// than in the consumer because only the producer knows what it emitted.
+enum FeatureMetric {
+  // Unset. A consumer must skip the feature rather than guess.
+  FEATURE_METRIC_UNSPECIFIED = 0;
+
+  // Equal or not. Buckets by value and pairs buckets that hold exactly one
+  // candidate per side -- the way every existing BinDiff step works.
+  FEATURE_METRIC_EXACT = 1;
+
+  // Cosine distance over `values`. For learned embeddings (asm2vec, jTrans,
+  // PalmTree). Needs a nearest-neighbour search and a threshold, neither of
+  // which BinDiff has today.
+  FEATURE_METRIC_COSINE = 2;
+
+  // Euclidean distance over `values`.
+  FEATURE_METRIC_EUCLIDEAN = 3;
+
+  // Normalised Hamming distance over `packed`. For fuzzy hashes.
+  FEATURE_METRIC_HAMMING = 4;
+}
+
+// One named feature of one function.
+message Feature {
+  // Producer-qualified, and versioned: "prototype/v1", "asm2vec/v1". The
+  // version matters because a retrained model produces vectors that are not
+  // comparable with the old ones, and silently mixing them would degrade
+  // matching in a way that is very hard to notice.
+  string name = 1;
+
+  FeatureMetric metric = 2;
+
+  oneof value {
+    // FEATURE_METRIC_EXACT. A hash rather than the source text so the C++ side
+    // can bucket on an integer; `attributes` carries the readable form.
+    uint64 key = 3;
+
+    // FEATURE_METRIC_COSINE / _EUCLIDEAN.
+    FloatVector vector = 4;
+
+    // FEATURE_METRIC_HAMMING.
+    bytes packed = 5;
+  }
+
+  // How much to trust this feature, 0..1. A default the config can override,
+  // so a producer can say "this one is weak" without every consumer needing
+  // to know the feature.
+  double confidence = 6;
+}
+
+message FloatVector {
+  repeated float values = 1 [packed = true];
+}
+
+message FunctionMetadata {
+  // Entry point address, the key everything else joins on. Matches
+  // BinExport's flow graph entry point and the address1/address2 columns of a
+  // .BinDiff.
+  uint64 address = 1;
+
+  repeated Feature features = 2;
+
+  // Human-readable values for the UI and for debugging: "prototype" ->
+  // "int __fastcall(char *, unsigned int)". Never used for matching -- the
+  // hashed form in `features` is. Kept because a similarity score nobody can
+  // explain is not much use when triaging a diff.
+  map<string, string> attributes = 3;
+}
+
+message BinaryMetadata {
+  // SHA-256 of the .BinExport this describes. A sidecar must be refused if it
+  // does not match: silently pairing metadata with the wrong export would
+  // produce confident, wrong matches, which is worse than no metadata.
+  string binexport_sha256 = 1;
+
+  // Tool and version that produced this, e.g. "bindiff-metadata/0.1". Lets a
+  // consumer reject or regenerate a stale sidecar.
+  string producer = 2;
+
+  // Which features this file actually contains, so a consumer can decide what
+  // it can do without walking every function first.
+  repeated FeatureDescriptor descriptors = 3;
+
+  repeated FunctionMetadata functions = 4;
+
+  // Set when the producer could not run some extractor -- no decompiler, a
+  // timeout, an unsupported architecture. Present so a half-populated sidecar
+  // is recognisable as such rather than looking like a binary with genuinely
+  // few features.
+  repeated string warnings = 5;
+}
+
+// Describes a feature present in this file. The dimension and metric let a
+// consumer refuse to compare vectors that are not comparable.
+message FeatureDescriptor {
+  string name = 1;
+  FeatureMetric metric = 2;
+  // For vector features: length of `values`. Zero for the others.
+  uint32 dimension = 3;
+  // How many functions carry it. A feature present on three functions out of
+  // four thousand is not worth running a matching pass for.
+  uint32 count = 4;
+}
