@@ -1,0 +1,44 @@
+{
+    "$schema": "https://hcli.docs.hex-rays.com/schemas/ida-plugin.json",
+    "IDAMetadataDescriptorVersion": 1,
+    "plugin": {
+        "name": "BinDiff",
+        "entryPoint": "python/ida_plugin/bindiff_plugin.py",
+        "version": "8.0.0",
+        "idaVersions": [
+            "9.0",
+            "9.0sp1",
+            "9.1",
+            "9.2",
+            "9.3",
+            "9.4"
+        ],
+        "description": "Structural comparison of executable objects. Identifies identical and similar functions across two disassemblies, ports names, comments and local names between them, and highlights what changed between two builds of the same binary. This is the Python plugin, built on Cython bindings to the BinDiff core engine.",
+        "categories": [
+            "vulnerability-research-and-exploit-development",
+            "malware-analysis",
+            "decompilation",
+            "collaboration-and-productivity"
+        ],
+        "keywords": [
+            "binary-diffing",
+            "patch-analysis",
+            "binary-similarity",
+            "function-matching",
+            "symbol-porting",
+            "malware-analysis",
+            "vulnerability-research"
+        ],
+        "license": "Apache-2.0",
+        "urls": {
+            "repository": "https://github.com/mahmoudimus/bindiff",
+            "homepage": "https://github.com/google/bindiff"
+        },
+        "authors": [
+            {
+                "name": "Mahmoud Abdelkader",
+                "email": "m{_no-spam_}@mahmoudimus.com"
+            }
+        ]
+    }
+}

@@ -1,0 +1,6 @@
+# Debian packages installed into the idapro test images before the C++ tree
+# is built. The images ship gcc/g++/make/git but no build generator.
+# The CI docker cache key hashes this file, so editing it rebuilds the
+# derived image.
+cmake
+ninja-build

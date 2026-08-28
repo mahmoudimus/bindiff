@@ -36,18 +36,34 @@ set(BINDIFF_SOURCE_DIR "${PROJECT_SOURCE_DIR}" CACHE INTERNAL "" FORCE)
 set(BINDIFF_BINEXPORT_DIR "${PROJECT_SOURCE_DIR}/../binexport" CACHE
     PATH "Path to a BinExport source tree")
 
-# Import targets shared with BinExport
-set(BINEXPORT_ENABLE_BINARYNINJA OFF CACHE INTERNAL "" FORCE)
-add_subdirectory("${BINDIFF_BINEXPORT_DIR}" "_deps/binexport-build" EXCLUDE_FROM_ALL)
-
 # CMake settings
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 list(APPEND CMAKE_MODULE_PATH "${BINDIFF_SOURCE_DIR}/cmake"
                               "${BINDIFF_BINEXPORT_DIR}/cmake")
 
+# BinDiffOptions must run before BinExport is added: it forces
+# BINEXPORT_BUILD_TESTING, which is what makes BinExport request GoogleTest and
+# ask Abseil for its testing targets (absl::status_matchers among them). Setting
+# it afterwards has no effect on the already-processed subdirectory, so a clean
+# configure with -DBUILD_TESTING=ON failed to find those targets and only
+# succeeded on a second configure, once the FORCEd cache entry was already there.
+include(BinDiffOptions)
+
+# Import targets shared with BinExport
+set(BINEXPORT_ENABLE_BINARYNINJA OFF CACHE INTERNAL "" FORCE)
+# BinExport fetches GoogleTest itself and sets ABSL_USE_EXTERNAL_GOOGLETEST, but
+# Abseil's ABSL_FIND_GOOGLETEST defaults to ON, which sends it down a
+# find_package(GTest REQUIRED) path looking for an *installed* GoogleTest rather
+# than aliasing the targets that were just built. Configuring with tests enabled
+# therefore fails on any machine without a system GoogleTest -- and silently
+# links a second, unrelated copy on machines that have one. Turning the lookup
+# off selects Abseil's documented "the top-level project builds GoogleTest"
+# branch, which is what BinExport actually does.
+set(ABSL_FIND_GOOGLETEST OFF CACHE BOOL "" FORCE)
+add_subdirectory("${BINDIFF_BINEXPORT_DIR}" "_deps/binexport-build" EXCLUDE_FROM_ALL)
+
 # BinDiff CMake modules, order matters
 include(CompileOptions)
-include(BinDiffOptions)
 include(BinDiffDeps)
 
 set(bindiff_BINEXPORT_RELEASE 12)

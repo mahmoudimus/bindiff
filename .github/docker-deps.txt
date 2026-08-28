@@ -1,0 +1,8 @@
+# Python packages installed into the IDA venv before tests run. These build
+# and exercise the Cython extension, which must be compiled against IDA's own
+# interpreter -- a wheel built elsewhere will not import.
+# The CI docker cache key hashes this file.
+Cython
+setuptools
+wheel
+pytest

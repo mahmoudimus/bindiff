@@ -1,0 +1,201 @@
+name: bindiff tests
+
+on:
+    push:
+        branches:
+            - "main"
+            - "fork-next"
+    pull_request:
+        types:
+            - synchronize
+            - opened
+            - reopened
+            - ready_for_review
+        branches:
+            - "main"
+            - "fork-next"
+    workflow_dispatch:
+
+# cancel previous workflow runs for the same branch/PR
+concurrency:
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    hcli-lint:
+        runs-on: ubuntu-24.04
+        steps:
+            - name: Checkout plugin source
+              uses: actions/checkout@v5
+              with:
+                  persist-credentials: false
+
+            - name: Validate HCLI plugin archive
+              run: |
+                  curl -LsSf --retry 3 \
+                    https://github.com/HexRaysSA/ida-hcli/releases/download/v0.18.5/hcli-linux-x86_64-0.18.5 \
+                    -o /tmp/hcli
+                  echo "b35eb351ce9e706709212604f937118643eee861bf4411bc4cac94217245b277  /tmp/hcli" \
+                    | sha256sum --check
+                  chmod 0755 /tmp/hcli
+                  curl -LsSf --retry 3 \
+                    https://raw.githubusercontent.com/HexRaysSA/plugin-repository/3cee9691f72459c5ac75b028c827016e93e58923/plugin-repository.json \
+                    -o /tmp/plugin-repository-v1.json
+                  /tmp/hcli plugin --repo /tmp/plugin-repository-v1.json lint .
+
+    # The C++ engine and its end-to-end groundtruth fixtures. This does not need
+    # IDA, so it runs directly on the runner rather than in the IDA image.
+    cpp-tests:
+        runs-on: ${{ matrix.runs-on }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - runs-on: ubuntu-24.04
+                    - runs-on: ubuntu-24.04-arm
+        steps:
+            - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
+              uses: actions/checkout@v5
+              with:
+                  path: bindiff
+                  persist-credentials: false
+
+            # BinExport is a source dependency, not a package: BinDiff
+            # add_subdirectory()s it and inherits Abseil, Protobuf, GoogleTest
+            # and the IDA SDK handling from it.
+            - name: Checkout BinExport
+              uses: actions/checkout@v5
+              with:
+                  repository: google/binexport
+                  path: binexport
+                  persist-credentials: false
+
+            - name: Enable mold linker
+              uses: rui314/setup-mold@v1
+
+            - name: Install CMake and Ninja
+              uses: lukka/get-cmake@latest
+              with:
+                  cmakeVersion: "~3.31.0"
+                  ninjaVersion: "~1.12.0"
+
+            # BUILD_TESTING is off by default (BinDiffOptions forces it off
+            # before include(CTest) can default it on), so no test target is
+            # compiled unless it is requested explicitly.
+            - name: Configure
+              run: |
+                  cmake -S bindiff -B build -G Ninja \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DBUILD_TESTING=ON \
+                    -DBINDIFF_BUILD_TESTING=ON \
+                    -DBINDIFF_BINEXPORT_DIR="${GITHUB_WORKSPACE}/binexport" \
+                    -DBINEXPORT_ENABLE_IDAPRO=OFF \
+                    -DBINEXPORT_ENABLE_BINARYNINJA=OFF
+
+            - name: Build
+              run: cmake --build build
+
+            # -R '^[A-Z]': BinDiff's own suites start with an uppercase letter.
+            # Everything else registered here belongs to Abseil.
+            - name: Test
+              working-directory: build
+              run: ctest --output-on-failure -R '^[A-Z]'
+
+    # The Cython extension and the IDA plugin. Both the extension and the C++
+    # libraries it links are built inside the IDA image: the extension is loaded
+    # by IDA's own interpreter, so it has to match that interpreter's ABI.
+    ida-tests:
+        # Per-leg concurrency so the 9.4 arm64 and 9.1 amd64 legs do not cancel
+        # each other.
+        concurrency:
+            group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ matrix.service }}
+            cancel-in-progress: true
+        runs-on: ${{ matrix.runs-on }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    # 9.4 is the primary leg: upstream BinExport pins the IDA
+                    # SDK to v9.4.0-release.
+                    - service: idapro-tests
+                      image: ghcr.io/mahmoudimus/idapro-9.4-speedups:x11
+                      runs-on: ubuntu-24.04-arm
+                    - service: idapro-tests-9.1
+                      image: ghcr.io/mahmoudimus/idapro-9.1-speedups:x11
+                      runs-on: ubuntu-24.04
+        permissions:
+            contents: read
+            packages: read
+        steps:
+            - name: "Checkout ${{ github.ref }} ( ${{ github.sha }} )"
+              uses: actions/checkout@v5
+              with:
+                  persist-credentials: false
+
+            - name: Checkout BinExport
+              uses: actions/checkout@v5
+              with:
+                  repository: google/binexport
+                  path: ../binexport
+                  persist-credentials: false
+
+            - name: Login to GHCR (same-account image, GITHUB_TOKEN)
+              uses: docker/login-action@v4
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            # The base images ship gcc but no build generator, and the IDA venv
+            # has neither Cython nor pytest. Install once, commit the result,
+            # and let the cache carry it so later runs skip the install.
+            - name: Cache toolchain image
+              id: docker-cache
+              uses: actions/cache@v4
+              with:
+                  path: /tmp/docker-cache
+                  key: docker-image-${{ runner.os }}-${{ runner.arch }}-${{ matrix.service }}-${{ hashFiles('.github/docker-apt-deps.txt', '.github/docker-deps.txt', 'docker-compose.yml') }}
+
+            - name: Load cached toolchain image
+              if: steps.docker-cache.outputs.cache-hit == 'true'
+              run: docker load -i /tmp/docker-cache/${{ matrix.service }}.tar
+
+            - name: Build toolchain image (cache miss)
+              if: steps.docker-cache.outputs.cache-hit != 'true'
+              run: |
+                  set -e
+                  # Expand the dependency lists on the host: the container has
+                  # no mount of the repo at this point, so the substitutions
+                  # must not reach the -c string.
+                  APT="$(sed 's/#.*//' .github/docker-apt-deps.txt | tr '\n' ' ')"
+                  PIP="$(sed 's/#.*//' .github/docker-deps.txt | tr '\n' ' ')"
+                  echo "apt: $APT"
+                  echo "pip: $PIP"
+                  docker run --name bindiff-deps --entrypoint bash \
+                      ${{ matrix.image }} \
+                      -c "apt-get update -qq && apt-get install -y -qq --no-install-recommends $APT && /app/ida/.venv/bin/python3 -m pip install --quiet --disable-pip-version-check $PIP && touch /tmp/.bindiff-deps-installed"
+                  docker commit bindiff-deps bindiff-tests:${{ matrix.service }}
+                  docker rm bindiff-deps
+
+            - name: Save toolchain image to cache
+              if: steps.docker-cache.outputs.cache-hit != 'true'
+              run: |
+                  mkdir -p /tmp/docker-cache
+                  docker save bindiff-tests:${{ matrix.service }} \
+                    -o /tmp/docker-cache/${{ matrix.service }}.tar
+
+            - name: Build engine and extension, then run tests
+              env:
+                  BINDIFF_TEST_IMAGE_94: bindiff-tests:idapro-tests
+                  BINDIFF_TEST_IMAGE_91: bindiff-tests:idapro-tests-9.1
+                  BINDIFF_BINEXPORT_DIR: ${{ github.workspace }}/../binexport
+              run: |
+                  timeout 2400s ./tools/scripts/run_tests_docker.sh all \
+                    --service ${{ matrix.service }}
+
+            - name: Dump container logs on failure
+              if: failure()
+              run: docker compose logs || true

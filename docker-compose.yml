@@ -1,0 +1,48 @@
+services:
+    # IDA 9.4 -- the primary leg. Upstream BinExport pins the IDA SDK to
+    # v9.4.0-release, so this is the version the native plugin is built against.
+    idapro-tests:
+        image: ${BINDIFF_TEST_IMAGE_94:-ghcr.io/mahmoudimus/idapro-9.4-speedups:x11}
+        entrypoint: ["/app/ida/.venv/bin/python3"]
+        working_dir: /work
+        mem_limit: ${BINDIFF_DOCKER_MEMORY:-8g}
+        environment:
+            - CONTAINER_TIMEZONE=America/Los_Angeles
+            - DISPLAY=host.docker.internal:0
+            - QT_X11_NO_MITSHM=1
+            - LIBGL_ALWAYS_INDIRECT=1
+            - IDAUSR=/root/.idapro
+            - IDA_PREFIX=/app/ida
+            - IDA_INSTALL_DIR=/app/ida
+            - LD_LIBRARY_PATH=/app/ida:/app/ida/plugins
+            - PYTHONPATH=/app/ida/python:/app/ida/python/lib-dynload:/work/python:/work
+            - PYTHONWARNINGS=ignore
+        volumes:
+            # The plugin: bindiff/ (the compiled extension package) and
+            # ida_plugin/bindiff_plugin.py (the entry point) both live here.
+            - ./python/:/root/.idapro/plugins:ro
+            - ./:/work
+
+    # IDA 9.1 -- compatibility leg.
+    idapro-tests-9.1:
+        image: ${BINDIFF_TEST_IMAGE_91:-ghcr.io/mahmoudimus/idapro-9.1-speedups:x11}
+        entrypoint: ["/app/ida/.venv/bin/python3"]
+        working_dir: /work
+        mem_limit: ${BINDIFF_DOCKER_MEMORY:-8g}
+        environment:
+            - CONTAINER_TIMEZONE=America/Los_Angeles
+            - DISPLAY=host.docker.internal:0
+            - QT_X11_NO_MITSHM=1
+            - LIBGL_ALWAYS_INDIRECT=1
+            - IDAUSR=/root/.idapro
+            - IDA_PREFIX=/app/ida
+            - IDA_INSTALL_DIR=/app/ida
+            - LD_LIBRARY_PATH=/app/ida:/app/ida/plugins
+            - PYTHONPATH=/app/ida/python:/app/ida/python/lib-dynload:/work/python:/work
+            - PYTHONWARNINGS=ignore
+        volumes:
+            - ./python/:/root/.idapro/plugins:ro
+            - ./:/work
+
+volumes:
+    idausr:
