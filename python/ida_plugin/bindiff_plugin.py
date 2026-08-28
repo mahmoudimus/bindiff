@@ -1,483 +1,250 @@
-"""
-BinDiff IDA Plugin (Python Implementation)
+"""BinDiff plugin for IDA Pro.
 
-This is a complete Python implementation of the BinDiff IDA plugin,
-replacing the C++ implementation with Python/Cython bindings.
+Replaces the four ida_kernwin.Choose lists with Qt views. The choosers could
+not filter, could not sort on anything but the column IDA happened to give
+them, and could not show two values side by side without string padding.
 
-The plugin provides:
-- Diff results viewing (matched/unmatched functions, statistics)
-- Manual match creation and deletion
-- Comment/symbol porting
-- Visual diff launching
-- Incremental diffing
+Structure:
 
-Installation:
-    1. Build the Cython extensions
-    2. Copy this file and the bindiff module to IDA's plugins directory
-    3. Restart IDA
+    ui_logic.py   pure view logic, no Qt and no IDA -- tested headless
+    panels.py     Qt views, defined only when IDA is importable
+    this file     plugin lifecycle, actions, and the IDA-side glue
 
-Usage:
-    - Press Ctrl+6 to open the main menu
-    - Or use Edit -> Plugins -> BinDiff
-
-Author: Generated for BinDiff
-License: Apache 2.0
+Data comes from bindiff.BinDiffDatabase, which reads and writes the .BinDiff
+sqlite file directly. The older bindiff.ida_plugin.BindiffResults path is not
+used: its write operations are unimplemented and its reads went through queries
+that did not match the schema.
 """
 
-import os
+from __future__ import annotations
+
 import sys
+from pathlib import Path
 from typing import Optional
 
-# IDA imports
-try:
+# IDA loads this file as a top-level script, not as a package member, so
+# `from ida_plugin.panels import ...` fails here with "no known parent package". Putting
+# the package directory's parent on sys.path and importing the siblings
+# absolutely works under both IDA and pytest (where this is imported as
+# ida_plugin.bindiff_plugin).
+_PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PACKAGE_ROOT not in sys.path:
+    sys.path.insert(0, _PACKAGE_ROOT)
+
+from bindiff.ida_env import qt_widgets_usable
+
+# The plugin's UI only makes sense in the GUI. Detection never probe-imports an
+# ida_* module: doing so before `idapro` in an idalib process is fatal on IDA
+# 9.1. See bindiff.ida_env.
+IDA_AVAILABLE = qt_widgets_usable()
+
+if IDA_AVAILABLE:
     import ida_idaapi
     import ida_kernwin
-    import ida_loader
     import ida_nalt
-    from ida_kernwin import Choose
-except ImportError:
-    print("Error: This plugin requires IDA Pro")
-    sys.exit(1)
 
-# BinDiff imports - will be available after building Cython extensions
-try:
-    from bindiff.ida_plugin import BindiffResults, Match, UnmatchedFunction, Statistic
-    from bindiff.ida_plugin import ChangeType, PortCommentsKind
-except ImportError as e:
-    print(f"Error: BinDiff Python module not found: {e}")
-    print("Please build the Cython extensions first")
-    BINDIFF_AVAILABLE = False
-else:
-    BINDIFF_AVAILABLE = True
-
-
-# Plugin version
-PLUGIN_VERSION = "8.0.0"
 PLUGIN_NAME = "BinDiff"
+PLUGIN_VERSION = "8.0.0"
 PLUGIN_HOTKEY = "Ctrl-6"
 PLUGIN_COMMENT = "Structural comparison of executable objects"
+PLUGIN_HELP = "Load a .BinDiff result file and browse the matches"
+
+ACTION_LOAD = "bindiff:load_results"
+ACTION_SHOW_MATCHES = "bindiff:show_matches"
+ACTION_SHOW_STATISTICS = "bindiff:show_statistics"
+ACTION_CONFIGURE = "bindiff:configure_algorithms"
 
 
-class MatchedFunctionsChooser(Choose):
-    """Chooser for displaying matched functions."""
+class BinDiffController:
+    """Plugin state and the operations the menu actions invoke.
 
-    def __init__(self, results: Optional['BindiffResults'] = None):
-        columns = [
-            ["Similarity", 5 | Choose.CHCOL_DEC],
-            ["Confidence", 5 | Choose.CHCOL_DEC],
-            ["Change", 15],
-            ["EA Primary", 10 | Choose.CHCOL_HEX],
-            ["Name Primary", 30],
-            ["EA Secondary", 10 | Choose.CHCOL_HEX],
-            ["Name Secondary", 30],
-            ["Comments", 10],
-            ["Algorithm", 25],
-            ["BB Match", 8 | Choose.CHCOL_DEC],
-            ["BB Primary", 8 | Choose.CHCOL_DEC],
-            ["BB Secondary", 8 | Choose.CHCOL_DEC],
-            ["Inst Match", 8 | Choose.CHCOL_DEC],
-            ["Inst Primary", 8 | Choose.CHCOL_DEC],
-            ["Inst Secondary", 8 | Choose.CHCOL_DEC],
-        ]
+    Deliberately free of Qt: it opens databases, keeps the current one, and
+    hands view objects to the panels. That makes the interesting half testable
+    without a display.
+    """
 
-        Choose.__init__(
-            self,
-            "Matched Functions",
-            columns,
-            flags=Choose.CH_MULTI | Choose.CH_RESTORE | Choose.CH_ATTRS,
-            width=None,
-            height=None,
-            embedded=False,
-        )
+    def __init__(self) -> None:
+        self._database = None
+        self._matched_form = None
 
-        self.results = results
-        self.items = []
-        self.icon = -1
-        self.refresh_items()
+    @property
+    def database(self):
+        return self._database
 
-    def refresh_items(self):
-        """Refresh the items list from results."""
-        self.items = []
-        if not self.results:
-            return
+    @property
+    def loaded(self) -> bool:
+        return self._database is not None
 
-        for i in range(self.results.num_matches):
-            match = self.results.get_match(i)
-            self.items.append([
-                f"{match.similarity:.2%}",
-                f"{match.confidence:.2%}",
-                match.change_type.name,
-                f"{match.address_primary:08X}",
-                match.name_primary,
-                f"{match.address_secondary:08X}",
-                match.name_secondary,
-                "Yes" if match.comments_ported else "No",
-                match.algorithm_name,
-                str(match.basic_block_count),
-                str(match.basic_block_count_primary),
-                str(match.basic_block_count_secondary),
-                str(match.instruction_count),
-                str(match.instruction_count_primary),
-                str(match.instruction_count_secondary),
-            ])
+    def open_database(self, path: str, read_only: bool = False):
+        """Opens a .BinDiff file, replacing whatever was open."""
+        from bindiff import BinDiffDatabase
 
-    def OnGetSize(self):
-        """Return number of items."""
-        return len(self.items)
+        if self._database is not None:
+            self._database.close()
+            self._database = None
+        self._database = BinDiffDatabase.open(path, read_only=read_only)
+        return self._database
 
-    def OnGetLine(self, n):
-        """Return line at index n."""
-        if n < len(self.items):
-            return self.items[n]
-        return []
+    def close(self) -> None:
+        if self._database is not None:
+            self._database.close()
+            self._database = None
 
-    def OnGetIcon(self, n):
-        """Return icon for line n."""
-        return self.icon
+    def match_rows(self):
+        from ida_plugin.ui_logic import rows_from_database
 
-    def OnSelectLine(self, n):
-        """Handle line selection (double-click or Enter)."""
-        if not self.results or n >= self.results.num_matches:
-            return
+        if self._database is None:
+            return []
+        return rows_from_database(self._database)
 
-        match = self.results.get_match(n)
-        # Jump to primary address in IDA
-        ida_kernwin.jumpto(match.address_primary)
+    def statistic_rows(self):
+        from ida_plugin.ui_logic import build_statistics
 
-    def OnDeleteLine(self, sel):
-        """Handle delete action."""
-        if not self.results:
-            return
-
-        # Delete selected matches
-        indices = list(sel)
-        if self.results.delete_matches(indices) == 0:
-            self.refresh_items()
-            return Choose.ALL_CHANGED
-        return 0
-
-    def OnRefresh(self, n):
-        """Handle refresh."""
-        self.refresh_items()
-        return [Choose.ALL_CHANGED] + [0] * len(self.items)
-
-    def show(self):
-        """Show the chooser."""
-        return self.Show(modal=False) >= 0
+        if self._database is None:
+            return []
+        return build_statistics(self._database.files(),
+                                self._database.num_matches())
 
 
-class UnmatchedFunctionsChooserPrimary(Choose):
-    """Chooser for displaying unmatched functions in primary binary."""
+if IDA_AVAILABLE:
 
-    def __init__(self, results: Optional['BindiffResults'] = None):
-        columns = [
-            ["EA", 10 | Choose.CHCOL_HEX],
-            ["Name", 40],
-            ["Basic Blocks", 10 | Choose.CHCOL_DEC],
-            ["Instructions", 10 | Choose.CHCOL_DEC],
-            ["Edges", 10 | Choose.CHCOL_DEC],
-        ]
+    def _ask_for_database() -> Optional[str]:
+        path = ida_kernwin.ask_file(False, "*.BinDiff",
+                                    "Select BinDiff result file")
+        if not path:
+            return None
+        if not Path(path).is_file():
+            ida_kernwin.warning(f"No such file: {path}")
+            return None
+        return path
 
-        Choose.__init__(
-            self,
-            "Unmatched Functions (Primary)",
-            columns,
-            flags=Choose.CH_MULTI | Choose.CH_RESTORE,
-            width=None,
-            height=None,
-            embedded=False,
-        )
+    def _jump_to(address: int) -> None:
+        ida_kernwin.jumpto(address)
 
-        self.results = results
-        self.items = []
-        self.icon = -1
-        self.refresh_items()
+    class _Action(ida_kernwin.action_handler_t):
+        """Wraps a plain callable so each action is not its own class."""
 
-    def refresh_items(self):
-        """Refresh the items list from results."""
-        self.items = []
-        if not self.results:
-            return
+        def __init__(self, callback, enabled=None) -> None:
+            super().__init__()
+            self._callback = callback
+            self._enabled = enabled
 
-        for i in range(self.results.num_unmatched_primary):
-            func = self.results.get_unmatched_primary(i)
-            self.items.append([
-                f"{func.address:08X}",
-                func.name,
-                str(func.basic_block_count),
-                str(func.instruction_count),
-                str(func.edge_count),
-            ])
+        def activate(self, ctx) -> int:
+            self._callback()
+            return 1
 
-    def OnGetSize(self):
-        """Return number of items."""
-        return len(self.items)
+        def update(self, ctx) -> int:
+            if self._enabled is not None and not self._enabled():
+                return ida_kernwin.AST_DISABLE_ALWAYS
+            return ida_kernwin.AST_ENABLE_ALWAYS
 
-    def OnGetLine(self, n):
-        """Return line at index n."""
-        if n < len(self.items):
-            return self.items[n]
-        return []
+    class BinDiffPlugin(ida_idaapi.plugin_t):
+        flags = ida_idaapi.PLUGIN_PROC | ida_idaapi.PLUGIN_FIX
+        comment = PLUGIN_COMMENT
+        help = PLUGIN_HELP
+        wanted_name = PLUGIN_NAME
+        wanted_hotkey = PLUGIN_HOTKEY
 
-    def OnGetIcon(self, n):
-        """Return icon for line n."""
-        return self.icon
+        def __init__(self) -> None:
+            super().__init__()
+            self.controller = BinDiffController()
+            self._registered: list[str] = []
 
-    def OnSelectLine(self, n):
-        """Handle line selection."""
-        if not self.results or n >= self.results.num_unmatched_primary:
-            return
+        # -- lifecycle ------------------------------------------------------
 
-        func = self.results.get_unmatched_primary(n)
-        ida_kernwin.jumpto(func.address)
+        def init(self):
+            self._register_actions()
+            return ida_idaapi.PLUGIN_KEEP
 
-    def OnRefresh(self, n):
-        """Handle refresh."""
-        self.refresh_items()
-        return [Choose.ALL_CHANGED] + [0] * len(self.items)
+        def term(self) -> None:
+            for name in self._registered:
+                ida_kernwin.unregister_action(name)
+            self._registered.clear()
+            self.controller.close()
 
-    def show(self):
-        """Show the chooser."""
-        return self.Show(modal=False) >= 0
+        def run(self, arg) -> bool:
+            self._load_results()
+            return True
 
+        # -- actions --------------------------------------------------------
 
-class UnmatchedFunctionsChooserSecondary(Choose):
-    """Chooser for displaying unmatched functions in secondary binary."""
+        def _register_actions(self) -> None:
+            specs = (
+                (ACTION_LOAD, "Load BinDiff results...",
+                 self._load_results, None),
+                (ACTION_SHOW_MATCHES, "Show matched functions",
+                 self._show_matches, lambda: self.controller.loaded),
+                (ACTION_SHOW_STATISTICS, "Show statistics",
+                 self._show_statistics, lambda: self.controller.loaded),
+                (ACTION_CONFIGURE, "Matching algorithms...",
+                 self._configure_algorithms, None),
+            )
+            for name, label, callback, enabled in specs:
+                if ida_kernwin.register_action(ida_kernwin.action_desc_t(
+                        name, label, _Action(callback, enabled))):
+                    self._registered.append(name)
+                    ida_kernwin.attach_action_to_menu(
+                        f"Edit/Plugins/{PLUGIN_NAME}/", name,
+                        ida_kernwin.SETMENU_APP)
 
-    def __init__(self, results: Optional['BindiffResults'] = None):
-        columns = [
-            ["EA", 10 | Choose.CHCOL_HEX],
-            ["Name", 40],
-            ["Basic Blocks", 10 | Choose.CHCOL_DEC],
-            ["Instructions", 10 | Choose.CHCOL_DEC],
-            ["Edges", 10 | Choose.CHCOL_DEC],
-        ]
+        def _load_results(self) -> None:
+            path = _ask_for_database()
+            if path is None:
+                return
+            try:
+                self.controller.open_database(path)
+            except Exception as exc:
+                ida_kernwin.warning(f"Could not open {path}:\n{exc}")
+                return
+            ida_kernwin.msg(
+                f"[{PLUGIN_NAME}] loaded {path} "
+                f"({self.controller.database.num_matches()} matches)\n")
+            self._show_matches()
 
-        Choose.__init__(
-            self,
-            "Unmatched Functions (Secondary)",
-            columns,
-            flags=Choose.CH_MULTI | Choose.CH_RESTORE,
-            width=None,
-            height=None,
-            embedded=False,
-        )
+        def _show_matches(self) -> None:
+            if not self._require_results():
+                return
+            from ida_plugin.panels import MatchedFunctionsForm
 
-        self.results = results
-        self.items = []
-        self.icon = -1
-        self.refresh_items()
-
-    def refresh_items(self):
-        """Refresh the items list from results."""
-        self.items = []
-        if not self.results:
-            return
-
-        for i in range(self.results.num_unmatched_secondary):
-            func = self.results.get_unmatched_secondary(i)
-            self.items.append([
-                f"{func.address:08X}",
-                func.name,
-                str(func.basic_block_count),
-                str(func.instruction_count),
-                str(func.edge_count),
-            ])
-
-    def OnGetSize(self):
-        """Return number of items."""
-        return len(self.items)
-
-    def OnGetLine(self, n):
-        """Return line at index n."""
-        if n < len(self.items):
-            return self.items[n]
-        return []
-
-    def OnGetIcon(self, n):
-        """Return icon for line n."""
-        return self.icon
-
-    def OnSelectLine(self, n):
-        """Handle line selection."""
-        if not self.results or n >= self.results.num_unmatched_secondary:
-            return
-
-        func = self.results.get_unmatched_secondary(n)
-        # For secondary, we can't jump directly, just show info
-        ida_kernwin.msg(f"Secondary function: {func.name} at 0x{func.address:X}\n")
-
-    def OnRefresh(self, n):
-        """Handle refresh."""
-        self.refresh_items()
-        return [Choose.ALL_CHANGED] + [0] * len(self.items)
-
-    def show(self):
-        """Show the chooser."""
-        return self.Show(modal=False) >= 0
-
-
-class StatisticsChooser(Choose):
-    """Chooser for displaying diff statistics."""
-
-    def __init__(self, results: Optional['BindiffResults'] = None):
-        columns = [
-            ["Statistic", 40],
-            ["Value", 15],
-        ]
-
-        Choose.__init__(
-            self,
-            "BinDiff Statistics",
-            columns,
-            flags=Choose.CH_RESTORE,
-            width=None,
-            height=None,
-            embedded=False,
-        )
-
-        self.results = results
-        self.items = []
-        self.icon = -1
-        self.refresh_items()
-
-    def refresh_items(self):
-        """Refresh the items list from results."""
-        self.items = []
-        if not self.results:
-            return
-
-        for i in range(self.results.num_statistics):
-            stat = self.results.get_statistic(i)
-            if stat.is_count:
-                value_str = str(int(stat.value))
+            if self.controller._matched_form is None:
+                self.controller._matched_form = MatchedFunctionsForm(
+                    self.controller.match_rows(), on_jump=_jump_to)
+                self.controller._matched_form.Show()
             else:
-                value_str = f"{stat.value:.4f}"
-            self.items.append([stat.name, value_str])
+                self.controller._matched_form.set_rows(
+                    self.controller.match_rows())
+                self.controller._matched_form.Show()
 
-    def OnGetSize(self):
-        """Return number of items."""
-        return len(self.items)
+        def _show_statistics(self) -> None:
+            if not self._require_results():
+                return
+            from ida_plugin.panels import StatisticsDialog
 
-    def OnGetLine(self, n):
-        """Return line at index n."""
-        if n < len(self.items):
-            return self.items[n]
-        return []
+            StatisticsDialog(self.controller.statistic_rows()).exec_()
 
-    def OnGetIcon(self, n):
-        """Return icon for line n."""
-        return self.icon
+        def _configure_algorithms(self) -> None:
+            import bindiff
 
-    def OnRefresh(self, n):
-        """Handle refresh."""
-        self.refresh_items()
-        return [Choose.ALL_CHANGED] + [0] * len(self.items)
+            from ida_plugin.panels import AlgorithmConfigDialog
 
-    def show(self):
-        """Show the chooser."""
-        return self.Show(modal=False) >= 0
+            def apply(changes: dict) -> None:
+                bindiff.set_config(changes)
+                ida_kernwin.msg(
+                    f"[{PLUGIN_NAME}] matching configuration updated; "
+                    f"it applies to the next diff\n")
 
+            AlgorithmConfigDialog(bindiff.get_config(), apply).exec_()
 
-class BinDiffPlugin(ida_idaapi.plugin_t):
-    """BinDiff IDA Plugin main class."""
+        def _require_results(self) -> bool:
+            if self.controller.loaded:
+                return True
+            ida_kernwin.warning("Load a .BinDiff result file first.")
+            return False
 
-    flags = ida_idaapi.PLUGIN_KEEP | ida_idaapi.PLUGIN_MULTI
-    comment = PLUGIN_COMMENT
-    help = "BinDiff - Binary comparison tool"
-    wanted_name = PLUGIN_NAME
-    wanted_hotkey = PLUGIN_HOTKEY
+    def PLUGIN_ENTRY():
+        return BinDiffPlugin()
 
-    def __init__(self):
-        super(BinDiffPlugin, self).__init__()
-        self.results = None
-        self.matched_chooser = None
-        self.unmatched_primary_chooser = None
-        self.unmatched_secondary_chooser = None
-        self.statistics_chooser = None
+else:  # pragma: no cover - exercised only outside IDA
 
-    def init(self):
-        """Initialize the plugin."""
-        if not BINDIFF_AVAILABLE:
-            ida_kernwin.warning("BinDiff Python module not available. "
-                              "Please build the Cython extensions.")
-            return ida_idaapi.PLUGIN_SKIP
-
-        ida_kernwin.msg(f"{PLUGIN_NAME} {PLUGIN_VERSION} initialized\n")
-        return ida_idaapi.PLUGIN_KEEP
-
-    def run(self, arg):
-        """Run the plugin."""
-        # Show menu
-        choice = ida_kernwin.ask_yn(
-            ida_kernwin.ASKBTN_YES,
-            "Load BinDiff results?\n\n"
-            "YES - Load results from file\n"
-            "NO - Show current results\n"
-            "CANCEL - Exit"
-        )
-
-        if choice == ida_kernwin.ASKBTN_CANCEL:
-            return
-
-        if choice == ida_kernwin.ASKBTN_YES:
-            self.load_results()
-
-        if self.results:
-            self.show_results()
-
-    def term(self):
-        """Terminate the plugin."""
-        ida_kernwin.msg(f"{PLUGIN_NAME} terminated\n")
-
-    def load_results(self):
-        """Load BinDiff results from file."""
-        filename = ida_kernwin.ask_file(0, "*.BinDiff", "Load BinDiff results")
-        if not filename:
-            return
-
-        # Create results object
-        self.results = BindiffResults.create()
-        if not self.results:
-            ida_kernwin.warning("Failed to create results object")
-            return
-
-        # Load from file
-        if self.results.read_from_file(filename) != 0:
-            ida_kernwin.warning(f"Failed to load results from {filename}")
-            self.results = None
-            return
-
-        ida_kernwin.msg(f"Loaded results from {filename}\n")
-        ida_kernwin.msg(f"  Matches: {self.results.num_matches}\n")
-        ida_kernwin.msg(f"  Unmatched (primary): {self.results.num_unmatched_primary}\n")
-        ida_kernwin.msg(f"  Unmatched (secondary): {self.results.num_unmatched_secondary}\n")
-
-    def show_results(self):
-        """Show results in choosers."""
-        if not self.results:
-            ida_kernwin.warning("No results loaded")
-            return
-
-        # Show matched functions chooser
-        self.matched_chooser = MatchedFunctionsChooser(self.results)
-        self.matched_chooser.show()
-
-        # Ask to show more
-        if ida_kernwin.ask_yn(ida_kernwin.ASKBTN_YES,
-                             "Show unmatched functions?") == ida_kernwin.ASKBTN_YES:
-            self.unmatched_primary_chooser = UnmatchedFunctionsChooserPrimary(self.results)
-            self.unmatched_primary_chooser.show()
-
-            self.unmatched_secondary_chooser = UnmatchedFunctionsChooserSecondary(self.results)
-            self.unmatched_secondary_chooser.show()
-
-        if ida_kernwin.ask_yn(ida_kernwin.ASKBTN_YES,
-                             "Show statistics?") == ida_kernwin.ASKBTN_YES:
-            self.statistics_chooser = StatisticsChooser(self.results)
-            self.statistics_chooser.show()
-
-
-def PLUGIN_ENTRY():
-    """Plugin entry point for IDA."""
-    return BinDiffPlugin()
+    def PLUGIN_ENTRY():
+        raise RuntimeError("BinDiff plugin requires IDA Pro")
