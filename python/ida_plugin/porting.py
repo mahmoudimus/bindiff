@@ -176,6 +176,35 @@ def apply_comment_ports(ports: Sequence[CommentPort],
     return result
 
 
+def mark_as_library(addresses: Sequence[int]) -> PortResult:
+    """Flags functions as library code (FUNC_LIB).
+
+    The "import as external library" variant of porting: the names come from a
+    known library, so the primary functions are marked as library code and drop
+    out of the analyst's view the same way IDA's own library detection would
+    make them.
+    """
+    if not is_interactive():
+        raise RuntimeError("marking functions requires a running IDA database")
+    import ida_funcs
+
+    result = PortResult()
+    for address in addresses:
+        try:
+            function = ida_funcs.get_func(address)
+            if function is None:
+                result.skipped += 1
+                continue
+            function.flags |= ida_funcs.FUNC_LIB
+            if ida_funcs.update_func(function):
+                result.applied += 1
+            else:
+                result.failed += 1
+        except Exception:
+            result.failed += 1
+    return result
+
+
 def _ida_rename(address: int, name: str) -> bool:
     if not is_interactive():
         raise RuntimeError("renaming requires a running IDA database")

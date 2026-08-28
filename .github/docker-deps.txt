@@ -6,3 +6,5 @@ Cython
 setuptools
 wheel
 pytest
+# Reading .BinExport (and writing the metadata sidecar) from Python.
+protobuf

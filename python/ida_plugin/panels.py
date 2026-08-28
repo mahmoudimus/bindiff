@@ -15,6 +15,10 @@ from typing import Callable, List, Optional, Sequence
 
 from ida_plugin.ui_logic import (
     COLUMNS,
+    UNMATCHED_COLUMNS,
+    UnmatchedRow,
+    filter_unmatched,
+    sort_unmatched,
     MatchFilter,
     MatchRow,
     StatisticRow,
@@ -91,6 +95,30 @@ if IDA_AVAILABLE:
             self.on_activated: Optional[Callable[[MatchRow], None]] = None
             self.cellDoubleClicked.connect(self._on_double_clicked)
 
+            # Context menu entries are IDA actions, not Qt ones, so they stay
+            # in one place: registered once, reachable from both the plugin
+            # menu and here, and enabled/disabled by the same predicate.
+            self.context_actions: Sequence[str] = ()
+            try:
+                self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            except AttributeError:
+                self.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.customContextMenuRequested.connect(self._show_context_menu)
+
+        def _show_context_menu(self, position) -> None:
+            if not self.context_actions:
+                return
+            menu = QtWidgets.QMenu(self)
+            for name in self.context_actions:
+                if name is None:
+                    menu.addSeparator()
+                    continue
+                action = menu.addAction(name.split(":", 1)[-1].replace("_", " "))
+                action.setData(name)
+            chosen = menu.exec_(self.viewport().mapToGlobal(position))
+            if chosen is not None:
+                ida_kernwin.process_ui_action(chosen.data())
+
         def set_rows(self, rows: Sequence[MatchRow]) -> None:
             self._rows = sort_rows(rows, self._sort_column, self._sort_descending)
             self._repopulate()
@@ -140,6 +168,122 @@ if IDA_AVAILABLE:
                         font.setBold(True)
                         item.setFont(font)
                     self.setItem(index, column, item)
+
+
+    class UnmatchedTable(QtWidgets.QTableWidget):
+        """Functions on one side that no match refers to."""
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(0, len(UNMATCHED_COLUMNS), parent)
+            self.setHorizontalHeaderLabels(
+                [label for _, label in UNMATCHED_COLUMNS])
+            self.setEditTriggers(_no_edit_triggers())
+            self.setSelectionBehavior(_select_rows())
+            self.setSelectionMode(_extended_selection())
+            self.setAlternatingRowColors(True)
+            self.verticalHeader().setVisible(False)
+
+            header = self.horizontalHeader()
+            try:
+                header.setSectionResizeMode(
+                    QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            except AttributeError:
+                header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+            header.setSectionsClickable(True)
+            header.sectionClicked.connect(self._on_header_clicked)
+
+            self._rows: List[UnmatchedRow] = []
+            self._sort_column = "address"
+            self._sort_descending = False
+            self.on_activated: Optional[Callable[[UnmatchedRow], None]] = None
+            self.cellDoubleClicked.connect(self._on_double_clicked)
+
+        def set_rows(self, rows: Sequence[UnmatchedRow]) -> None:
+            self._rows = sort_unmatched(rows, self._sort_column,
+                                        self._sort_descending)
+            self.setRowCount(len(self._rows))
+            for index, row in enumerate(self._rows):
+                kind = "library" if row.is_library else (
+                    "named" if row.has_real_name else "unnamed")
+                for column, value in enumerate((row.address_text, row.name, kind)):
+                    self.setItem(index, column,
+                                 QtWidgets.QTableWidgetItem(value))
+
+        def selected_rows(self) -> List[UnmatchedRow]:
+            indexes = {index.row() for index in self.selectedIndexes()}
+            return [self._rows[i] for i in sorted(indexes) if i < len(self._rows)]
+
+        def _on_header_clicked(self, section: int) -> None:
+            column = UNMATCHED_COLUMNS[section][0]
+            if column == self._sort_column:
+                self._sort_descending = not self._sort_descending
+            else:
+                self._sort_column, self._sort_descending = column, False
+            self.set_rows(self._rows)
+
+        def _on_double_clicked(self, row: int, _column: int) -> None:
+            if self.on_activated and 0 <= row < len(self._rows):
+                self.on_activated(self._rows[row])
+
+    class UnmatchedFunctionsForm(ida_kernwin.PluginForm):
+        """Dockable list of unmatched functions for one side."""
+
+        def __init__(self, rows: Sequence[UnmatchedRow], side: str,
+                     on_jump: Optional[Callable[[int], None]] = None) -> None:
+            super().__init__()
+            self._all_rows = list(rows)
+            self._side = side
+            self._on_jump = on_jump
+            self._table: Optional[UnmatchedTable] = None
+            self._status: Optional[QtWidgets.QLabel] = None
+            self.parent = None
+
+        def OnCreate(self, form) -> None:
+            self.parent = self.FormToPyQtWidget(form)
+            layout = QtWidgets.QVBoxLayout(self.parent)
+
+            self._search = QtWidgets.QLineEdit()
+            self._search.setPlaceholderText("Filter by name or address...")
+            self._search.setClearButtonEnabled(True)
+            self._search.textChanged.connect(lambda _t: self._apply())
+
+            self._table = UnmatchedTable()
+            if self._on_jump is not None:
+                self._table.on_activated = lambda row: self._on_jump(row.address)
+            self._status = QtWidgets.QLabel()
+
+            layout.addWidget(self._search)
+            layout.addWidget(self._table, 1)
+            layout.addWidget(self._status)
+            self._apply()
+
+        def OnClose(self, form) -> None:
+            self._table = None
+            self.parent = None
+
+        def set_rows(self, rows: Sequence[UnmatchedRow]) -> None:
+            self._all_rows = list(rows)
+            if self._table is not None:
+                self._apply()
+
+        def _apply(self) -> None:
+            if self._table is None:
+                return
+            visible = filter_unmatched(self._all_rows, self._search.text())
+            self._table.set_rows(visible)
+            if self._status is not None:
+                self._status.setText(
+                    f"{len(visible)} of {len(self._all_rows)} unmatched "
+                    f"({self._side}); library code hidden")
+
+        def Show(self):
+            return ida_kernwin.PluginForm.Show(
+                self, f"BinDiff - Unmatched ({self._side})",
+                options=(ida_kernwin.PluginForm.WOPN_PERSIST
+                         | ida_kernwin.PluginForm.WCLS_SAVE
+                         | ida_kernwin.PluginForm.WOPN_RESTORE
+                         | ida_kernwin.PluginForm.WOPN_TAB),
+            )
 
     class FilterBar(QtWidgets.QWidget):
         """Filter controls above the match table.
@@ -202,10 +346,12 @@ if IDA_AVAILABLE:
         """Dockable panel listing matched functions."""
 
         def __init__(self, rows: Sequence[MatchRow],
-                     on_jump: Optional[Callable[[int], None]] = None) -> None:
+                     on_jump: Optional[Callable[[int], None]] = None,
+                     context_actions: Sequence = ()) -> None:
             super().__init__()
             self._all_rows = list(rows)
             self._on_jump = on_jump
+            self._context_actions = tuple(context_actions)
             self._table: Optional[MatchTable] = None
             self._status: Optional[QtWidgets.QLabel] = None
             self.parent = None
@@ -219,6 +365,7 @@ if IDA_AVAILABLE:
             self._filter_bar = FilterBar(self._apply_filter)
             self._table = MatchTable()
             self._table.on_activated = self._activate
+            self._table.context_actions = self._context_actions
             self._status = QtWidgets.QLabel()
 
             layout.addWidget(self._filter_bar)
@@ -244,6 +391,9 @@ if IDA_AVAILABLE:
             if self._status is not None:
                 self._status.setText(
                     f"{len(visible)} of {len(self._all_rows)} matches")
+
+        def selected_rows(self) -> List[MatchRow]:
+            return self._table.selected_rows() if self._table else []
 
         def _activate(self, row: MatchRow) -> None:
             if self._on_jump is not None:

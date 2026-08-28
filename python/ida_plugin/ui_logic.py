@@ -258,3 +258,80 @@ def similarity_color(similarity: float) -> tuple[int, int, int]:
     return tuple(  # type: ignore[return-value]
         round(start[i] + (end[i] - start[i]) * t) for i in range(3)
     )
+
+@dataclass(frozen=True)
+class UnmatchedRow:
+    """One row of an unmatched-functions view."""
+
+    address: int
+    name: str
+    is_library: bool
+    has_real_name: bool
+
+    @property
+    def address_text(self) -> str:
+        return format_address(self.address)
+
+
+UNMATCHED_COLUMNS: Sequence[tuple[str, str]] = (
+    ("address", "Address"),
+    ("name", "Name"),
+    ("kind", "Kind"),
+)
+
+
+def unmatched_functions(functions: Iterable, matched_addresses: Iterable[int],
+                        *, include_library: bool = False) -> List[UnmatchedRow]:
+    """Functions present in a binary that no match refers to.
+
+    A .BinDiff stores matches only, so this needs the function list from that
+    side's .BinExport -- see bindiff.binexport.read_functions. `functions` is
+    what that returns.
+
+    Library, imported and thunk code is excluded by default. It is usually the
+    bulk of what goes unmatched and it is rarely what anyone is looking for;
+    burying a handful of genuinely unmatched functions under a few thousand
+    thunks makes the view useless.
+    """
+    matched = set(matched_addresses)
+    rows = []
+    for function in functions:
+        if function.address in matched:
+            continue
+        if function.is_library and not include_library:
+            continue
+        rows.append(UnmatchedRow(address=function.address,
+                                 name=function.best_name or "",
+                                 is_library=function.is_library,
+                                 has_real_name=function.has_real_name))
+    return sorted(rows, key=lambda row: row.address)
+
+
+def sort_unmatched(rows: Iterable[UnmatchedRow], column: str,
+                   descending: bool = False) -> List[UnmatchedRow]:
+    known = {name for name, _ in UNMATCHED_COLUMNS}
+    if column not in known:
+        raise ValueError(f"unknown column {column!r}; expected one of {sorted(known)}")
+    if column == "name":
+        key = lambda row: row.name.lower()  # noqa: E731
+    elif column == "kind":
+        key = lambda row: (row.is_library, not row.has_real_name)  # noqa: E731
+    else:
+        key = lambda row: row.address  # noqa: E731
+    return sorted(rows, key=key, reverse=descending)
+
+
+def filter_unmatched(rows: Iterable[UnmatchedRow], text: str) -> List[UnmatchedRow]:
+    """Name or address substring match, same rules as the matched view."""
+    needle = text.strip().lower()
+    if not needle:
+        return list(rows)
+
+    address_query = None
+    try:
+        address_query = int(needle, 16 if not needle.startswith("0x") else 0)
+    except ValueError:
+        pass
+
+    return [row for row in rows
+            if needle in row.name.lower() or row.address == address_query]

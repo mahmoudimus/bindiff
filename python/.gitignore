@@ -17,3 +17,6 @@ __pycache__/
 .idea/
 *.swp
 *.swo
+
+# Generated protobuf bindings (see tools/scripts/run_tests_docker.sh)
+bindiff/_pb/

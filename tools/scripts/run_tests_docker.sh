@@ -151,6 +151,18 @@ cmake -S /work -B "$CONTAINER_BUILD_DIR" -G Ninja \
   -DBINEXPORT_ENABLE_BINARYNINJA=OFF
 echo "[build] compiling with \$JOBS jobs"
 cmake --build "$CONTAINER_BUILD_DIR" -j "\$JOBS"
+echo "[build] generating Python protobuf bindings"
+# Reading .BinExport from Python needs binexport2_pb2; the metadata sidecar
+# needs its own. Generated rather than checked in, using the protoc the CMake
+# build already produced, so the bindings always match the schema in the tree.
+PROTOC="$CONTAINER_BUILD_DIR/_deps/protobuf-build/protoc"
+mkdir -p /work/python/bindiff/_pb
+touch /work/python/bindiff/_pb/__init__.py
+"\$PROTOC" --proto_path=/binexport --python_out=/work/python/bindiff/_pb \
+  binexport2.proto
+"\$PROTOC" --proto_path=/work --python_out=/work/python/bindiff/_pb \
+  bindiff_metadata.proto
+
 echo "[build] building the Cython extension against IDA's interpreter"
 cd /work/python && $IDA_PYTHON setup.py build_ext --inplace
 EOF
