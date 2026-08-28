@@ -138,3 +138,81 @@ def find_binexports_for(database_path: str) -> tuple:
     secondary = path.parent / f"{match.group(2)}.BinExport"
     return (str(primary) if primary.is_file() else None,
             str(secondary) if secondary.is_file() else None)
+
+@dataclass(frozen=True)
+class FunctionDetail:
+    """Per-function totals, as opposed to the matched counts in a .BinDiff.
+
+    The result file records how much of a pair the differ managed to pair up;
+    these are the totals for one side, which is the other half of every
+    "matched N of M" column.
+    """
+
+    address: int
+    basic_blocks: int
+    instructions: int
+    edges: int
+
+
+def read_function_details(binexport_path: str) -> Dict[int, FunctionDetail]:
+    """Per-function basic block, instruction and edge totals, by address.
+
+    Costlier than read_functions: instruction addresses in a .BinExport are
+    delta-encoded -- an instruction only stores its address when it does not
+    simply follow the previous one -- so resolving which flow graph starts
+    where means walking the whole instruction table once. That is linear, but
+    on a large binary it is a real pass over hundreds of thousands of entries,
+    so callers should do it once and keep the result rather than per function.
+    """
+    binexport2_pb2 = _load_pb2()
+
+    proto = binexport2_pb2.BinExport2()
+    with open(binexport_path, "rb") as handle:
+        proto.ParseFromString(handle.read())
+
+    # Resolve every instruction address in one pass.
+    addresses: List[int] = []
+    current = 0
+    for instruction in proto.instruction:
+        if instruction.HasField("address"):
+            current = instruction.address
+        addresses.append(current)
+        current += len(instruction.raw_bytes)
+
+    def block_instruction_indices(block) -> range:
+        """A block's instruction indices, as index ranges.
+
+        end_index is omitted when the range holds a single element, which is
+        the space optimisation the schema documents.
+        """
+        for index_range in block.instruction_index:
+            begin = index_range.begin_index
+            end = (index_range.end_index if index_range.HasField("end_index")
+                   else begin + 1)
+            yield from range(begin, end)
+
+    details: Dict[int, FunctionDetail] = {}
+    for flow_graph in proto.flow_graph:
+        block_indices = list(flow_graph.basic_block_index)
+        if not block_indices:
+            continue
+
+        entry_block = proto.basic_block[flow_graph.entry_basic_block_index]
+        entry_instructions = list(block_instruction_indices(entry_block))
+        if not entry_instructions:
+            continue
+        entry_address = addresses[entry_instructions[0]]
+
+        instruction_count = 0
+        for block_index in block_indices:
+            instruction_count += sum(
+                1 for _ in block_instruction_indices(proto.basic_block[block_index]))
+
+        details[entry_address] = FunctionDetail(
+            address=entry_address,
+            basic_blocks=len(block_indices),
+            instructions=instruction_count,
+            edges=len(flow_graph.edge),
+        )
+    return details
+

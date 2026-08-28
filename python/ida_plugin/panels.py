@@ -15,6 +15,8 @@ from typing import Callable, List, Optional, Sequence
 
 from ida_plugin.ui_logic import (
     COLUMNS,
+    FlowGraphDiff,
+    build_flow_graph_diff,
     UNMATCHED_COLUMNS,
     UnmatchedRow,
     filter_unmatched,
@@ -37,6 +39,10 @@ from bindiff.ida_env import ida_kernwin_if_loaded, qt_widgets_usable
 # bindiff.ida_env -- so this asks whether IDA already loaded it.
 IDA_AVAILABLE = qt_widgets_usable()
 ida_kernwin = ida_kernwin_if_loaded()
+
+if IDA_AVAILABLE:
+    import ida_bytes
+    import ida_funcs
 
 
 if IDA_AVAILABLE:
@@ -153,6 +159,16 @@ if IDA_AVAILABLE:
                     format_address(row.address_secondary),
                     row.name_secondary,
                     row.algorithm,
+                    "yes" if row.comments_ported else "",
+                    str(row.basic_blocks),
+                    str(row.basic_blocks_primary),
+                    str(row.basic_blocks_secondary),
+                    str(row.instructions),
+                    str(row.instructions_primary),
+                    str(row.instructions_secondary),
+                    str(row.edges),
+                    str(row.edges_primary),
+                    str(row.edges_secondary),
                 )
                 for column, value in enumerate(values):
                     item = QtWidgets.QTableWidgetItem(value)
@@ -169,6 +185,99 @@ if IDA_AVAILABLE:
                         item.setFont(font)
                     self.setItem(index, column, item)
 
+
+
+    # -- flow graph diff ---------------------------------------------------
+
+    # IDA's own graph widget rather than the Java UI: it docks like every other
+    # view, needs no second process, and colours nodes directly.
+    try:
+        import ida_graph
+        import ida_gdl
+        import ida_lines
+
+        GRAPH_AVAILABLE = True
+    except Exception:
+        GRAPH_AVAILABLE = False
+
+    # Node colours are BGR, which is what IDA expects -- not RGB.
+    _COLOUR_MATCHED = 0x90EE90      # light green
+    _COLOUR_UNMATCHED = 0x9090EE    # light red
+    _COLOUR_IDENTICAL = 0xD0D0D0    # grey, for a block that matched exactly
+
+    def primary_flow_graph(address: int):
+        """Reads the open database's control flow for one function.
+
+        Taken from IDA rather than the .BinExport: it is live, so it reflects
+        any analysis or patching done since the export, and it is what the
+        analyst is actually looking at.
+        """
+        function = ida_funcs.get_func(address)
+        if function is None:
+            raise ValueError(f"no function at 0x{address:X}")
+
+        blocks = []
+        edges = []
+        for block in ida_gdl.FlowChart(function, flags=ida_gdl.FC_PREDS):
+            lines = []
+            current = block.start_ea
+            while current < block.end_ea and len(lines) < 64:
+                lines.append(ida_lines.tag_remove(
+                    ida_lines.generate_disasm_line(current) or ""))
+                nxt = ida_bytes.get_item_end(current)
+                if nxt <= current:
+                    break
+                current = nxt
+            blocks.append((block.start_ea, lines))
+            for successor in block.succs():
+                edges.append((block.start_ea, successor.start_ea))
+        return blocks, edges
+
+    if GRAPH_AVAILABLE:
+
+        class FlowGraphDiffViewer(ida_graph.GraphViewer):
+            """The primary function's CFG, coloured by what the differ paired.
+
+            Only the primary side is drawn. A single GraphViewer cannot show
+            two graphs side by side, and the useful part is knowing which of
+            *these* blocks changed -- each matched node names its counterpart,
+            so the secondary address is one glance away.
+            """
+
+            def __init__(self, title: str, diff: FlowGraphDiff) -> None:
+                super().__init__(title, True)
+                self._diff = diff
+
+            def OnRefresh(self) -> bool:
+                self.Clear()
+                for node in self._diff.nodes:
+                    self.AddNode(node)
+                for source, target in self._diff.edges:
+                    self.AddEdge(source, target)
+                return True
+
+            def OnGetText(self, node_id):
+                node = self[node_id]
+                body = "\n".join(node.lines) if node.lines else "(no code)"
+                colour = _COLOUR_MATCHED if node.matched else _COLOUR_UNMATCHED
+                return (f"{node.title}\n{body}", colour)
+
+            def OnDblClick(self, node_id) -> bool:
+                ida_kernwin.jumpto(self[node_id].address)
+                return True
+
+        def show_flow_graph_diff(match_row, database) -> None:
+            """Builds and shows the diff view for one match."""
+            blocks, edges = primary_flow_graph(match_row.address_primary)
+            diff = build_flow_graph_diff(
+                blocks, edges,
+                database.basic_block_matches(match_row.match_id))
+
+            name = match_row.name_primary or f"0x{match_row.address_primary:X}"
+            viewer = FlowGraphDiffViewer(f"BinDiff - {name}", diff)
+            viewer.Show()
+            ida_kernwin.msg(f"[BinDiff] {diff.summary}\n")
+            return viewer
 
     class UnmatchedTable(QtWidgets.QTableWidget):
         """Functions on one side that no match refers to."""

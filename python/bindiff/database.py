@@ -257,6 +257,18 @@ class BinDiffDatabase:
         return [(_to_unsigned(row[0]), _to_unsigned(row[1]))
                 for row in self._connection.execute(query, params)]
 
+    def basic_block_matches(self, match_id: int) -> List[tuple]:
+        """Matched basic block pairs for one function match.
+
+        What makes a flow-graph diff possible: it says which blocks of the
+        primary function were paired, and with what on the secondary side.
+        Blocks absent from this list are what actually changed.
+        """
+        rows = self._connection.execute(
+            "SELECT address1, address2 FROM basicblock WHERE functionid = ?",
+            (match_id,))
+        return [(_to_unsigned(r[0]), _to_unsigned(r[1])) for r in rows]
+
     def algorithms(self) -> dict:
         """Maps algorithm name -> id."""
         return {row["name"]: row["id"] for row in self._connection.execute(

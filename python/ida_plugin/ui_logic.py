@@ -79,6 +79,22 @@ class MatchRow:
     basic_blocks: int
     edges: int
     instructions: int
+    # Totals for each side. Zero when the .BinExport inputs were not available:
+    # the result file records only how much of a pair was matched, never how
+    # much there was to match.
+    basic_blocks_primary: int = 0
+    basic_blocks_secondary: int = 0
+    instructions_primary: int = 0
+    instructions_secondary: int = 0
+    edges_primary: int = 0
+    edges_secondary: int = 0
+
+    @property
+    def has_totals(self) -> bool:
+        """Whether the per-side columns hold anything worth showing."""
+        return any((self.basic_blocks_primary, self.basic_blocks_secondary,
+                    self.instructions_primary, self.instructions_secondary,
+                    self.edges_primary, self.edges_secondary))
 
     @property
     def change_text(self) -> str:
@@ -99,10 +115,22 @@ COLUMNS: Sequence[tuple[str, str]] = (
     ("address_secondary", "EA Secondary"),
     ("name_secondary", "Name Secondary"),
     ("algorithm", "Algorithm"),
+    ("comments_ported", "Comments Ported"),
+    ("basic_blocks", "Matched Basic Blocks"),
+    ("basic_blocks_primary", "Basic Blocks Primary"),
+    ("basic_blocks_secondary", "Basic Blocks Secondary"),
+    ("instructions", "Matched Instructions"),
+    ("instructions_primary", "Instructions Primary"),
+    ("instructions_secondary", "Instructions Secondary"),
+    ("edges", "Matched Edges"),
+    ("edges_primary", "Edges Primary"),
+    ("edges_secondary", "Edges Secondary"),
 )
 
 
 def _sort_key(column: str) -> Callable[[MatchRow], object]:
+    if column == "comments_ported":
+        return lambda row: row.comments_ported
     if column == "change":
         return lambda row: row.change_text
     if column == "algorithm":
@@ -215,8 +243,25 @@ def build_statistics(files, num_matches: int,
     return rows
 
 
-def rows_from_database(database) -> List[MatchRow]:
-    """Adapts BinDiffDatabase.matches() into view rows."""
+def rows_from_database(database, primary_details=None,
+                      secondary_details=None) -> List[MatchRow]:
+    """Adapts BinDiffDatabase.matches() into view rows.
+
+    `primary_details` and `secondary_details` are what
+    bindiff.binexport.read_function_details returns for each side. They are
+    optional: without them the per-side count columns read zero, which is
+    honest -- those totals are not in the result file -- and every other column
+    still works.
+    """
+    primary_details = primary_details or {}
+    secondary_details = secondary_details or {}
+
+    def totals(details, address):
+        detail = details.get(address)
+        if detail is None:
+            return (0, 0, 0)
+        return (detail.basic_blocks, detail.instructions, detail.edges)
+
     return [
         MatchRow(
             match_id=match.id,
@@ -233,6 +278,17 @@ def rows_from_database(database) -> List[MatchRow]:
             basic_blocks=match.basic_blocks,
             edges=match.edges,
             instructions=match.instructions,
+            basic_blocks_primary=totals(primary_details,
+                                        match.address_primary)[0],
+            instructions_primary=totals(primary_details,
+                                        match.address_primary)[1],
+            edges_primary=totals(primary_details, match.address_primary)[2],
+            basic_blocks_secondary=totals(secondary_details,
+                                          match.address_secondary)[0],
+            instructions_secondary=totals(secondary_details,
+                                          match.address_secondary)[1],
+            edges_secondary=totals(secondary_details,
+                                   match.address_secondary)[2],
         )
         for match in database.matches()
     ]
@@ -335,3 +391,69 @@ def filter_unmatched(rows: Iterable[UnmatchedRow], text: str) -> List[UnmatchedR
 
     return [row for row in rows
             if needle in row.name.lower() or row.address == address_query]
+
+# -- flow graph diff -------------------------------------------------------
+
+@dataclass(frozen=True)
+class GraphNode:
+    """One basic block in a flow-graph diff view."""
+
+    address: int
+    lines: Sequence[str]
+    matched: bool
+    secondary_address: Optional[int] = None
+
+    @property
+    def title(self) -> str:
+        head = format_address(self.address)
+        if self.matched and self.secondary_address is not None:
+            return f"{head}  ->  {format_address(self.secondary_address)}"
+        return f"{head}  (unmatched)"
+
+
+@dataclass(frozen=True)
+class FlowGraphDiff:
+    """A function's control flow, annotated with what the differ paired."""
+
+    nodes: List[GraphNode]
+    edges: List[tuple]
+
+    @property
+    def matched_count(self) -> int:
+        return sum(1 for node in self.nodes if node.matched)
+
+    @property
+    def summary(self) -> str:
+        total = len(self.nodes)
+        matched = self.matched_count
+        return (f"{matched} of {total} basic blocks matched, "
+                f"{total - matched} changed or new")
+
+
+def build_flow_graph_diff(blocks, edges,
+                          matched_pairs) -> FlowGraphDiff:
+    """Annotates a function's blocks with their match state.
+
+    `blocks` is an iterable of (address, lines); `edges` an iterable of
+    (source_address, target_address); `matched_pairs` the (primary, secondary)
+    pairs the differ recorded for this function.
+
+    Edges naming a block that is not in `blocks` are dropped rather than
+    silently creating a node for it: a dangling edge usually means the caller
+    passed inconsistent inputs, and inventing the missing block would hide it.
+    """
+    matched = dict(matched_pairs)
+
+    nodes = []
+    index_by_address = {}
+    for address, lines in blocks:
+        index_by_address[address] = len(nodes)
+        nodes.append(GraphNode(address=address, lines=list(lines),
+                               matched=address in matched,
+                               secondary_address=matched.get(address)))
+
+    resolved = []
+    for source, target in edges:
+        if source in index_by_address and target in index_by_address:
+            resolved.append((index_by_address[source], index_by_address[target]))
+    return FlowGraphDiff(nodes=nodes, edges=resolved)

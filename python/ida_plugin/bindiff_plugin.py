@@ -70,6 +70,7 @@ ACTION_UNMATCHED_COPY_SECONDARY = "bindiff:secondary_unmatched_copy_address"
 ACTION_PORT_COMMENTS = "bindiff:port_comments"
 ACTION_COPY_PRIMARY_ADDRESS = "bindiff:copy_primary_address"
 ACTION_COPY_SECONDARY_ADDRESS = "bindiff:copy_secondary_address"
+ACTION_VIEW_FLOW_GRAPHS = "bindiff:view_flow_graphs"
 ACTION_CONFIGURE = "bindiff:configure_algorithms"
 
 
@@ -86,6 +87,7 @@ class BinDiffController:
         self._matched_form = None
         self._unmatched_forms = {}
         self._binexports = (None, None)
+        self._details = None
 
     @property
     def database(self):
@@ -104,6 +106,7 @@ class BinDiffController:
             self._database = None
         self._database = BinDiffDatabase.open(path, read_only=read_only)
         self._binexports = (None, None)
+        self._details = None
         return self._database
 
     def close(self) -> None:
@@ -116,7 +119,33 @@ class BinDiffController:
 
         if self._database is None:
             return []
-        return rows_from_database(self._database)
+        primary, secondary = self._function_details()
+        return rows_from_database(self._database, primary, secondary)
+
+    def _function_details(self) -> tuple:
+        """Per-side totals for the count columns, loaded once and kept.
+
+        Resolving them means walking the whole instruction table of each
+        .BinExport, so this is cached: doing it per refresh would make the
+        table unusable on a large binary. Missing exports are not an error --
+        the columns read zero and every other column still works.
+        """
+        from bindiff.binexport import read_function_details
+
+        if self._details is not None:
+            return self._details
+
+        loaded = []
+        for path in self.resolve_binexports():
+            if path is None:
+                loaded.append({})
+                continue
+            try:
+                loaded.append(read_function_details(path))
+            except Exception:
+                loaded.append({})
+        self._details = tuple(loaded)
+        return self._details
 
     def statistic_rows(self):
         from ida_plugin.ui_logic import build_statistics
@@ -264,6 +293,9 @@ if IDA_AVAILABLE:
             super().__init__()
             self.controller = BinDiffController()
             self._registered: list[str] = []
+            # Kept alive: a GraphViewer that is garbage collected takes its
+            # window with it.
+            self._graph_viewers: list = []
 
         # -- lifecycle ------------------------------------------------------
 
@@ -324,6 +356,8 @@ if IDA_AVAILABLE:
                  self._copy_primary_address, loaded),
                 (ACTION_COPY_SECONDARY_ADDRESS, "Copy secondary address",
                  self._copy_secondary_address, loaded),
+                (ACTION_VIEW_FLOW_GRAPHS, "View flow graph diff",
+                 self._view_flow_graphs, loaded),
                 (ACTION_CONFIGURE, "Matching algorithms...",
                  self._configure_algorithms, None),
             )
@@ -498,6 +532,29 @@ if IDA_AVAILABLE:
                 "\n".join(f"0x{r.address:X}" for r in rows))
             self._report(f"copied {len(rows)} address(es)")
 
+        def _view_flow_graphs(self) -> None:
+            """Shows the primary function's CFG, coloured by match state.
+
+            Drawn with IDA's own graph widget rather than the Java UI: it docks
+            like any other view and needs no second process.
+            """
+            from ida_plugin import panels
+
+            rows = self._selected_rows()
+            if len(rows) != 1:
+                ida_kernwin.warning("Select exactly one match.")
+                return
+            if not getattr(panels, "GRAPH_AVAILABLE", False):
+                ida_kernwin.warning(
+                    "IDA's graph API is not available in this environment.")
+                return
+            try:
+                self._graph_viewers.append(
+                    panels.show_flow_graph_diff(rows[0],
+                                                self.controller.database))
+            except Exception as exc:
+                ida_kernwin.warning(f"Could not build the graph:\n{exc}")
+
         def _port_comments(self) -> None:
             from ida_plugin.porting import apply_comment_ports
 
@@ -641,6 +698,8 @@ if IDA_AVAILABLE:
                 self.controller._matched_form = MatchedFunctionsForm(
                     self.controller.match_rows(), on_jump=_jump_to,
                     context_actions=(
+                        ACTION_VIEW_FLOW_GRAPHS,
+                        None,
                         ACTION_IMPORT_SYMBOLS_COMMENTS,
                         ACTION_PORT_COMMENTS,
                         None,

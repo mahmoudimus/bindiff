@@ -173,3 +173,86 @@ class TestAgainstRealExports:
         empty.write_bytes(b"")
         with pytest.raises(ValueError, match="empty"):
             read_functions(str(empty))
+
+
+@pytest.mark.requires_extension
+class TestFunctionDetails:
+    def test_totals_agree_with_the_engine(self, insider_pair):
+        """Summed per-function totals must match what the engine recorded.
+
+        The engine writes per-binary totals into the `file` table of every
+        .BinDiff, so the two are independently derived from the same input.
+        This is what catches the delta-encoded address walk or the instruction
+        index ranges being read wrongly -- both of which would otherwise
+        produce plausible-looking but wrong numbers.
+        """
+        from bindiff.binexport import read_function_details
+
+        primary, _secondary = insider_pair
+        details = read_function_details(str(primary))
+
+        assert details, "no per-function detail read"
+        assert all(d.basic_blocks > 0 for d in details.values())
+        # Every function has at least one instruction, and edges are one fewer
+        # than blocks in a chain, so never more than blocks squared.
+        for detail in details.values():
+            assert detail.instructions >= detail.basic_blocks
+            assert detail.edges <= detail.basic_blocks * detail.basic_blocks
+
+    def test_totals_reconcile_with_the_database(self, bindiff_module,
+                                                insider_pair, tmp_path):
+        from bindiff import BinDiffDatabase
+        from bindiff.binexport import read_function_details
+
+        primary, secondary = insider_pair
+        database = tmp_path / "detail.BinDiff"
+        assert bindiff_module.diff(str(primary), str(secondary),
+                                   str(database)) == 0
+
+        details = read_function_details(str(primary))
+        with BinDiffDatabase.open(str(database)) as db:
+            files = db.files()
+            matches = db.matches()
+
+        summed_blocks = sum(d.basic_blocks for d in details.values())
+        summed_instructions = sum(d.instructions for d in details.values())
+
+        # file.basicblocks + libbasicblocks is the engine's own total for the
+        # primary; FileInfo already sums the two.
+        assert summed_blocks == files[0].basic_blocks, (
+            f"basic blocks disagree: read {summed_blocks}, engine says "
+            f"{files[0].basic_blocks}")
+        assert summed_instructions == files[0].instructions, (
+            f"instructions disagree: read {summed_instructions}, engine says "
+            f"{files[0].instructions}")
+
+        # A matched function can never have matched more blocks than it has.
+        for match in matches:
+            detail = details.get(match.address_primary)
+            if detail is not None:
+                assert match.basic_blocks <= detail.basic_blocks
+
+    def test_rows_carry_the_totals(self, bindiff_module, insider_pair,
+                                   tmp_path):
+        from bindiff import BinDiffDatabase
+        from bindiff.binexport import read_function_details
+        from ida_plugin.ui_logic import rows_from_database
+
+        primary, secondary = insider_pair
+        database = tmp_path / "rows.BinDiff"
+        assert bindiff_module.diff(str(primary), str(secondary),
+                                   str(database)) == 0
+
+        with BinDiffDatabase.open(str(database)) as db:
+            plain = rows_from_database(db)
+            enriched = rows_from_database(
+                db, read_function_details(str(primary)),
+                read_function_details(str(secondary)))
+
+        # Without the exports the columns are zero, and say so rather than
+        # inventing a number.
+        assert not any(row.has_totals for row in plain)
+        assert any(row.has_totals for row in enriched)
+        for row in enriched:
+            assert row.basic_blocks <= row.basic_blocks_primary
+            assert row.basic_blocks <= row.basic_blocks_secondary

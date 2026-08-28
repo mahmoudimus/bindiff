@@ -223,3 +223,60 @@ def test_rows_from_a_real_database(bindiff_module, insider_pair, tmp_path):
         assert 0.0 <= row.similarity <= 1.0
         assert len(row.change_text) == 7
         assert row.algorithm
+
+
+class TestFlowGraphDiff:
+    """The model behind the ida_graph view. Pure, so it is testable here."""
+
+    BLOCKS = [(0x1000, ["push rbp"]), (0x1010, ["mov eax, 1"]),
+              (0x1020, ["ret"])]
+    EDGES = [(0x1000, 0x1010), (0x1010, 0x1020)]
+
+    def test_marks_matched_blocks(self):
+        from ida_plugin.ui_logic import build_flow_graph_diff
+
+        diff = build_flow_graph_diff(self.BLOCKS, self.EDGES,
+                                     [(0x1000, 0x2000), (0x1020, 0x2020)])
+        assert diff.matched_count == 2
+        by_address = {node.address: node for node in diff.nodes}
+        assert by_address[0x1000].matched
+        assert by_address[0x1000].secondary_address == 0x2000
+        assert not by_address[0x1010].matched
+        assert by_address[0x1010].secondary_address is None
+
+    def test_edges_are_resolved_to_indices(self):
+        from ida_plugin.ui_logic import build_flow_graph_diff
+
+        diff = build_flow_graph_diff(self.BLOCKS, self.EDGES, [])
+        assert diff.edges == [(0, 1), (1, 2)]
+
+    def test_dangling_edges_are_dropped(self):
+        """An edge to a block that was not supplied means inconsistent inputs;
+        inventing the node would hide that."""
+        from ida_plugin.ui_logic import build_flow_graph_diff
+
+        diff = build_flow_graph_diff(
+            self.BLOCKS, self.EDGES + [(0x1020, 0xDEAD)], [])
+        assert diff.edges == [(0, 1), (1, 2)]
+        assert len(diff.nodes) == 3
+
+    def test_titles_name_the_counterpart(self):
+        from ida_plugin.ui_logic import build_flow_graph_diff
+
+        diff = build_flow_graph_diff(self.BLOCKS, [], [(0x1000, 0x2000)])
+        by_address = {node.address: node for node in diff.nodes}
+        assert "0x00002000" in by_address[0x1000].title
+        assert "unmatched" in by_address[0x1010].title
+
+    def test_summary_counts_both_sides(self):
+        from ida_plugin.ui_logic import build_flow_graph_diff
+
+        diff = build_flow_graph_diff(self.BLOCKS, self.EDGES, [(0x1000, 0x2000)])
+        assert "1 of 3" in diff.summary and "2 changed" in diff.summary
+
+    def test_an_empty_function_is_not_an_error(self):
+        from ida_plugin.ui_logic import build_flow_graph_diff
+
+        diff = build_flow_graph_diff([], [], [])
+        assert diff.nodes == [] and diff.edges == []
+        assert diff.matched_count == 0
