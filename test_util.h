@@ -19,6 +19,7 @@
 #include <initializer_list>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -29,6 +30,31 @@
 #include "third_party/zynamics/bindiff/flow_graph.h"
 #include "third_party/zynamics/bindiff/instruction.h"
 #include "third_party/zynamics/binexport/util/types.h"
+
+// ABSL_ASSERT_OK_AND_ASSIGN is a Google-internal test macro: the open-source
+// Abseil release ships absl/status/status_matchers.h (IsOk, IsOkAndHolds,
+// StatusIs) but no assign-or-fail macro. Tests that use it therefore do not
+// compile against the pinned Abseil snapshot, so define it here. Guarded so a
+// future Abseil that does export it takes precedence.
+#ifndef ABSL_ASSERT_OK_AND_ASSIGN
+
+#define BINDIFF_TEST_CONCAT_INNER_(a, b) a##b
+#define BINDIFF_TEST_CONCAT_(a, b) BINDIFF_TEST_CONCAT_INNER_(a, b)
+
+#define BINDIFF_ASSERT_OK_AND_ASSIGN_IMPL_(statusor, lhs, rexpr) \
+  auto statusor = (rexpr);                                       \
+  ASSERT_TRUE(statusor.ok()) << statusor.status();               \
+  lhs = std::move(statusor).value()
+
+// Evaluates `rexpr`, asserts that the resulting absl::StatusOr holds a value,
+// and assigns that value to `lhs`. `lhs` may be a declaration ("auto name") or
+// an already-declared variable. Declares a variable in the enclosing scope, so
+// it deliberately is not wrapped in a do/while block.
+#define ABSL_ASSERT_OK_AND_ASSIGN(lhs, rexpr)                        \
+  BINDIFF_ASSERT_OK_AND_ASSIGN_IMPL_(                                \
+      BINDIFF_TEST_CONCAT_(_bindiff_statusor_, __LINE__), lhs, rexpr)
+
+#endif  // ABSL_ASSERT_OK_AND_ASSIGN
 
 namespace security::bindiff {
 

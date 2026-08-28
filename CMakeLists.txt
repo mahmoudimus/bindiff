@@ -352,6 +352,48 @@ if(BUILD_TESTING AND BINDIFF_BUILD_TESTING)
   )
   gtest_discover_tests(writer_test)
 
+  add_executable(flow_graph_test flow_graph_test.cc)
+  target_link_libraries(flow_graph_test
+    bindiff_test_base
+    bindiff_test_util
+    bindiff_shared
+  )
+  gtest_discover_tests(flow_graph_test)
+
+  add_executable(instruction_test instruction_test.cc)
+  target_link_libraries(instruction_test
+    bindiff_test_base
+    bindiff_test_util
+    bindiff_shared
+  )
+  gtest_discover_tests(instruction_test)
+
+  # End-to-end differ tests. These read .BinExport inputs from fixtures/ and
+  # compare the resulting matches against the checked-in .truth files.
+  #
+  # Fixture paths are written relative to a directory containing "bindiff/"
+  # (e.g. "bindiff/fixtures/insider/insider_gcc.BinExport") and are resolved
+  # against $TEST_SRCDIR. src_include/third_party/zynamics holds the
+  # configure-time symlink "bindiff" -> source tree, so pointing TEST_SRCDIR
+  # there resolves them without depending on the checkout directory's name.
+  add_executable(differ_test differ_test.cc)
+  target_link_libraries(differ_test
+    absl::check
+    absl::log
+    absl::status_matchers
+    absl::str_format
+    absl::strings
+    bindiff_test_base
+    bindiff_test_util
+    bindiff_shared
+    binexport_shared
+  )
+  gtest_discover_tests(differ_test
+    PROPERTIES
+      ENVIRONMENT
+        "TEST_SRCDIR=${BINDIFF_BINARY_DIR}/src_include/third_party/zynamics"
+  )
+
   if(BINDIFF_BUILD_BENCHMARK)
     # Needs to be run from the build dir in order to find the fixtures:
     #   cd src_include/third_party/zynamics; ../../../differ_benchmark

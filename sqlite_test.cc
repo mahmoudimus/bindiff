@@ -21,6 +21,7 @@
 #include "third_party/absl/status/status.h"
 #include "third_party/absl/status/status_matchers.h"
 #include "third_party/absl/status/statusor.h"
+#include "third_party/zynamics/bindiff/test_util.h"
 #include "third_party/zynamics/binexport/testing.h"
 
 namespace security::bindiff {

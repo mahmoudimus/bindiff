@@ -28,6 +28,9 @@
 #include "third_party/absl/log/check.h"
 #include "third_party/absl/log/log.h"
 #include "third_party/absl/status/status_matchers.h"
+#include <ostream>
+
+#include "third_party/absl/strings/ascii.h"
 #include "third_party/absl/strings/str_cat.h"
 #include "third_party/absl/strings/str_format.h"
 #include "third_party/absl/strings/str_split.h"
@@ -141,7 +144,7 @@ void CompareToGroundTruth(absl::string_view test_name,
 
 struct FixtureMetadata {
   FixtureMetadata& set_name(absl::string_view value) {
-    name = GetTestSourcePath(value);
+    name = std::string(value);
     return *this;
   }
 
@@ -165,6 +168,12 @@ struct FixtureMetadata {
   std::string secondary;
   std::string truth;
 };
+
+// Without this gtest falls back to hex-dumping the parameter, which it appends
+// to every ctest test name.
+void PrintTo(const FixtureMetadata& metadata, std::ostream* os) {
+  *os << metadata.name;
+}
 
 class GroundtruthTest : public testing::TestWithParam<FixtureMetadata> {};
 
@@ -252,6 +261,20 @@ TEST_P(GroundtruthTest, Run) {
   LOG(INFO) << ">>>";
 }
 
+// gtest requires parameter names to be non-empty and to consist only of
+// alphanumerics and underscores; without this it prints the raw parameter
+// bytes, which makes the ctest names unreadable and impossible to filter on.
+struct FixtureName {
+  std::string operator()(
+      const testing::TestParamInfo<FixtureMetadata>& info) const {
+    std::string name;
+    for (const char c : info.param.name) {
+      name += absl::ascii_isalnum(c) ? c : '_';
+    }
+    return name.empty() ? absl::StrCat("fixture_", info.index) : name;
+  }
+};
+
 INSTANTIATE_TEST_SUITE_P(
     GtTest, GroundtruthTest,
     testing::Values(
@@ -271,6 +294,7 @@ INSTANTIATE_TEST_SUITE_P(
                        "libssl.0.9.8g.x86.gcc.4.3.3.a_vs_libssl.0.9g.x86.gcc.3."
                        "4.6.a.truth"),
         FixtureMetadata()
+            .set_name("minievil")
             .set_primary("bindiff/fixtures/minievil/"
                          "0d0d06e42bb39a4a8fd1a3da8a9be8d2abaacd4c7373d4cd36cd6"
                          "fac6f4d1650.BinExport")
@@ -279,10 +303,12 @@ INSTANTIATE_TEST_SUITE_P(
                            "3d59b4d585e79.BinExport")
             .set_truth("bindiff/fixtures/minievil/minievil.truth"),
         FixtureMetadata()
+            .set_name("mydoom")
             .set_primary("bindiff/fixtures/mydoom/Mydoom-vc_orig.BinExport")
             .set_secondary("bindiff/fixtures/mydoom/Mydoom-vc_optz.BinExport")
             .set_truth("bindiff/fixtures/mydoom/"
-                       "Mydoom-vc_orig_vs_Mydoom-vc_optz.truth")));
+                       "Mydoom-vc_orig_vs_Mydoom-vc_optz.truth")),
+    FixtureName());
 
 }  // namespace
 }  // namespace security::bindiff
