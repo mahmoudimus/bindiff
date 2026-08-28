@@ -161,15 +161,17 @@ int ResultsWrapper::ConfirmMatches(const std::vector<size_t>& indices) {
 
 // Comment/symbol porting
 int ResultsWrapper::PortComments(const std::vector<size_t>& indices, int how) {
+  // NOT IMPLEMENTED: only set comments_ported on each match, so a later read
+  // reported comments as ported when no comment had been touched. The real
+  // operation copies names and comments into the primary database, which needs
+  // a disassembler back end this wrapper does not have.
   for (size_t index : indices) {
     if (index >= impl_->matches_.size()) {
       return -1;
     }
-    impl_->matches_[index].comments_ported = true;
   }
-
-  impl_->modified_ = true;
-  return 0;
+  (void)how;
+  return kNotImplemented;
 }
 
 int ResultsWrapper::PortCommentsByAddress(uint64_t start_address_source,
@@ -178,27 +180,22 @@ int ResultsWrapper::PortCommentsByAddress(uint64_t start_address_source,
                                           uint64_t end_address_target,
                                           double min_confidence,
                                           double min_similarity) {
-  // Port comments for matches within address ranges
-  for (auto& match : impl_->matches_) {
-    if (match.address_primary >= start_address_source &&
-        match.address_primary <= end_address_source &&
-        match.address_secondary >= start_address_target &&
-        match.address_secondary <= end_address_target &&
-        match.confidence >= min_confidence &&
-        match.similarity >= min_similarity) {
-      match.comments_ported = true;
-    }
-  }
-
-  impl_->modified_ = true;
-  return 0;
+  // NOT IMPLEMENTED, for the same reason as PortComments().
+  (void)start_address_source;
+  (void)end_address_source;
+  (void)start_address_target;
+  (void)end_address_target;
+  (void)min_confidence;
+  (void)min_similarity;
+  return kNotImplemented;
 }
+
 
 // Diff operations
 int ResultsWrapper::IncrementalDiff() {
-  // TODO: Implement incremental diff
-  // This would re-run matching algorithms on unmatched functions
-  return 0;
+  // NOT IMPLEMENTED: would re-run the matching steps over the still-unmatched
+  // functions. Returned success without doing so.
+  return kNotImplemented;
 }
 
 void ResultsWrapper::MarkPortedCommentsInDatabase() {
@@ -335,11 +332,13 @@ int ResultsWrapper::ReadFromFile(const std::string& filename) {
 }
 
 int ResultsWrapper::WriteToFile(const std::string& filename) {
-  // TODO: Implement write to database
-  // This would save modifications back to the .BinDiff file
-  impl_->database_path_ = filename;
-  impl_->modified_ = false;
-  return 0;
+  // NOT IMPLEMENTED. This used to record the path, clear modified_ and return
+  // success without writing anything, so AddMatch() -> WriteToFile() -> 0 lost
+  // the edit silently. Persisting means writing the match tables back through
+  // DatabaseWriter (or straight to the sqlite schema); until that exists,
+  // failing is the only honest answer.
+  (void)filename;
+  return kNotImplemented;
 }
 
 // State management

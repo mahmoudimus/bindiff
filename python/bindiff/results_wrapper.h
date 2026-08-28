@@ -95,6 +95,11 @@ class ResultsWrapper {
   int AddMatch(uint64_t primary, uint64_t secondary);
   int ConfirmMatches(const std::vector<size_t>& indices);
 
+  // Return codes: 0 on success, -1 on a bad argument, and kNotImplemented for
+  // an operation that has not been ported yet. Nothing here returns 0 without
+  // having done the work -- see the note on kNotImplemented.
+  static constexpr int kNotImplemented = -2;
+
   // Comment/symbol porting
   int PortComments(const std::vector<size_t>& indices, int how);
   int PortCommentsByAddress(uint64_t start_address_source,

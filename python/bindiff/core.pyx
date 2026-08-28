@@ -177,8 +177,13 @@ def diff(primary_path: str, secondary_path: str, output_path: str) -> int:
     cdef string c_primary = primary_path.encode('utf-8')
     cdef string c_secondary = secondary_path.encode('utf-8')
     cdef string c_output = output_path.encode('utf-8')
+    cdef int result
 
-    return core_types.DiffBinaries(c_primary, c_secondary, c_output)
+    # Release the GIL for the duration: this is the long pole, and holding it
+    # would block every other Python thread in the process (in IDA, the UI).
+    with nogil:
+        result = core_types.DiffBinaries(c_primary, c_secondary, c_output)
+    return result
 
 
 def load_matches(database_path: str) -> List[MatchInfo]:
@@ -197,7 +202,9 @@ def load_matches(database_path: str) -> List[MatchInfo]:
         ...     print(f"{match.primary_name} -> {match.secondary_name}")
     """
     cdef string c_path = database_path.encode('utf-8')
-    cdef vector[core_types.CMatchInfo] c_matches = core_types.LoadMatches(c_path)
+    cdef vector[core_types.CMatchInfo] c_matches
+    with nogil:
+        c_matches = core_types.LoadMatches(c_path)
 
     matches = []
     for c_match in c_matches:
@@ -233,7 +240,9 @@ def load_statistics(database_path: str) -> StatisticsInfo:
         >>> print(f"Function similarity: {stats.function_similarity:.2%}")
     """
     cdef string c_path = database_path.encode('utf-8')
-    cdef core_types.CStatisticsInfo c_stats = core_types.LoadStatistics(c_path)
+    cdef core_types.CStatisticsInfo c_stats
+    with nogil:
+        c_stats = core_types.LoadStatistics(c_path)
 
     return StatisticsInfo(
         primary_function_count=c_stats.primary_function_count,

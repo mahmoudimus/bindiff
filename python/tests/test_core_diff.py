@@ -100,3 +100,45 @@ def test_load_matches_on_missing_database_raises(bindiff_module, tmp_path):
     """
     with pytest.raises(Exception):
         bindiff_module.load_matches(str(tmp_path / "no_such.BinDiff"))
+
+
+def test_concurrent_diffs_do_not_interfere(bindiff_module, insider_pair, tmp_path):
+    """Concurrent diffs must produce identical, correct results.
+
+    diff() releases the GIL (core.pyx uses `with nogil`) so a diff can run on a
+    worker thread without freezing the host's UI. That also means concurrent
+    calls genuinely execute in parallel, which puts the engine's process-wide
+    state -- notably the lazily initialised config::Proto() singleton -- under
+    real contention. This asserts the results agree; it deliberately makes no
+    timing assertion, which would be flaky.
+    """
+    import threading
+
+    primary, secondary = insider_pair
+    results = {}
+    errors = []
+
+    def run(index):
+        try:
+            out = tmp_path / f"concurrent_{index}.BinDiff"
+            rc = bindiff_module.diff(str(primary), str(secondary), str(out))
+            matches = bindiff_module.load_matches(str(out))
+            results[index] = (rc, len(matches))
+        except Exception as exc:  # surfaced below, not swallowed
+            errors.append((index, exc))
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=300)
+        assert not thread.is_alive(), "diff thread did not finish"
+
+    assert not errors, f"diff raised on a worker thread: {errors}"
+    assert len(results) == 4
+
+    # Same inputs, so every thread must agree -- on the return code and on how
+    # many matches it found.
+    assert {rc for rc, _ in results.values()} == {0}
+    match_counts = {count for _, count in results.values()}
+    assert len(match_counts) == 1, f"threads disagreed on match count: {results}"

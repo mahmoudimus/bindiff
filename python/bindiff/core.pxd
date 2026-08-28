@@ -39,9 +39,16 @@ cdef extern from "python/bindiff/wrappers.h" namespace "security::bindiff":
         int matched_edge_count
 
     # High-level functions
+    # Declared nogil so callers can release the GIL around them. DiffBinaries
+    # reads both inputs, runs the full matching pipeline and writes the result
+    # database -- seconds to minutes of native work. Holding the GIL across it
+    # freezes every other Python thread in the host process, which inside IDA
+    # means the UI stops responding for the whole diff.
+    #
+    # `except +` still works without the GIL: Cython reacquires it to raise.
     int DiffBinaries(const string& primary_path,
                     const string& secondary_path,
-                    const string& output_database) except +
+                    const string& output_database) except + nogil
 
-    vector[CMatchInfo] LoadMatches(const string& database_path) except +
-    CStatisticsInfo LoadStatistics(const string& database_path) except +
+    vector[CMatchInfo] LoadMatches(const string& database_path) except + nogil
+    CStatisticsInfo LoadStatistics(const string& database_path) except + nogil
