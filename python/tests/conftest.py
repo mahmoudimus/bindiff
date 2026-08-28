@@ -35,6 +35,8 @@ def pytest_configure(config):
         "markers", "requires_ida: needs a running IDA Pro interpreter"
     )
     config.addinivalue_line("markers", "e2e: diffs real fixtures end to end")
+    config.addinivalue_line(
+        "markers", "slow: takes seconds -- opens a database with idalib")
 
 
 @pytest.fixture(scope="session")
