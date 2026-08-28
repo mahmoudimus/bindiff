@@ -47,12 +47,6 @@ from .results import (
     Results,
 )
 
-from .visual_diff import (
-    VisualDiffRequest,
-    send_gui_message,
-    send_visual_diff,
-)
-
 from .database import (
     BinDiffDatabase,
     FunctionMatch,
@@ -71,10 +65,6 @@ __all__ = [
     "FileInfo",
     "MANUAL_ALGORITHM",
 
-    # Java UI
-    "VisualDiffRequest",
-    "send_visual_diff",
-    "send_gui_message",
 
     # Loading functions
     "incremental_diff",

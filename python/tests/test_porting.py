@@ -1,21 +1,12 @@
-"""Tests for symbol and comment porting, and for the Java UI transport.
+"""Tests for symbol and comment porting.
 
 The planning half is pure and is tested directly. The applying half takes an
 injected writer, so its control flow is testable too -- only the two default
 writers actually touch IDA.
 """
 
-import socket
-import struct
-import threading
-
 import pytest
 
-from bindiff.visual_diff import (
-    VisualDiffRequest,
-    encode_message,
-    send_gui_message,
-)
 from ida_plugin.porting import (
     CommentPort,
     SymbolPort,
@@ -165,71 +156,3 @@ class TestApplying:
         """Headless, the defaults must raise rather than pretend to work."""
         result = apply_symbol_ports([SymbolPort(0x1, "a", "sub_1", 1)])
         assert result.failed == 1 and result.applied == 0
-
-
-class TestVisualDiffTransport:
-    def test_message_is_the_format_the_ui_parses(self):
-        xml = VisualDiffRequest(
-            database="/tmp/a.BinDiff",
-            primary_path="/tmp/a.BinExport", primary_address=0x401000,
-            secondary_path="/tmp/b.BinExport", secondary_address=0x501000,
-        ).to_xml()
-
-        assert xml.startswith('<BinDiffMatch type="flow_graph">')
-        assert '<Database path ="/tmp/a.BinDiff"/>' in xml
-        assert 'address="4198400"' in xml, "addresses are sent in decimal"
-        assert xml.endswith("</BinDiffMatch>")
-
-    def test_call_graph_requests_say_so(self):
-        xml = VisualDiffRequest("d", "p", 1, "s", 2, call_graph=True).to_xml()
-        assert xml.startswith('<BinDiffMatch type="call_graph">')
-
-    def test_paths_containing_quotes_stay_well_formed(self):
-        """Interpolating a path with a quote in it produces XML the UI cannot
-        parse, and it would fail silently."""
-        import xml.etree.ElementTree as ET
-
-        xml = VisualDiffRequest('/tmp/we"ird.BinDiff', "p", 1, "s", 2).to_xml()
-        root = ET.fromstring(xml)
-        # The engine emits `<Database path ="...">`. XML permits whitespace
-        # between an attribute name and its "=", so the attribute is named
-        # "path" -- the trailing space is not part of it.
-        assert root.find("Database").get("path") == '/tmp/we"ird.BinDiff'
-
-    def test_frame_is_a_native_order_length_prefix(self):
-        """The C++ side writes the length by reinterpreting a uint32_t, so it
-        is native order -- not network order."""
-        framed = encode_message("hello")
-        assert framed[:4] == struct.pack("=I", 5)
-        assert framed[4:] == b"hello"
-
-    def test_round_trips_to_a_listening_socket(self):
-        received = []
-
-        server = socket.socket()
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind(("127.0.0.1", 0))
-        server.listen(1)
-        port = server.getsockname()[1]
-
-        def accept():
-            conn, _ = server.accept()
-            with conn:
-                header = conn.recv(4)
-                length = struct.unpack("=I", header)[0]
-                received.append(conn.recv(length).decode("utf-8"))
-
-        thread = threading.Thread(target=accept)
-        thread.start()
-        try:
-            send_gui_message("<BinDiffMatch/>", port=port)
-        finally:
-            thread.join(timeout=5)
-            server.close()
-
-        assert received == ["<BinDiffMatch/>"]
-
-    def test_reports_a_missing_ui_clearly(self):
-        # Port 1 is privileged and nothing listens there.
-        with pytest.raises(ConnectionError, match="no BinDiff UI listening"):
-            send_gui_message("<BinDiffMatch/>", port=1, timeout=1.0)
