@@ -67,6 +67,23 @@ int DiffBinaries(const std::string& primary_path,
 std::vector<MatchInfo> LoadMatches(const std::string& database_path);
 StatisticsInfo LoadStatistics(const std::string& database_path);
 
+// Configuration.
+//
+// The engine takes its matching algorithms, their order and their confidence
+// values from a process-wide config. These expose it as JSON so the Python side
+// can read it, change it and put it back without a bespoke setter per field.
+//
+// GetConfigJson returns the config currently in effect; GetDefaultConfigJson
+// returns the compiled-in defaults. SetConfigJson merges the supplied JSON over
+// the defaults and installs the result, and throws if the JSON does not parse
+// as a Config.
+//
+// Not synchronised: the config is a shared global that the differ reads while
+// it runs. Change it between diffs, never during one.
+std::string GetConfigJson();
+std::string GetDefaultConfigJson();
+void SetConfigJson(const std::string& json);
+
 }  // namespace security::bindiff
 
 #endif  // PYTHON_BINDIFF_WRAPPERS_H_

@@ -30,10 +30,13 @@ from .core import (
     diff,
     load_matches,
     load_statistics,
+    get_config,
+    get_default_config,
+    set_config,
+    reset_config,
     CallGraph,
     FlowGraph,
     FixedPoint,
-    Config,
     MatchInfo,
     StatisticsInfo,
 )
@@ -51,11 +54,16 @@ __all__ = [
     "load_matches",
     "load_statistics",
 
+    # Configuration
+    "get_config",
+    "get_default_config",
+    "set_config",
+    "reset_config",
+
     # Core types
     "CallGraph",
     "FlowGraph",
     "FixedPoint",
-    "Config",
 
     # Data types
     "MatchInfo",

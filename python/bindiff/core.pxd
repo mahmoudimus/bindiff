@@ -52,3 +52,9 @@ cdef extern from "python/bindiff/wrappers.h" namespace "security::bindiff":
 
     vector[CMatchInfo] LoadMatches(const string& database_path) except + nogil
     CStatisticsInfo LoadStatistics(const string& database_path) except + nogil
+
+    # Config accessors. Kept with the GIL: these are cheap, and they touch a
+    # process-wide global that a running diff reads.
+    string GetConfigJson() except +
+    string GetDefaultConfigJson() except +
+    void SetConfigJson(const string& json) except +

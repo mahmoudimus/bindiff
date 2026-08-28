@@ -392,20 +392,30 @@ MatchingSteps GetDefaultMatchingSteps() {
     return algorithms;
   }();
 
-  static const auto* matching_steps = []() -> const MatchingSteps* {
-    auto* matching_steps = new MatchingSteps();
+  // Built on every call rather than cached in a static. The selection and its
+  // order come from the config, so caching it meant the config was read once
+  // per process and every later change was ignored -- toggling a function
+  // algorithm did nothing after the first diff, which in a long-lived host
+  // like IDA is every diff after the first. The algorithm objects above stay
+  // static; only the selection is rebuilt, and nothing here mutates them, so
+  // concurrent diffs still just read.
+  //
+  // Note that a step's confidence is read from the config when the object is
+  // constructed, i.e. on first use in the process. Re-ordering and
+  // enabling/disabling take effect immediately; changing a confidence value
+  // needs a fresh process.
+  MatchingSteps matching_steps;
+  {
     for (const auto& step : config::Proto().function_matching()) {
       if (auto found = algorithms->find(step.name());
           found != algorithms->end()) {
-        matching_steps->push_back(found->second);
+        matching_steps.push_back(found->second);
       }
     }
-    LOG_IF(FATAL, matching_steps->empty())
-        << "No function matching algorithms registered";
-    return matching_steps;
-  }();
-
-  return *matching_steps;
+  }
+  LOG_IF(FATAL, matching_steps.empty())
+      << "No function matching algorithms registered";
+  return matching_steps;
 }
 
 }  // namespace security::bindiff

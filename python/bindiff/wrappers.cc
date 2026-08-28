@@ -25,6 +25,7 @@
 #include "third_party/zynamics/bindiff/match/call_graph.h"
 #include "third_party/zynamics/bindiff/match/context.h"
 #include "third_party/zynamics/bindiff/match/flow_graph.h"
+#include "third_party/zynamics/bindiff/config.h"
 #include "third_party/zynamics/bindiff/reader.h"
 #include "python/bindiff/sqlite_throwing.h"
 
@@ -223,6 +224,42 @@ StatisticsInfo LoadStatistics(const std::string& database_path) {
   }
 
   return stats;
+}
+
+std::string GetConfigJson() {
+  return config::AsJsonString(config::Proto());
+}
+
+std::string GetDefaultConfigJson() {
+  return config::AsJsonString(config::Defaults());
+}
+
+void SetConfigJson(const std::string& json) {
+  auto loaded = config::LoadFromJson(json);
+  python::ThrowIfError(loaded.status(), "parsing configuration");
+
+  // Start from the defaults and merge, so a partial config is a patch rather
+  // than a replacement.
+  Config merged = config::Defaults();
+  config::MergeInto(*loaded, merged);
+
+  // MergeInto cannot shrink the matching step lists, so on its own it can never
+  // disable an algorithm. Protobuf's MergeFrom appends to a repeated field, so
+  // passing a shorter list yields defaults + additions; MergeInto's guard then
+  // sees either a duplicate name or a differing count and restores the original
+  // list wholesale. Either way the caller's selection is discarded.
+  //
+  // For a toggle API that is useless, so a supplied list is authoritative:
+  // whatever the caller passes is exactly what runs, in that order. Omit the
+  // field entirely to keep the defaults.
+  if (loaded->function_matching_size() > 0) {
+    *merged.mutable_function_matching() = loaded->function_matching();
+  }
+  if (loaded->basic_block_matching_size() > 0) {
+    *merged.mutable_basic_block_matching() = loaded->basic_block_matching();
+  }
+
+  config::Proto() = merged;
 }
 
 }  // namespace security::bindiff

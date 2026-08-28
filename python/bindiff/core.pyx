@@ -5,6 +5,7 @@
 Cython implementation for BinDiff core types.
 """
 
+import json
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from typing import List, Tuple, Optional
@@ -12,22 +13,48 @@ from typing import List, Tuple, Optional
 cimport bindiff.core as core_types
 
 
-class Config:
-    """Configuration for BinDiff operations."""
+def get_config() -> dict:
+    """Returns the configuration currently in effect, as a dict.
 
-    def __init__(self):
-        """Initialize with default configuration."""
-        self.use_all_algorithms = True
-        self.min_confidence = 0.0
-        self.min_similarity = 0.0
+    This is the real engine configuration -- the same structure as
+    bindiff.json. The keys that decide what the differ actually does are
+    "function_matching" and "basic_block_matching": ordered lists of
+    {"name": ..., "confidence": ...}. A step whose name is absent from the list
+    is not run.
+    """
+    return json.loads(core_types.GetConfigJson().decode('utf-8'))
 
-    def to_dict(self):
-        """Convert configuration to dictionary."""
-        return {
-            'use_all_algorithms': self.use_all_algorithms,
-            'min_confidence': self.min_confidence,
-            'min_similarity': self.min_similarity,
-        }
+
+def get_default_config() -> dict:
+    """Returns the compiled-in default configuration as a dict."""
+    return json.loads(core_types.GetDefaultConfigJson().decode('utf-8'))
+
+
+def set_config(config: dict) -> None:
+    """Installs `config`, merged over the defaults.
+
+    A partial dict is a patch: anything unset keeps its default. The two
+    matching step lists are the exception -- if you supply one, it is used
+    verbatim, in the order given. That is what lets you disable a step: leave it
+    out. Omit the key entirely to keep the default list.
+
+    Enabling, disabling and reordering steps take effect on the next diff.
+    Changing a step's *confidence* does not: those values are read when the
+    algorithm objects are first constructed, so a confidence change needs a
+    fresh process.
+
+    Not thread-safe against a running diff -- the configuration is a global the
+    differ reads while it works. Call this between diffs.
+    """
+    if not isinstance(config, dict):
+        raise TypeError(f"config must be a dict, got {type(config).__name__}")
+    cdef string encoded = json.dumps(config).encode('utf-8')
+    core_types.SetConfigJson(encoded)
+
+
+def reset_config() -> None:
+    """Restores the compiled-in defaults."""
+    set_config(get_default_config())
 
 
 class FunctionInfo:
