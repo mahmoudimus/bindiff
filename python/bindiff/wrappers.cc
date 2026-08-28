@@ -94,22 +94,26 @@ std::vector<MatchInfo> LoadMatches(const std::string& database_path) {
   try {
     auto db = ConnectOrThrow(database_path);
 
-    // Query matches
+    // In the .BinDiff schema the "function" table *is* the match table: one row
+    // per matched pair, holding both addresses and names side by side. There is
+    // no separate functionmatch table, and unmatched functions are not stored
+    // at all -- consumers recover those by comparing against the .BinExport
+    // inputs. See DatabaseWriter::PrepareDatabase() for the schema.
     const char* query = R"(
       SELECT
-        f1.address AS primary_address,
-        f2.address AS secondary_address,
-        f1.name AS primary_name,
-        f2.name AS secondary_name,
-        m.similarity,
-        m.confidence,
-        m.algorithm,
-        m.evaluate,
-        m.flags
-      FROM function AS f1
-      INNER JOIN functionmatch AS m ON f1.id = m.function1id
-      INNER JOIN function AS f2 ON f2.id = m.function2id
-      ORDER BY m.similarity DESC
+        f.address1,
+        f.address2,
+        f.name1,
+        f.name2,
+        f.similarity,
+        f.confidence,
+        f.algorithm,
+        f.evaluate,
+        f.flags,
+        COALESCE(a.name, '')
+      FROM function AS f
+      LEFT JOIN functionalgorithm AS a ON f.algorithm = a.id
+      ORDER BY f.similarity DESC
     )";
 
     ThrowingStatement stmt = db.StatementOrThrow(query);
@@ -120,6 +124,7 @@ std::vector<MatchInfo> LoadMatches(const std::string& database_path) {
       int64_t primary_addr = 0, secondary_addr = 0;
       int algorithm_id = 0, evaluate = 0, flags = 0;
 
+      std::string algorithm_name;
       stmt.Into(&primary_addr)
           .Into(&secondary_addr)
           .Into(&primary_name)
@@ -128,20 +133,26 @@ std::vector<MatchInfo> LoadMatches(const std::string& database_path) {
           .Into(&info.confidence)
           .Into(&algorithm_id)
           .Into(&evaluate)
-          .Into(&flags);
+          .Into(&flags)
+          .Into(&algorithm_name);
 
       info.primary_address = static_cast<uint64_t>(primary_addr);
       info.secondary_address = static_cast<uint64_t>(secondary_addr);
       info.primary_name = primary_name;
       info.secondary_name = secondary_name;
       info.algorithm_id = algorithm_id;
+      info.algorithm_name = algorithm_name;
       info.is_manual = (evaluate != 0);
       info.flags = flags;
 
       matches.push_back(std::move(info));
     }
-  } catch (...) {
-    // Return empty on error
+  } catch (const std::exception& error) {
+    // Rethrow rather than returning an empty vector: swallowing here would make
+    // an unreadable database look exactly like a diff that found no matches.
+    // The Cython declaration is `except +`, so this reaches Python as an
+    // ordinary exception.
+    throw;
   }
 
   return matches;
@@ -151,97 +162,64 @@ std::vector<MatchInfo> LoadMatches(const std::string& database_path) {
 StatisticsInfo LoadStatistics(const std::string& database_path) {
   StatisticsInfo stats{};
 
-  try {
-    auto db = ConnectOrThrow(database_path);
+  auto db = ConnectOrThrow(database_path);
 
-    // Get function counts
-    {
-      ThrowingStatement func_stmt = db.StatementOrThrow(
-          "SELECT file, COUNT(*) FROM function GROUP BY file ORDER BY file");
-
-      int file_idx = 1;
-      for (func_stmt.ExecuteOrThrow(); func_stmt.GotData();
-           func_stmt.ExecuteOrThrow()) {
-        int file = 0, count = 0;
-        func_stmt.Into(&file).Into(&count);
-        if (file_idx == 1) {
-          stats.primary_function_count = count;
-        } else {
-          stats.secondary_function_count = count;
-        }
-        file_idx++;
+  // Per-input totals live in the "file" table, one row per input, ordered by
+  // id: id 1 is the primary, id 2 the secondary. The counts are of everything
+  // in that binary, matched or not.
+  //
+  // Each quantity is split across two columns: "functions" counts only
+  // non-library functions and "libfunctions" the rest, so the total is their
+  // sum (the CLI prints these as "219 functions ... 117 non-library"). Reading
+  // just the first column understates the total, which can leave the matched
+  // count looking larger than the number of functions available to match.
+  {
+    ThrowingStatement file_stmt = db.StatementOrThrow(
+        "SELECT functions + libfunctions,"
+        "       basicblocks + libbasicblocks,"
+        "       instructions + libinstructions,"
+        "       edges + libedges "
+        "FROM file ORDER BY id");
+    int row = 0;
+    for (file_stmt.ExecuteOrThrow(); file_stmt.GotData();
+         file_stmt.ExecuteOrThrow()) {
+      int functions = 0, basic_blocks = 0, instructions = 0, edges = 0;
+      file_stmt.Into(&functions)
+          .Into(&basic_blocks)
+          .Into(&instructions)
+          .Into(&edges);
+      if (row == 0) {
+        stats.primary_function_count = functions;
+        stats.primary_basic_block_count = basic_blocks;
+        stats.primary_instruction_count = instructions;
+        stats.primary_edge_count = edges;
+      } else if (row == 1) {
+        stats.secondary_function_count = functions;
+        stats.secondary_basic_block_count = basic_blocks;
+        stats.secondary_instruction_count = instructions;
+        stats.secondary_edge_count = edges;
       }
+      ++row;
     }
+  }
 
-    // Get matched function count
-    {
-      ThrowingStatement match_stmt =
-          db.StatementOrThrow("SELECT COUNT(*) FROM functionmatch");
-      match_stmt.ExecuteOrThrow();
-      if (match_stmt.GotData()) {
-        match_stmt.Into(&stats.matched_function_count);
-      }
+  // Matched counts are row counts of the three match tables. "function" holds
+  // matched function pairs, "basicblock" matched basic-block pairs, and
+  // "instruction" matched instruction pairs. Matched edges are not stored
+  // per-pair; the per-function edge counts sum to the total.
+  {
+    ThrowingStatement stmt = db.StatementOrThrow(
+        "SELECT (SELECT COUNT(*) FROM function),"
+        "       (SELECT COUNT(*) FROM basicblock),"
+        "       (SELECT COUNT(*) FROM instruction),"
+        "       (SELECT COALESCE(SUM(edges), 0) FROM function)");
+    stmt.ExecuteOrThrow();
+    if (stmt.GotData()) {
+      stmt.Into(&stats.matched_function_count)
+          .Into(&stats.matched_basic_block_count)
+          .Into(&stats.matched_instruction_count)
+          .Into(&stats.matched_edge_count);
     }
-
-    // Get basic block counts
-    {
-      ThrowingStatement bb_stmt = db.StatementOrThrow(
-          "SELECT file, COUNT(*) FROM basicblock GROUP BY file ORDER BY file");
-
-      int file_idx = 1;
-      for (bb_stmt.ExecuteOrThrow(); bb_stmt.GotData();
-           bb_stmt.ExecuteOrThrow()) {
-        int file = 0, count = 0;
-        bb_stmt.Into(&file).Into(&count);
-        if (file_idx == 1) {
-          stats.primary_basic_block_count = count;
-        } else {
-          stats.secondary_basic_block_count = count;
-        }
-        file_idx++;
-      }
-    }
-
-    // Get matched basic block count
-    {
-      ThrowingStatement bb_match_stmt =
-          db.StatementOrThrow("SELECT COUNT(*) FROM basicblockmatch");
-      bb_match_stmt.ExecuteOrThrow();
-      if (bb_match_stmt.GotData()) {
-        bb_match_stmt.Into(&stats.matched_basic_block_count);
-      }
-    }
-
-    // Get instruction counts
-    {
-      ThrowingStatement inst_stmt = db.StatementOrThrow(
-          "SELECT file, COUNT(*) FROM instruction GROUP BY file ORDER BY file");
-
-      int file_idx = 1;
-      for (inst_stmt.ExecuteOrThrow(); inst_stmt.GotData();
-           inst_stmt.ExecuteOrThrow()) {
-        int file = 0, count = 0;
-        inst_stmt.Into(&file).Into(&count);
-        if (file_idx == 1) {
-          stats.primary_instruction_count = count;
-        } else {
-          stats.secondary_instruction_count = count;
-        }
-        file_idx++;
-      }
-    }
-
-    // Get matched instruction count
-    {
-      ThrowingStatement inst_match_stmt =
-          db.StatementOrThrow("SELECT COUNT(*) FROM instructionmatch");
-      inst_match_stmt.ExecuteOrThrow();
-      if (inst_match_stmt.GotData()) {
-        inst_match_stmt.Into(&stats.matched_instruction_count);
-      }
-    }
-  } catch (...) {
-    // Return zeros on error
   }
 
   return stats;

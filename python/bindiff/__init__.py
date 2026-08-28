@@ -24,7 +24,7 @@ Example:
     ...     print(f"  {match.primary_name} -> {match.secondary_name}")
 """
 
-__version__ = "12.0.0"
+__version__ = "8.0.0"
 
 from .core import (
     diff,

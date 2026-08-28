@@ -240,22 +240,27 @@ int ResultsWrapper::ReadFromFile(const std::string& filename) {
 
     auto db = ConnectOrThrow(filename);
 
-    // Load matches
+    // The .BinDiff "function" table is itself the match table: each row is one
+    // matched pair, with both addresses and names on it, plus the per-pair
+    // basic block / edge / instruction counts. See
+    // DatabaseWriter::PrepareDatabase() for the schema.
     const char* match_query = R"(
       SELECT
-        f1.address AS primary_address,
-        f2.address AS secondary_address,
-        f1.name AS primary_name,
-        f2.name AS secondary_name,
-        m.similarity,
-        m.confidence,
-        m.algorithm,
-        m.evaluate,
-        m.flags
-      FROM function AS f1
-      INNER JOIN functionmatch AS m ON f1.id = m.function1id
-      INNER JOIN function AS f2 ON f2.id = m.function2id
-      ORDER BY m.similarity DESC
+        address1,
+        address2,
+        name1,
+        name2,
+        similarity,
+        confidence,
+        algorithm,
+        evaluate,
+        flags,
+        commentsported,
+        basicblocks,
+        edges,
+        instructions
+      FROM function
+      ORDER BY similarity DESC
     )";
 
     ThrowingStatement match_stmt = db.StatementOrThrow(match_query);
@@ -266,6 +271,7 @@ int ResultsWrapper::ReadFromFile(const std::string& filename) {
       int algorithm = 0, evaluate = 0, flags = 0;
       std::string primary_name, secondary_name;
 
+      int comments_ported = 0;
       match_stmt.Into(&primary_addr)
           .Into(&secondary_addr)
           .Into(&primary_name)
@@ -274,77 +280,33 @@ int ResultsWrapper::ReadFromFile(const std::string& filename) {
           .Into(&match.confidence)
           .Into(&algorithm)
           .Into(&evaluate)
-          .Into(&flags);
+          .Into(&flags)
+          .Into(&comments_ported)
+          .Into(&match.basic_block_count)
+          .Into(&match.edge_count)
+          .Into(&match.instruction_count);
 
       match.address_primary = static_cast<uint64_t>(primary_addr);
       match.address_secondary = static_cast<uint64_t>(secondary_addr);
       match.name_primary = primary_name;
       match.name_secondary = secondary_name;
       match.manual = (evaluate != 0);
-      match.comments_ported = false;
-      match.change_type = 0;
-
-      // Get basic block/edge/instruction counts for matched functions
-      match.basic_block_count = 0;
-      match.edge_count = 0;
-      match.instruction_count = 0;
+      match.comments_ported = (comments_ported != 0);
+      match.change_type = flags;
 
       impl_->matches_.push_back(match);
     }
 
-    // Load unmatched primary functions
-    const char* unmatched_primary_query = R"(
-      SELECT address, name
-      FROM function
-      WHERE file = 1 AND id NOT IN (SELECT function1id FROM functionmatch)
-    )";
-
-    ThrowingStatement unmatched_primary_stmt =
-        db.StatementOrThrow(unmatched_primary_query);
-    for (unmatched_primary_stmt.ExecuteOrThrow();
-         unmatched_primary_stmt.GotData();
-         unmatched_primary_stmt.ExecuteOrThrow()) {
-      UnmatchedDescription unmatched{};
-      int64_t addr = 0;
-      std::string name;
-
-      unmatched_primary_stmt.Into(&addr).Into(&name);
-
-      unmatched.address = static_cast<uint64_t>(addr);
-      unmatched.name = name;
-      unmatched.basic_block_count = 0;
-      unmatched.instruction_count = 0;
-      unmatched.edge_count = 0;
-
-      impl_->unmatched_primary_.push_back(unmatched);
-    }
-
-    // Load unmatched secondary functions
-    const char* unmatched_secondary_query = R"(
-      SELECT address, name
-      FROM function
-      WHERE file = 2 AND id NOT IN (SELECT function2id FROM functionmatch)
-    )";
-
-    ThrowingStatement unmatched_secondary_stmt =
-        db.StatementOrThrow(unmatched_secondary_query);
-    for (unmatched_secondary_stmt.ExecuteOrThrow();
-         unmatched_secondary_stmt.GotData();
-         unmatched_secondary_stmt.ExecuteOrThrow()) {
-      UnmatchedDescription unmatched{};
-      int64_t addr = 0;
-      std::string name;
-
-      unmatched_secondary_stmt.Into(&addr).Into(&name);
-
-      unmatched.address = static_cast<uint64_t>(addr);
-      unmatched.name = name;
-      unmatched.basic_block_count = 0;
-      unmatched.instruction_count = 0;
-      unmatched.edge_count = 0;
-
-      impl_->unmatched_secondary_.push_back(unmatched);
-    }
+    // Unmatched functions are deliberately not recoverable from a .BinDiff
+    // file: the format stores matches only. The queries that used to be here
+    // selected on a "file" column of the function table and a functionmatch
+    // table, neither of which exists, so they could only ever have thrown --
+    // and the catch-all below turned that into a silent "no results". A caller
+    // that needs the unmatched sets must diff these matches against the
+    // function lists in the two .BinExport inputs, which this wrapper does not
+    // read. Left empty rather than silently wrong.
+    impl_->unmatched_primary_.clear();
+    impl_->unmatched_secondary_.clear();
 
     // Load basic statistics
     StatisticDescription stat{};
@@ -365,7 +327,9 @@ int ResultsWrapper::ReadFromFile(const std::string& filename) {
     impl_->incomplete_ = true;  // Loaded from disk
     impl_->modified_ = false;
     return 0;
-  } catch (...) {
+  } catch (const std::exception&) {
+    // Non-zero tells the caller the load failed. Callers must check it: the
+    // wrapper is left holding whatever partial state it had read.
     return -1;
   }
 }

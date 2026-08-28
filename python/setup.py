@@ -21,9 +21,11 @@ Supports platform detection and debug mode via DEBUG environment variable.
 """
 
 import functools
+import json
 import os
 import platform
 import re
+import shlex
 import sys
 from pathlib import Path
 from setuptools import setup, Extension
@@ -39,7 +41,12 @@ DEBUG_MODE = os.environ.get("DEBUG", "0") == "1"
 # Determine paths
 PYTHON_DIR = Path(__file__).parent.resolve()
 BINDIFF_ROOT = PYTHON_DIR.parent
-BUILD_DIR = BINDIFF_ROOT / "build"
+# The CMake build tree. Overridable because the documented out-of-source layout
+# is build/out, while a bare `cmake -B build` puts it directly in build/.
+# Library directories are discovered by walking this tree, so either works.
+BUILD_DIR = Path(
+    os.environ.get("BINDIFF_BUILD_DIR", BINDIFF_ROOT / "build")
+).resolve()
 
 # Check if BinDiff has been built
 if not BUILD_DIR.exists():
@@ -52,7 +59,9 @@ if not BUILD_DIR.exists():
     sys.exit(1)
 
 # Locate BinExport directory (sibling to BinDiff)
-BINEXPORT_DIR = BINDIFF_ROOT.parent / "binexport"
+BINEXPORT_DIR = Path(
+    os.environ.get("BINDIFF_BINEXPORT_DIR", BINDIFF_ROOT.parent / "binexport")
+).resolve()
 if not BINEXPORT_DIR.exists():
     print("ERROR: BinExport directory not found.")
     print(f"Expected: {BINEXPORT_DIR}")
@@ -61,29 +70,71 @@ if not BINEXPORT_DIR.exists():
     print("  git clone https://github.com/google/binexport.git")
     sys.exit(1)
 
-# Include directories
-# Note: wrappers.h only uses standard library, but wrappers.cc needs BinDiff headers
+# Include directories.
+#
+# wrappers.cc includes BinDiff headers, which pull in BinExport, Abseil,
+# Protobuf and Boost. Rather than track that transitive set by hand -- it has
+# drifted before, most recently over protobuf's vendored utf8_range -- take it
+# from the CMake build these wrappers link against. CMakeLists.txt sets
+# CMAKE_EXPORT_COMPILE_COMMANDS, so the exact flags used to compile the engine
+# are on disk next to the libraries.
+def _include_dirs_from_compile_commands(build_dir):
+    """Returns the -I paths CMake used for the engine, or [] if unavailable."""
+    db_path = build_dir / "compile_commands.json"
+    if not db_path.is_file():
+        return []
+    try:
+        with open(db_path, encoding="utf-8") as db_file:
+            entries = json.load(db_file)
+    except (OSError, ValueError):
+        return []
+
+    # Any BinDiff translation unit carries the full include set; sqlite.cc is
+    # small and always built.
+    for entry in entries:
+        if not entry.get("file", "").endswith("sqlite.cc"):
+            continue
+        argv = shlex.split(entry.get("command") or " ".join(entry.get("arguments", [])))
+        dirs = []
+        for i, token in enumerate(argv):
+            if token.startswith("-I") and len(token) > 2:
+                dirs.append(token[2:])
+            elif token == "-I" and i + 1 < len(argv):
+                dirs.append(argv[i + 1])
+        return [d for d in dirs if os.path.isdir(d)]
+    return []
+
+
 include_dirs = [
-    str(BINDIFF_ROOT),                                             # For python/bindiff/wrappers.h
-    str(BUILD_DIR / "src_include"),                                # For third_party/zynamics/bindiff/*
-    str(BUILD_DIR / "gen_include"),                                # For generated BinDiff headers
-    str(BUILD_DIR / "_deps" / "binexport-build" / "src_include"),  # For third_party/zynamics/binexport/*.h
-    str(BUILD_DIR / "_deps" / "binexport-build" / "gen_include"),  # For third_party/zynamics/binexport/*.pb.h
-    str(BINEXPORT_DIR / "stubs"),                                  # For BinExport stubs
+    str(BINDIFF_ROOT),  # For "python/bindiff/wrappers.h"
 ]
 
-# Add dependency headers from CMake _deps
-deps_dir = BUILD_DIR / "_deps"
-if deps_dir.exists():
-    # Add absl - required by BinDiff headers
-    absl_src = deps_dir / "absl-src"
-    if absl_src.exists():
-        include_dirs.append(str(absl_src))
+_cmake_includes = _include_dirs_from_compile_commands(BUILD_DIR)
+if _cmake_includes:
+    include_dirs.extend(_cmake_includes)
+else:
+    # Fallback for a build tree without compile_commands.json.
+    include_dirs.extend([
+        str(BUILD_DIR / "src_include"),                                # third_party/zynamics/bindiff/*
+        str(BUILD_DIR / "gen_include"),                                # generated BinDiff headers
+        str(BUILD_DIR / "_deps" / "binexport-build" / "src_include"),  # binexport/*.h
+        str(BUILD_DIR / "_deps" / "binexport-build" / "gen_include"),  # binexport/*.pb.h
+        str(BINEXPORT_DIR),
+        str(BINEXPORT_DIR / "stubs"),
+    ])
 
-    # Add protobuf - required by BinDiff headers
-    protobuf_src = deps_dir / "protobuf-src" / "src"
-    if protobuf_src.exists():
-        include_dirs.append(str(protobuf_src))
+    deps_dir = BUILD_DIR / "_deps"
+    if deps_dir.exists():
+        for candidate in (
+            deps_dir / "absl-src",
+            deps_dir / "protobuf-src" / "src",
+            # protobuf's parse_context.h includes "utf8_validity.h", which
+            # lives in its vendored utf8_range copy.
+            deps_dir / "protobuf-src" / "third_party" / "utf8_range",
+            deps_dir / "protobuf-src",
+        ):
+            if candidate.exists():
+                include_dirs.append(str(candidate))
 
 # Add Boost - required by call_graph.h
 boost_include = os.environ.get("BOOST_INCLUDE_DIR")
@@ -92,6 +143,10 @@ if boost_include:
 else:
     # Try common Boost locations
     boost_locations = [
+        # BinExport vendors the subset of Boost that BinDiff needs; this is
+        # what the CMake build itself compiles against (BinExportDeps.cmake
+        # sets Boost_INCLUDE_DIR to it), so prefer it over any system copy.
+        BINEXPORT_DIR / "boost_parts",
         BUILD_DIR / "_deps" / "boost-src",
         Path("/usr/include"),
         Path("/usr/local/include"),
@@ -137,96 +192,66 @@ if os.environ.get("VERBOSE_BUILD"):
         print(f"  ... and {len(library_dirs) - 10} more")
     print(f"{'='*60}\n")
 
-# Libraries to link
-# Note: Order matters - list dependencies after dependents
-libraries = [
-    "bindiff_shared",
-    "bindiff_config",
-    "bindiff_version",
-]
+# Libraries to link.
+#
+# This used to be a hand-maintained list of ~60 Abseil archive names. That list
+# goes stale every time BinExport moves its Abseil pin -- absl_crc_cpu_detect,
+# for one, no longer exists -- and the failure is a link error naming a single
+# missing -l at a time. Instead, link the archives CMake actually produced.
+# Passing full paths also removes the need to get -l ordering right.
+def _static_libraries(build_dir):
+    """Every static archive CMake built, minus the test-only ones."""
+    # gtest/gmock/benchmark are only linked by test binaries, and their *_main
+    # variants define main(). The LTO probe directories hold throwaway objects.
+    skip_names = ("gtest", "gtest_main", "gmock", "gmock_main",
+                  "benchmark", "benchmark_main")
+    skip_path_parts = ("CMakeFiles", "_CMakeLTOTest-C", "_CMakeLTOTest-CXX")
 
-# Add required dependencies (abseil, binexport, sqlite)
-# These are typically built by CMake as static libraries
-if OSTYPE != "Windows":
-    libraries.extend([
-        "binexport_shared",
-        "sqlite",
-        # Protocol Buffers - required by BinExport
-        "protobuf",
-        "utf8_validity",
-        # Abseil libraries - required by bindiff_shared and protobuf
-        # Order matters: list dependencies after dependents
-        "absl_strings",
-        "absl_str_format_internal",
-        "absl_strings_internal",
-        "absl_string_view",
-        "absl_int128",
-        "absl_raw_hash_set",
-        "absl_hashtablez_sampler",
-        "absl_hash",
-        "absl_city",
-        "absl_status",
-        "absl_statusor",
-        "absl_cord",
-        "absl_cordz_info",
-        "absl_cord_internal",
-        "absl_cordz_handle",
-        "absl_cordz_functions",
-        "absl_exponential_biased",
-        # CRC libraries - used by cord and other abseil components
-        "absl_crc_cord_state",
-        "absl_crc32c",
-        "absl_crc_internal",
-        "absl_crc_cpu_detect",
-        "absl_synchronization",
-        "absl_graphcycles_internal",
-        "absl_kernel_timeout_internal",
-        "absl_time",
-        "absl_civil_time",
-        "absl_time_zone",
-        "absl_malloc_internal",
-        "absl_base",
-        "absl_spinlock_wait",
-        "absl_throw_delegate",
-        "absl_raw_logging_internal",
-        "absl_log_severity",
-        "absl_log_internal_check_op",
-        "absl_log_internal_conditions",
-        "absl_log_internal_message",
-        "absl_log_internal_log_sink_set",
-        "absl_log_internal_globals",
-        "absl_log_internal_proto",
-        "absl_log_internal_structured_proto",
-        "absl_log_internal_format",
-        "absl_log_internal_nullguard",
-        "absl_log_sink",
-        "absl_log_globals",
-        "absl_log_initialize",
-        "absl_strerror",
-        "absl_examine_stack",
-        "absl_stacktrace",
-        "absl_symbolize",
-        "absl_debugging_internal",
-        "absl_demangle_internal",
-        "absl_demangle_rust",
-        "absl_decode_rust_punycode",
-        "absl_utf8_for_code_point",
-        "absl_leak_check",
-        "absl_vlog_config_internal",
-    ])
-else:
-    # Windows uses different naming
-    libraries.extend([
-        "binexport_shared",
-        "sqlite3",
-        # TODO: Add absl libraries for Windows
-    ])
+    found = {}
+    for path in build_dir.rglob("*.a"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if any(part in skip_path_parts for part in path.parts):
+            continue
+        stem = path.stem[3:] if path.stem.startswith("lib") else path.stem
+        if stem in skip_names:
+            continue
+        # Keep the first of any duplicate basename; rglob is deterministic.
+        found.setdefault(stem, str(path))
+    return found
+
+
+_archives = _static_libraries(BUILD_DIR)
+if not _archives:
+    print("ERROR: no static libraries found under", BUILD_DIR)
+    print("Build the C++ tree first:")
+    print("  cmake -S . -B build/out -G Ninja -DCMAKE_BUILD_TYPE=Release \\")
+    print("    -DBINDIFF_BINEXPORT_DIR=../binexport")
+    print("  cmake --build build/out")
+    sys.exit(1)
+
+# BinDiff's own archives must come first so the linker has undefined symbols
+# outstanding when it reaches their dependencies; --start-group then resolves
+# whatever remains, regardless of order.
+_priority = ["bindiff_shared", "bindiff_config", "bindiff_version",
+             "binexport_shared", "sqlite", "protobuf", "utf8_validity"]
+link_objects = [_archives[name] for name in _priority if name in _archives]
+link_objects += [path for name, path in sorted(_archives.items())
+                 if name not in _priority]
+
+# setup.py resolves these itself, so nothing is left for -l to find.
+libraries = []
+
+if os.environ.get("VERBOSE_BUILD"):
+    print(f"Linking {len(link_objects)} static archives:")
+    for obj in link_objects:
+        print(f"  - {obj}")
 
 
 def compile_args(debug_mode=False):
     """Return platform-specific compilation arguments."""
     debug_flags = []
-    base_args = ["-std=c++17"]
+    base_args = ["-std=c++20"]  # must match the C++ standard BinDiff builds with
 
     if OSTYPE == "Windows":
         if debug_mode:
@@ -288,6 +313,17 @@ def link_args(debug_mode=False):
 # Extra compile and link arguments
 extra_compile_args = compile_args(DEBUG_MODE)
 extra_link_args = link_args(DEBUG_MODE)
+
+# GNU ld resolves archives in a single pass, so a cycle between (say) absl_status
+# and absl_strings would otherwise need the same archive listed twice.
+# --start-group makes the order irrelevant. ld64 on macOS already re-scans
+# archives and rejects the flag.
+if OSTYPE == "Linux":
+    extra_link_args = (
+        extra_link_args + ["-Wl,--start-group"] + link_objects + ["-Wl,--end-group"]
+    )
+else:
+    extra_link_args = extra_link_args + link_objects
 
 # Define extensions
 extensions = [
