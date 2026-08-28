@@ -8,6 +8,7 @@ Cython declarations for BinDiff core types.
 from libcpp cimport bool
 from libcpp.string cimport string
 from libcpp.vector cimport vector
+from libc.stdint cimport uint64_t
 from libcpp.pair cimport pair
 
 cdef extern from "python/bindiff/wrappers.h" namespace "security::bindiff":
@@ -49,6 +50,18 @@ cdef extern from "python/bindiff/wrappers.h" namespace "security::bindiff":
     int DiffBinaries(const string& primary_path,
                     const string& secondary_path,
                     const string& output_database) except + nogil
+
+    # Long-running like DiffBinaries, so the GIL is released around it too.
+    int IncrementalDiff(const string& primary_path,
+                        const string& secondary_path,
+                        const string& existing_database,
+                        const string& output_database) except + nogil
+
+    # uint64_t exactly: the C++ signature uses uint64_t, which is
+    # `unsigned long` on LP64. Declaring `unsigned long long` here is a
+    # different type and the generated assignment does not compile.
+    vector[pair[uint64_t, string]] LoadComments(
+        const string& binexport_path) except + nogil
 
     vector[CMatchInfo] LoadMatches(const string& database_path) except + nogil
     CStatisticsInfo LoadStatistics(const string& database_path) except + nogil

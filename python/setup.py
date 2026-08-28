@@ -350,23 +350,11 @@ extensions = [
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
     ),
-    Extension(
-        "bindiff.ida_plugin",
-        sources=[
-            "bindiff/ida_plugin.pyx",
-            "bindiff/results_wrapper.cc",
-        ],
-        depends=[
-            "bindiff/ida_plugin.pxd",
-            "bindiff/results_wrapper.h",
-        ],
-        include_dirs=include_dirs,
-        library_dirs=library_dirs,
-        libraries=libraries,
-        language="c++",
-        extra_compile_args=extra_compile_args,
-        extra_link_args=extra_link_args,
-    ),
+    # There is no second extension. bindiff.ida_plugin used to wrap a
+    # ResultsWrapper class that reimplemented the engine's Results against an
+    # in-memory vector, with its writes unimplemented and its reads querying
+    # tables that do not exist. Reading and editing a .BinDiff is now
+    # bindiff.database, in plain sqlite3, so there is nothing left for it to do.
 ]
 
 # Cythonize with Cython 3.0+ features

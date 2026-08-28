@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace security::bindiff {
@@ -62,6 +63,30 @@ struct StatisticsInfo {
 int DiffBinaries(const std::string& primary_path,
                  const std::string& secondary_path,
                  const std::string& output_database);
+
+// Re-runs matching over the functions an existing diff left unmatched.
+//
+// The matches already in `existing_database` are re-created as fixed points
+// before the matching steps run. Every matching step skips a function that
+// already has one (IsValidCandidate checks exactly that), so the existing
+// matches are preserved verbatim -- manual ones included -- and only the
+// remainder is considered. The result is written to `output_database`, which
+// may be the same path as the input.
+//
+// Returns the number of *newly* discovered matches, or a negative error code
+// on the same scheme as DiffBinaries.
+int IncrementalDiff(const std::string& primary_path,
+                    const std::string& secondary_path,
+                    const std::string& existing_database,
+                    const std::string& output_database);
+
+// Reads the comments recorded in a .BinExport, keyed by address.
+//
+// Porting comments between databases needs the *secondary* binary's comments,
+// which the .BinDiff result file does not carry -- it stores matches only.
+// This is where they come from.
+std::vector<std::pair<uint64_t, std::string>> LoadComments(
+    const std::string& binexport_path);
 
 // Load results from database
 std::vector<MatchInfo> LoadMatches(const std::string& database_path);

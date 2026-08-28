@@ -25,6 +25,9 @@
 #include "third_party/zynamics/bindiff/match/call_graph.h"
 #include "third_party/zynamics/bindiff/match/context.h"
 #include "third_party/zynamics/bindiff/match/flow_graph.h"
+#include "third_party/absl/container/flat_hash_map.h"
+#include "third_party/absl/strings/str_cat.h"
+#include "third_party/zynamics/bindiff/comment.h"
 #include "third_party/zynamics/bindiff/config.h"
 #include "third_party/zynamics/bindiff/reader.h"
 #include "python/bindiff/sqlite_throwing.h"
@@ -86,6 +89,141 @@ int DiffBinaries(const std::string& primary_path,
   } catch (...) {
     return -99;  // Unknown error
   }
+}
+
+namespace {
+
+// Indexes flow graphs by entry point address. FlowGraphs is a std::set ordered
+// by address, so a linear scan per lookup would be quadratic over the whole
+// match list.
+absl::flat_hash_map<Address, FlowGraph*> IndexByEntryPoint(
+    const FlowGraphs& flow_graphs) {
+  absl::flat_hash_map<Address, FlowGraph*> index;
+  index.reserve(flow_graphs.size());
+  for (FlowGraph* flow_graph : flow_graphs) {
+    index[flow_graph->GetEntryPointAddress()] = flow_graph;
+  }
+  return index;
+}
+
+}  // namespace
+
+int IncrementalDiff(const std::string& primary_path,
+                    const std::string& secondary_path,
+                    const std::string& existing_database,
+                    const std::string& output_database) {
+  try {
+    const MatchingSteps call_graph_steps = GetDefaultMatchingSteps();
+    const MatchingStepsFlowGraph basic_block_steps =
+        GetDefaultMatchingStepsBasicBlock();
+    Instruction::Cache instruction_cache;
+    FlowGraphs flow_graphs1;
+    FlowGraphs flow_graphs2;
+    CallGraph call_graph1;
+    CallGraph call_graph2;
+    ScopedCleanup cleanup(&flow_graphs1, &flow_graphs2, &instruction_cache);
+
+    if (!Read(primary_path, &call_graph1, &flow_graphs1,
+              /*flow_graph_infos=*/nullptr, &instruction_cache)
+             .ok()) {
+      return -1;
+    }
+    if (!Read(secondary_path, &call_graph2, &flow_graphs2,
+              /*flow_graph_infos=*/nullptr, &instruction_cache)
+             .ok()) {
+      return -2;
+    }
+
+    FixedPoints fixed_points;
+    MatchingContext context(call_graph1, call_graph2, flow_graphs1,
+                            flow_graphs2, fixed_points);
+
+    // Seed from the existing result file.
+    const auto primary_index = IndexByEntryPoint(flow_graphs1);
+    const auto secondary_index = IndexByEntryPoint(flow_graphs2);
+
+    int seeded = 0;
+    {
+      auto db = ConnectOrThrow(existing_database);
+      ThrowingStatement stmt = db.StatementOrThrow(R"(
+        SELECT f.address1, f.address2, COALESCE(a.name, '')
+        FROM function AS f
+        LEFT JOIN functionalgorithm AS a ON f.algorithm = a.id
+      )");
+      for (stmt.ExecuteOrThrow(); stmt.GotData(); stmt.ExecuteOrThrow()) {
+        int64_t primary_address = 0, secondary_address = 0;
+        std::string algorithm;
+        stmt.Into(&primary_address).Into(&secondary_address).Into(&algorithm);
+
+        auto primary = primary_index.find(static_cast<Address>(primary_address));
+        auto secondary =
+            secondary_index.find(static_cast<Address>(secondary_address));
+        // A match naming a function that is not in these inputs means the
+        // result file was produced from different binaries. Skip it rather
+        // than fabricate a fixed point against the wrong function.
+        if (primary == primary_index.end() ||
+            secondary == secondary_index.end()) {
+          continue;
+        }
+
+        auto added = context.AddFixedPoint(
+            primary->second, secondary->second,
+            algorithm.empty() ? MatchingStep::kFunctionManualName : algorithm);
+        if (!added.second) {
+          continue;
+        }
+        // Recreate the basic block matches for the pair: the fixed point on
+        // its own carries no counts, and the writer reports them per match.
+        FixedPoint& fixed_point = const_cast<FixedPoint&>(*added.first);
+        FindFixedPointsBasicBlock(&fixed_point, &context, basic_block_steps);
+        UpdateFixedPointConfidence(fixed_point);
+        ++seeded;
+      }
+    }
+
+    // Every step skips a function that already has a fixed point, so this only
+    // considers what the previous diff left over.
+    Diff(&context, call_graph_steps, basic_block_steps);
+
+    auto database_writer = DatabaseWriter::Create(output_database);
+    if (!database_writer.ok()) {
+      return -3;
+    }
+    if (!(*database_writer)
+             ->Write(call_graph1, call_graph2, flow_graphs1, flow_graphs2,
+                     fixed_points)
+             .ok()) {
+      return -4;
+    }
+    return static_cast<int>(fixed_points.size()) - seeded;
+  } catch (...) {
+    return -99;
+  }
+}
+
+std::vector<std::pair<uint64_t, std::string>> LoadComments(
+    const std::string& binexport_path) {
+  std::vector<std::pair<uint64_t, std::string>> comments;
+
+  Instruction::Cache instruction_cache;
+  FlowGraphs flow_graphs;
+  CallGraph call_graph;
+  ScopedCleanup cleanup(&flow_graphs, /*flow_graphs2=*/nullptr,
+                        &instruction_cache);
+
+  auto status = Read(binexport_path, &call_graph, &flow_graphs,
+                     /*flow_graph_infos=*/nullptr, &instruction_cache);
+  python::ThrowIfError(status, absl::StrCat("reading '", binexport_path, "'"));
+
+  // Keyed by (address, operand); the operand is dropped here because the
+  // consumer writes one comment per address.
+  for (const auto& [operator_id, comment] : call_graph.comments()) {
+    if (!comment.comment.empty()) {
+      comments.emplace_back(static_cast<uint64_t>(operator_id.first),
+                            comment.comment);
+    }
+  }
+  return comments;
 }
 
 // Load matches from database

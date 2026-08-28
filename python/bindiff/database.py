@@ -236,6 +236,27 @@ class BinDiffDatabase:
                          basic_blocks=r["basicblocks"], edges=r["edges"],
                          instructions=r["instructions"]) for r in rows]
 
+    def instruction_matches(self, match_id: Optional[int] = None
+                            ) -> List[tuple]:
+        """Matched instruction address pairs, as (primary, secondary).
+
+        These come from the `instruction` table, joined up through `basicblock`
+        to the function match. They are what makes precise comment porting
+        possible: a function-level match alone would only let you guess where
+        inside the function a comment belongs.
+        """
+        query = """
+            SELECT i.address1, i.address2
+            FROM instruction AS i
+            INNER JOIN basicblock AS b ON i.basicblockid = b.id
+        """
+        params: tuple = ()
+        if match_id is not None:
+            query += " WHERE b.functionid = ?"
+            params = (match_id,)
+        return [(_to_unsigned(row[0]), _to_unsigned(row[1]))
+                for row in self._connection.execute(query, params)]
+
     def algorithms(self) -> dict:
         """Maps algorithm name -> id."""
         return {row["name"]: row["id"] for row in self._connection.execute(

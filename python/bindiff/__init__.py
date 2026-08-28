@@ -28,6 +28,8 @@ __version__ = "8.0.0"
 
 from .core import (
     diff,
+    incremental_diff,
+    load_comments,
     load_matches,
     load_statistics,
     get_config,
@@ -43,6 +45,12 @@ from .core import (
 
 from .results import (
     Results,
+)
+
+from .visual_diff import (
+    VisualDiffRequest,
+    send_gui_message,
+    send_visual_diff,
 )
 
 from .database import (
@@ -63,7 +71,14 @@ __all__ = [
     "FileInfo",
     "MANUAL_ALGORITHM",
 
+    # Java UI
+    "VisualDiffRequest",
+    "send_visual_diff",
+    "send_gui_message",
+
     # Loading functions
+    "incremental_diff",
+    "load_comments",
     "load_matches",
     "load_statistics",
 

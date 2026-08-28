@@ -7,6 +7,8 @@ Cython implementation for BinDiff core types.
 
 import json
 from libcpp.string cimport string
+from libc.stdint cimport uint64_t
+from libcpp.pair cimport pair
 from libcpp.vector cimport vector
 from typing import List, Tuple, Optional
 
@@ -211,6 +213,59 @@ def diff(primary_path: str, secondary_path: str, output_path: str) -> int:
     with nogil:
         result = core_types.DiffBinaries(c_primary, c_secondary, c_output)
     return result
+
+
+def incremental_diff(primary_path: str, secondary_path: str,
+                     existing_path: str,
+                     output_path: str = None) -> int:
+    """Re-runs matching over whatever an earlier diff left unmatched.
+
+    The matches already in `existing_path` are re-created as fixed points
+    first, and every matching step skips a function that already has one, so
+    they survive untouched -- manual matches included. Only the remainder is
+    considered.
+
+    A match naming a function that is not present in these two .BinExport
+    inputs is skipped rather than seeded, so pointing this at a result file
+    from different binaries degrades to a plain diff instead of producing
+    nonsense.
+
+    `output_path` defaults to `existing_path`, i.e. updating in place.
+
+    Returns the number of newly found matches, or a negative code on failure:
+    -1/-2 reading the inputs, -3/-4 writing the database, -99 unexpected.
+    """
+    if output_path is None:
+        output_path = existing_path
+
+    cdef string c_primary = primary_path.encode('utf-8')
+    cdef string c_secondary = secondary_path.encode('utf-8')
+    cdef string c_existing = existing_path.encode('utf-8')
+    cdef string c_output = output_path.encode('utf-8')
+    cdef int result
+
+    with nogil:
+        result = core_types.IncrementalDiff(c_primary, c_secondary,
+                                            c_existing, c_output)
+    return result
+
+
+def load_comments(binexport_path: str) -> dict:
+    """Returns {address: comment} from a .BinExport.
+
+    Comments live in the .BinExport, not in the .BinDiff -- the result file
+    stores matches only. Porting comments into the primary database therefore
+    needs the *secondary* .BinExport, which is what this reads.
+    """
+    cdef string c_path = binexport_path.encode('utf-8')
+    cdef vector[pair[uint64_t, string]] c_comments
+    with nogil:
+        c_comments = core_types.LoadComments(c_path)
+
+    comments = {}
+    for entry in c_comments:
+        comments[int(entry.first)] = entry.second.decode('utf-8', 'replace')
+    return comments
 
 
 def load_matches(database_path: str) -> List[MatchInfo]:
