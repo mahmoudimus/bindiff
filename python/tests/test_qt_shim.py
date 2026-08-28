@@ -85,10 +85,11 @@ def test_both_bindings_are_attempted():
 
 
 def test_provenance_is_recorded():
-    """This file is AGPL-3.0 in origin and the repository is Apache-2.0, so the
-    note explaining why the copy is here must not be dropped."""
+    """AGPL-3.0 in origin, Apache-2.0 here: the note explaining why the copy is
+    allowed must survive edits to this file."""
     assert "Vendored from d810" in SHIM_SOURCE
     assert "AGPL-3.0" in SHIM_SOURCE
+    assert "explicit permission" in SHIM_SOURCE
 
 
 @pytest.mark.parametrize("name", [

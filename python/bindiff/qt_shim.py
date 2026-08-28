@@ -1,11 +1,14 @@
 """
 Qt Compatibility Shim for PyQt5 and PySide6
 
-Vendored from d810 (src/d810/qt_shim.py). d810 is licensed AGPL-3.0 and this
-repository is Apache-2.0, so this copy is here on the same footing as the copy
-in Gepetto: with the permission of d810's copyright holders, w00tzenheimer and
-Mahmoud Abdelkader. Confirm that permission covers Apache-2.0 redistribution
-before shipping a release built from this tree.
+Vendored from d810 (src/d810/qt_shim.py), which is licensed AGPL-3.0, into this
+Apache-2.0 repository. Mahmoud Abdelkader, a d810 author and the owner of this
+fork, has given explicit permission for that use.
+
+d810's AUTHORS.md lists Boris Batteux, w00tzenheimer and Mahmoud Abdelkader,
+and the history of this file is mostly w00tzenheimer's, so a sign-off from them
+is what completes the picture -- the same pair Gepetto's copy of this file
+names. Worth having on record before a release is cut from this tree.
 
 Kept as close to the original as possible so fixes can be carried across in
 either direction. The only edit is the import of Any/Literal, which came from a
