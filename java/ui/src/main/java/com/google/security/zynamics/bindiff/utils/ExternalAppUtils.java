@@ -14,7 +14,6 @@
 
 package com.google.security.zynamics.bindiff.utils;
 
-import com.google.common.base.Ascii;
 import com.google.security.zynamics.bindiff.BinDiffProtos.Config.IdaProOptions;
 import com.google.security.zynamics.bindiff.config.Config;
 import com.google.security.zynamics.bindiff.exceptions.DifferException;
@@ -55,18 +54,12 @@ public class ExternalAppUtils {
     throw new FileNotFoundException("BinDiff engine not found in configured path: " + rootPath);
   }
 
+  /**
+   * Returns the IDA Pro executable to use. IDA Pro 9.0 and later are 64-bit only and ship a single
+   * {@code ida} binary, so the database extension no longer selects between two executables.
+   */
   public static File getIdaExe(final File inFile) {
-    final String extension = FileUtils.getFileExtension(inFile);
     final IdaProOptions ida = Config.getInstance().getIda();
-
-    String idaExe;
-    if (Ascii.equalsIgnoreCase(extension, Constants.IDB64_EXTENSION)) {
-      idaExe = IdaHelpers.IDA64_EXECUTABLE;
-    } else if (Ascii.equalsIgnoreCase(extension, Constants.IDB32_EXTENSION)) {
-      idaExe = IdaHelpers.IDA32_EXECUTABLE;
-    } else {
-      return null;
-    }
-    return Paths.get(ida.getDirectory(), idaExe).toFile();
+    return Paths.get(ida.getDirectory(), IdaHelpers.IDA_EXECUTABLE).toFile();
   }
 }

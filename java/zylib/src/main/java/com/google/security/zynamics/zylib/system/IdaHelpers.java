@@ -22,18 +22,8 @@ import java.util.ArrayList;
 
 /** Contains a few simple methods that are useful for dealing with IDA and command line handling */
 public final class IdaHelpers {
-  public static final String IDA32_EXECUTABLE;
-  public static final String IDA64_EXECUTABLE;
-
-  static {
-    if (SystemHelpers.isRunningWindows()) {
-      IDA32_EXECUTABLE = "ida.exe";
-      IDA64_EXECUTABLE = "ida64.exe";
-    } else {
-      IDA32_EXECUTABLE = "ida";
-      IDA64_EXECUTABLE = "ida64";
-    }
-  }
+  public static final String IDA_EXECUTABLE =
+      SystemHelpers.isRunningWindows() ? "ida.exe" : "ida";
 
   /**
    * Exports an IDB using BinExport to a .BinExport file.
@@ -41,7 +31,7 @@ public final class IdaHelpers {
    * <p>This implementation should behave similar to the one used in the native BinDiff executable
    * and the IDA Pro plugin.
    *
-   * @param idaExe the IDA Pro executable to use. @see #IDA32_EXECUTABLE.
+   * @param idaExe the IDA Pro executable to use. @see #IDA_EXECUTABLE.
    * @param idbFilename the database file to export
    * @param binexportFilename where to store the resulting file.
    * @param alsologtostderr whether to log to standard output.

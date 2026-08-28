@@ -1,0 +1,75 @@
+[build-system]
+requires = [
+    "setuptools>=65.0",
+    "wheel",
+    "Cython>=3.0.0",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bindiff"
+version = "8.0.0"
+description = "Python interface for BinDiff binary diffing engine"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Google LLC"}
+]
+keywords = ["binary", "diff", "reverse-engineering", "malware-analysis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Cython",
+    "Programming Language :: C++",
+    "Topic :: Security",
+    "Topic :: Software Development :: Disassemblers",
+]
+
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=22.0",
+    "isort>=5.0",
+    "mypy>=0.990",
+]
+
+ui = [
+    "PySide6>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/google/bindiff"
+Documentation = "https://github.com/google/bindiff"
+Repository = "https://github.com/google/bindiff"
+Issues = "https://github.com/google/bindiff/issues"
+
+[tool.setuptools]
+packages = ["bindiff"]
+
+[tool.setuptools.package-data]
+bindiff = ["*.pxd", "*.pyx"]
+
+[tool.black]
+line-length = 88
+target-version = ["py38", "py39", "py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
