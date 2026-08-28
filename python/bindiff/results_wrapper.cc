@@ -243,21 +243,23 @@ int ResultsWrapper::ReadFromFile(const std::string& filename) {
     // DatabaseWriter::PrepareDatabase() for the schema.
     const char* match_query = R"(
       SELECT
-        address1,
-        address2,
-        name1,
-        name2,
-        similarity,
-        confidence,
-        algorithm,
-        evaluate,
-        flags,
-        commentsported,
-        basicblocks,
-        edges,
-        instructions
-      FROM function
-      ORDER BY similarity DESC
+        f.address1,
+        f.address2,
+        f.name1,
+        f.name2,
+        f.similarity,
+        f.confidence,
+        f.algorithm,
+        f.evaluate,
+        f.flags,
+        f.commentsported,
+        f.basicblocks,
+        f.edges,
+        f.instructions,
+        COALESCE(a.name, '')
+      FROM function AS f
+      LEFT JOIN functionalgorithm AS a ON f.algorithm = a.id
+      ORDER BY f.similarity DESC
     )";
 
     ThrowingStatement match_stmt = db.StatementOrThrow(match_query);
@@ -269,6 +271,7 @@ int ResultsWrapper::ReadFromFile(const std::string& filename) {
       std::string primary_name, secondary_name;
 
       int comments_ported = 0;
+      std::string algorithm_name;
       match_stmt.Into(&primary_addr)
           .Into(&secondary_addr)
           .Into(&primary_name)
@@ -281,13 +284,21 @@ int ResultsWrapper::ReadFromFile(const std::string& filename) {
           .Into(&comments_ported)
           .Into(&match.basic_block_count)
           .Into(&match.edge_count)
-          .Into(&match.instruction_count);
+          .Into(&match.instruction_count)
+          .Into(&algorithm_name);
 
       match.address_primary = static_cast<uint64_t>(primary_addr);
       match.address_secondary = static_cast<uint64_t>(secondary_addr);
       match.name_primary = primary_name;
       match.name_secondary = secondary_name;
-      match.manual = (evaluate != 0);
+      match.algorithm_name = algorithm_name;
+      // `evaluate` is always 0 on disk -- DatabaseWriter binds a literal 0 --
+      // so it is not the manual flag. A match is manual when it was recorded
+      // against the "function: manual" algorithm at full confidence, which is
+      // the rule FixedPointInfo::IsManual() uses.
+      match.manual = match.confidence == 1.0 &&
+                     algorithm_name.find("manual") != std::string::npos;
+      (void)evaluate;
       match.comments_ported = (comments_ported != 0);
       match.change_type = flags;
 

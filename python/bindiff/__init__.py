@@ -45,10 +45,23 @@ from .results import (
     Results,
 )
 
+from .database import (
+    BinDiffDatabase,
+    FunctionMatch,
+    FileInfo,
+    MANUAL_ALGORITHM,
+)
+
 __all__ = [
     # Main API
     "diff",
     "Results",
+
+    # Reading and editing a .BinDiff file
+    "BinDiffDatabase",
+    "FunctionMatch",
+    "FileInfo",
+    "MANUAL_ALGORITHM",
 
     # Loading functions
     "load_matches",

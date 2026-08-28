@@ -143,7 +143,13 @@ std::vector<MatchInfo> LoadMatches(const std::string& database_path) {
       info.secondary_name = secondary_name;
       info.algorithm_id = algorithm_id;
       info.algorithm_name = algorithm_name;
-      info.is_manual = (evaluate != 0);
+      // A match is manual when it was recorded against the "function: manual"
+      // algorithm at full confidence -- the same rule FixedPointInfo::IsManual()
+      // applies. The `evaluate` column is not that flag: DatabaseWriter always
+      // writes 0 to it, so keying off it made is_manual permanently false.
+      info.is_manual = info.confidence == 1.0 &&
+                       algorithm_name.find("manual") != std::string::npos;
+      (void)evaluate;
       info.flags = flags;
 
       matches.push_back(std::move(info));
