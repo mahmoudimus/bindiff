@@ -26,6 +26,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
@@ -57,6 +58,29 @@ _EXPORT_SHARE = 0.6
 # How much worker chatter to keep for the message when no result arrives. IDA
 # writes a great deal of it and only the last few lines say why it stopped.
 _TAIL_LINES = 20
+
+# Cancelling is a conversation, not a kill. The launcher writes this token on
+# the worker's stdin; the worker answers with a "cancelling" progress record,
+# stops the diff at its next callback, and writes out the smaller result it is
+# already holding -- which reaches the launcher the same way a complete one
+# does, as a .BinDiff on disk named by a JSON line on stdout.
+#
+# stdin rather than a signal because signals are not portable: SIGINT cannot be
+# delivered to a single child on Windows, and CTRL_BREAK_EVENT needs a separate
+# process group. A line on a pipe behaves the same everywhere.
+_CANCEL_TOKEN = "cancel"
+_CANCEL_FLAG = "--cancel-on-stdin"
+_CANCELLING_STAGE = "cancelling"
+
+# How long to wait for the worker to say it heard the cancel. Only an export
+# stays silent this long: idalib does not call back during auto-analysis, so
+# there is no callback to notice the request and nothing partial to save.
+_CANCEL_ACK_TIMEOUT = 5.0
+
+# Having heard it, how long to let the worker finish writing. Generous, because
+# what it buys is the matches already made; the alternative is throwing them
+# away to save a few seconds.
+_CANCEL_GRACE = 300.0
 
 
 @dataclass
@@ -108,6 +132,9 @@ def _record(stage: str, message: str, *, fraction: Optional[float] = None,
             "matches": matches}
 
 
+_emit_lock = threading.Lock()
+
+
 def emit_progress(record: dict) -> None:
     """Writes one progress record to stdout.
 
@@ -115,8 +142,46 @@ def emit_progress(record: dict) -> None:
     and Python block-buffers a pipe. Without the flush every record would
     arrive in one burst when the worker exits, which is exactly when progress
     reporting stops being of any use.
+
+    Written as one string under a lock because the cancel listener emits from
+    its own thread while the diff is emitting from the matching thread, and a
+    line torn in half by an interleaved write is a line the launcher cannot
+    parse.
     """
-    print(json.dumps({_PROGRESS_KEY: record}), flush=True)
+    line = json.dumps({_PROGRESS_KEY: record}) + "\n"
+    with _emit_lock:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
+
+def watch_stdin_for_cancel(flag: threading.Event,
+                           stream=None) -> threading.Thread:
+    """Sets `flag` when the launcher asks the worker to stop.
+
+    The acknowledgement goes out before the flag is set, so the launcher knows
+    the request was heard while the diff is still winding down. Without it the
+    launcher could not tell "finishing the current step" from "wedged inside an
+    export", and would have to guess how long to wait before killing.
+    """
+    if stream is None:
+        stream = sys.stdin
+
+    def watch() -> None:
+        try:
+            for line in stream:
+                if line.strip() == _CANCEL_TOKEN:
+                    emit_progress(_record(
+                        _CANCELLING_STAGE,
+                        "cancelling: writing out what has been matched"))
+                    flag.set()
+                    return
+        except Exception:
+            return  # stdin closed or unreadable; there is nothing to watch.
+
+    thread = threading.Thread(target=watch, daemon=True,
+                              name="bindiff-cancel-listener")
+    thread.start()
+    return thread
 
 
 def _rescale(record: dict, base: float, span: float) -> dict:
@@ -187,42 +252,73 @@ def export(input_path: str, output_path: str,
 
 
 def diff(primary: str, secondary: str, output: str,
-         progress: Optional[Callable[[dict], None]] = None) -> StageResult:
+         progress: Optional[Callable[[dict], None]] = None,
+         should_continue: Optional[Callable[[], bool]] = None) -> StageResult:
     """Diffs two .BinExport files. Needs no IDA at all.
 
     `progress` is called with a record per matching step and per round of
     propagating matches through the call graph. The engine's step index only
     advances between steps, so during a long propagation the fraction holds
     still while the match count keeps climbing -- which is the honest picture.
+
+    `should_continue` is asked at each of those points. Returning False stops
+    the diff, and the result is still written and still reported: the steps run
+    strongest first, so what a cancelled diff holds is the matches worth
+    having. It comes back ok, marked `details["cancelled"]`, because a partial
+    .BinDiff is a usable .BinDiff -- callers that must know it is short have
+    the flag, and callers that just want the matches need not care.
     """
     import bindiff
 
-    def engine_progress(update: dict) -> None:
+    # Set only when the engine was actually told to stop. Asking after the
+    # diff has returned would be a different question with a different answer:
+    # a request arriving as the last step finishes cancels nothing, and a
+    # result that lost no matches must not be labelled as if it had.
+    stopped = False
+
+    def engine_progress(update: dict):
+        nonlocal stopped
         count = update.get("step_count") or 0
         index = update.get("step_index")
-        progress(_record(
-            "diff", update.get("step_name", ""),
-            # Work finished *before* this step, so the bar never claims a step
-            # is done while it is running. 100% is shown when the result
-            # arrives, not before.
-            fraction=(index / count) if count and index is not None else None,
-            step_index=index, step_count=update.get("step_count"),
-            matches=update.get("matches")))
+        if progress is not None:
+            progress(_record(
+                "diff", update.get("step_name", ""),
+                # Work finished *before* this step, so the bar never claims a
+                # step is done while it is running. 100% is shown when the
+                # result arrives, not before.
+                fraction=(index / count) if count and index is not None
+                else None,
+                step_index=index, step_count=update.get("step_count"),
+                matches=update.get("matches")))
+        # Only an explicit False cancels, so returning None here -- when the
+        # caller asked for no cancellation -- keeps the diff running.
+        if should_continue is None or should_continue():
+            return None
+        stopped = True
+        return False
 
+    needs_callback = progress is not None or should_continue is not None
     code = bindiff.diff(str(primary), str(secondary), str(output),
-                        progress=engine_progress if progress else None)
+                        progress=engine_progress if needs_callback else None)
     if code != 0:
         return StageResult(ok=False, stage="diff",
                            message=f"diff failed with {code}",
                            details={"code": code})
-    return StageResult(ok=True, stage="diff", output=str(output),
-                       matches=len(bindiff.load_matches(str(output))))
+
+    cancelled = stopped
+    return StageResult(
+        ok=True, stage="diff", output=str(output),
+        message="cancelled; results are partial" if cancelled else "",
+        matches=len(bindiff.load_matches(str(output))),
+        details={"cancelled": True} if cancelled else {})
 
 
 def pipeline(primary_input: str, secondary_input: str, output: str,
              work_dir: Optional[str] = None,
              exporter: Optional[Callable[[str], None]] = None,
-             progress: Optional[Callable[[dict], None]] = None) -> StageResult:
+             progress: Optional[Callable[[dict], None]] = None,
+             should_continue: Optional[Callable[[], bool]] = None
+             ) -> StageResult:
     """Exports both inputs and diffs them.
 
     Each export opens and closes its own database in turn, in this one process.
@@ -232,14 +328,23 @@ def pipeline(primary_input: str, secondary_input: str, output: str,
 
     An export reports only that it has started. There is no progress to be had
     from inside one: idalib's auto-analysis does not call back, and inventing a
-    fraction for it would be a lie told to a progress bar.
+    fraction for it would be a lie told to a progress bar. For the same reason
+    a cancellation is only noticed between exports -- there is nothing partial
+    to keep from a half-finished one, so nothing is lost by that.
     """
     work = Path(work_dir) if work_dir else Path(output).parent
     work.mkdir(parents=True, exist_ok=True)
 
+    def cancelled() -> bool:
+        return should_continue is not None and not should_continue()
+
     sources = (("primary", primary_input), ("secondary", secondary_input))
     exports = []
     for index, (label, source) in enumerate(sources):
+        if cancelled():
+            return StageResult(ok=False, stage="export",
+                               message="cancelled before the export finished",
+                               details={"cancelled": True})
         if progress is not None:
             progress(_record("export", f"exporting {label}: {Path(source).name}",
                              fraction=_EXPORT_SHARE * index / len(sources),
@@ -251,11 +356,17 @@ def pipeline(primary_input: str, secondary_input: str, output: str,
             return result
         exports.append(str(target))
 
+    if cancelled():
+        return StageResult(ok=False, stage="export",
+                           message="cancelled before the diff started",
+                           details={"cancelled": True, "exports": exports})
+
     def diff_progress(record: dict) -> None:
         progress(_rescale(record, _EXPORT_SHARE, 1.0 - _EXPORT_SHARE))
 
     result = diff(exports[0], exports[1], output,
-                  progress=diff_progress if progress else None)
+                  progress=diff_progress if progress else None,
+                  should_continue=should_continue)
     result.details["exports"] = exports
     return result
 
@@ -320,26 +431,72 @@ class _ProgressSink:
             self._callback = None
 
 
-def _classify(line: str, sink: _ProgressSink) -> Optional[StageResult]:
-    """Reads one line of worker stdout.
+def _parse_line(line: str):
+    """Classifies one line of worker stdout.
 
-    Returns a StageResult if the line is one. Progress records go to the sink;
-    IDA's chatter, which idalib writes freely, is neither and returns None.
+    Returns ("result", StageResult), ("progress", record) or (None, None) for
+    IDA's chatter, which idalib writes freely.
     """
     line = line.strip()
     if not line.startswith("{"):
-        return None
+        return None, None
     try:
         data = json.loads(line)
     except ValueError:
-        return None
+        return None, None
     if isinstance(data, dict) and _PROGRESS_KEY in data:
-        sink(data[_PROGRESS_KEY])
-        return None
+        return "progress", data[_PROGRESS_KEY]
     try:
-        return StageResult.from_json(line)
+        return "result", StageResult.from_json(line)
     except (ValueError, KeyError):
-        return None
+        return None, None
+
+
+def _wait_for_exit(process, grace: float) -> bool:
+    """Polls for the worker to exit. True if it did within `grace`.
+
+    Polled rather than Popen.wait(timeout=...) because the thread reading
+    stdout reaps the same process, and two threads waiting on one child is a
+    race worth simply not having.
+    """
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return True
+        time.sleep(0.1)
+    return process.poll() is not None
+
+
+def _ask_worker_to_stop(process, acknowledged: threading.Event) -> None:
+    """Cancels the worker, keeping its partial result if it can produce one.
+
+    Terminating would throw away every match already made. Asked instead, the
+    worker stops the diff at its next callback, writes the smaller result it is
+    already holding and reports it like any other -- the engine's
+    cancel-to-partial, delivered across the process boundary by the same
+    .BinDiff file and the same JSON line a complete run uses.
+
+    It is killed only when it does not answer, which means it is inside an
+    export: idalib does not call back during auto-analysis, so there is no
+    callback to hear the request, and a half-finished export holds nothing
+    worth keeping anyway.
+    """
+    try:
+        process.stdin.write(_CANCEL_TOKEN + "\n")
+        process.stdin.flush()
+    except (OSError, ValueError, AttributeError):
+        # No pipe to ask over. Nothing to negotiate with.
+        if process.poll() is None:
+            process.terminate()
+        return
+
+    if not acknowledged.wait(_CANCEL_ACK_TIMEOUT):
+        if process.poll() is None:
+            process.terminate()
+        return
+
+    if not _wait_for_exit(process, _CANCEL_GRACE) and process.poll() is None:
+        process.terminate()
 
 
 def _stream(command: List[str], timeout: Optional[float], sink: _ProgressSink,
@@ -351,11 +508,16 @@ def _stream(command: List[str], timeout: Optional[float], sink: _ProgressSink,
         # that fills the stderr pipe while this is still reading stdout would
         # deadlock, and idalib is easily chatty enough to do it. Lines are
         # filtered by shape, so mixing the two streams costs nothing.
-        stderr=subprocess.STDOUT, text=True, bufsize=1)
+        stderr=subprocess.STDOUT,
+        # Only opened when it can be used: an unread pipe on a worker that was
+        # not told to listen is just a handle to leak.
+        stdin=subprocess.PIPE if cancel is not None else None,
+        text=True, bufsize=1)
 
     # Both of these have to act from another thread: this one spends the run
-    # blocked in readline, and ending the worker is what unblocks it.
+    # blocked in readline, and the worker ending is what unblocks it.
     timed_out = threading.Event()
+    acknowledged = threading.Event()
 
     def on_timeout() -> None:
         timed_out.set()
@@ -366,8 +528,7 @@ def _stream(command: List[str], timeout: Optional[float], sink: _ProgressSink,
         # instead of outliving every diff that was never cancelled.
         while process.poll() is None:
             if cancel.wait(0.2):
-                if process.poll() is None:
-                    process.terminate()
+                _ask_worker_to_stop(process, acknowledged)
                 return
 
     watchers = []
@@ -384,10 +545,14 @@ def _stream(command: List[str], timeout: Optional[float], sink: _ProgressSink,
     tail = collections.deque(maxlen=_TAIL_LINES)
     try:
         for line in process.stdout:
-            parsed = _classify(line, sink)
-            if parsed is not None:
-                result = parsed
-            elif not line.strip().startswith("{"):
+            kind, payload = _parse_line(line)
+            if kind == "result":
+                result = payload
+            elif kind == "progress":
+                if payload.get("stage") == _CANCELLING_STAGE:
+                    acknowledged.set()
+                sink(payload)
+            else:
                 tail.append(line.rstrip())
         process.wait()
     finally:
@@ -395,18 +560,27 @@ def _stream(command: List[str], timeout: Optional[float], sink: _ProgressSink,
             if isinstance(watcher, threading.Timer):
                 watcher.cancel()
         process.stdout.close()
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
 
     if timed_out.is_set():
         return StageResult(ok=False, stage="worker",
                            message=f"worker timed out after {timeout:g}s")
-    if cancel is not None and cancel.is_set():
-        # Terminating the worker loses whatever it had matched. The engine can
-        # cancel to a smaller but coherent result, but that only reaches a
-        # caller in the same process; across a process boundary there is
-        # nothing to hand back.
-        return StageResult(ok=False, stage="worker", message="cancelled")
     if result is not None:
+        # Left exactly as the worker reported it. Asking to cancel is not the
+        # same as having cancelled anything: a short diff can finish between
+        # the request and the next callback, and marking that result partial
+        # would send the reader looking for matches that are not missing.
         return result
+    if cancel is not None and cancel.is_set():
+        # Only reached when the worker never answered and had to be killed --
+        # during an export, or wedged.
+        return StageResult(ok=False, stage="worker",
+                           message="cancelled before the worker reported",
+                           details={"cancelled": True})
     return StageResult(
         ok=False, stage="worker",
         message=(f"worker produced no result (exit {process.returncode}): "
@@ -429,7 +603,11 @@ def run_headless(args: Sequence[str], *,
     as the lines arrive. Anything it touches in the UI has to be posted to the
     UI thread; it is not called there.
 
-    `cancel` is an event that terminates the worker when set.
+    `cancel` is an event that stops the worker when set. It asks rather than
+    kills: a cancelled diff still writes the matches it had made, and comes
+    back as an ordinary result marked `details["cancelled"]`. Only a worker
+    that does not answer -- which means it is inside an export -- is
+    terminated, and then there is nothing partial to lose.
 
     A timeout returns a failing result rather than raising: a caller running
     this on a worker thread has nowhere to catch an exception, and a thread
@@ -442,7 +620,12 @@ def run_headless(args: Sequence[str], *,
     """
     if interpreter is None:
         interpreter = find_python_interpreter()
-    command = [str(interpreter), "-m", "bindiff.headless", *args]
+    command = [str(interpreter), "-m", "bindiff.headless"]
+    if cancel is not None:
+        # Passed only when cancellation is actually possible, so a worker run
+        # any other way leaves stdin alone.
+        command.append(_CANCEL_FLAG)
+    command += list(args)
     sink = _ProgressSink(on_progress)
 
     if runner is None:
@@ -452,9 +635,11 @@ def run_headless(args: Sequence[str], *,
                            timeout=timeout)
         result = None
         for line in (completed.stdout or "").splitlines():
-            parsed = _classify(line, sink)
-            if parsed is not None:
-                result = parsed
+            kind, payload = _parse_line(line)
+            if kind == "result":
+                result = payload
+            elif kind == "progress":
+                sink(payload)
         if result is None:
             result = StageResult(
                 ok=False, stage="worker",
@@ -468,8 +653,22 @@ def run_headless(args: Sequence[str], *,
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """Worker entry point: `python -m bindiff.headless <command> ...`."""
+    """Worker entry point.
+
+    `python -m bindiff.headless [--cancel-on-stdin] <command> ...`
+
+    The flag is passed only by a launcher that opened a pipe to write on, so
+    stdin is left alone when the worker is run by hand in a terminal.
+    """
     argv = list(sys.argv[1:] if argv is None else argv)
+
+    should_continue = None
+    if argv and argv[0] == _CANCEL_FLAG:
+        argv = argv[1:]
+        stop = threading.Event()
+        watch_stdin_for_cancel(stop)
+        should_continue = lambda: not stop.is_set()  # noqa: E731
+
     if not argv:
         print(StageResult(ok=False, stage="cli",
                           message="usage: export|diff|pipeline ...").to_json())
@@ -480,10 +679,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         if command == "export" and len(rest) == 2:
             result = export(rest[0], rest[1])
         elif command == "diff" and len(rest) == 3:
-            result = diff(rest[0], rest[1], rest[2], progress=emit_progress)
+            result = diff(rest[0], rest[1], rest[2], progress=emit_progress,
+                          should_continue=should_continue)
         elif command == "pipeline" and len(rest) == 3:
             result = pipeline(rest[0], rest[1], rest[2],
-                              progress=emit_progress)
+                              progress=emit_progress,
+                              should_continue=should_continue)
         else:
             result = StageResult(ok=False, stage="cli",
                                  message=f"bad arguments for {command!r}")

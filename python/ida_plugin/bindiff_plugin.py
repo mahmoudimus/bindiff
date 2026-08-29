@@ -689,18 +689,27 @@ if IDA_AVAILABLE:
                     broken = result.details.get("progress_error")
                     if broken:
                         self._report(f"progress reporting stopped: {broken}")
-                    if cancel.is_set():
-                        # Asked for, so reported without a warning box.
-                        form.finish("cancelled")
-                        self._report("diff cancelled")
-                        return 1
+                    cancelled = bool(result.details.get("cancelled"))
                     if not result.ok:
-                        form.finish(f"failed: {result.message}")
-                        ida_kernwin.warning(f"Diff failed:\n{result.message}")
+                        # A cancel that arrived during an export has no result
+                        # to show, and is not a failure to warn about.
+                        form.finish("cancelled" if cancelled
+                                    else f"failed: {result.message}")
+                        if cancelled:
+                            self._report("diff cancelled")
+                        else:
+                            ida_kernwin.warning(
+                                f"Diff failed:\n{result.message}")
                         return 1
-                    form.finish(f"{result.matches} matches")
+                    # A cancelled diff still wrote what it matched. The steps
+                    # run strongest first, so those are the matches worth
+                    # having -- it is opened like any other result, labelled
+                    # so nobody reads it as the whole picture.
+                    label = "partial" if cancelled else "complete"
+                    form.finish(f"{result.matches} matches ({label})")
                     self.controller.open_database(output)
-                    self._report(f"diff complete: {result.matches} matches")
+                    self._report(
+                        f"diff {label}: {result.matches} matches")
                     self._show_matches()
                     return 1
 

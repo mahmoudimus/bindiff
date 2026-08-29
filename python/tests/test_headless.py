@@ -80,6 +80,26 @@ class TestRunHeadless:
         assert seen["command"] == ["/usr/bin/python3", "-m", "bindiff.headless",
                                    "diff", "a", "b", "c"]
 
+    def test_the_cancel_flag_is_passed_only_when_it_can_be_used(self):
+        """It makes the worker read stdin. A worker run by hand in a terminal
+        should not have its input consumed."""
+        seen = []
+
+        def runner(command, **kwargs):
+            seen.append(command)
+            return subprocess.CompletedProcess(
+                command, 0, stdout=StageResult(ok=True, stage="d").to_json(),
+                stderr="")
+
+        run_headless(["diff", "a", "b", "c"], interpreter=Path("/p"),
+                     runner=runner)
+        assert "--cancel-on-stdin" not in seen[0]
+
+        run_headless(["diff", "a", "b", "c"], interpreter=Path("/p"),
+                     runner=runner, cancel=threading.Event())
+        assert seen[1] == ["/p", "-m", "bindiff.headless", "--cancel-on-stdin",
+                           "diff", "a", "b", "c"]
+
     def test_finds_the_result_after_ida_chatter(self):
         """idalib writes freely to stdout, so the result is not the only line."""
         noisy = ("Loading processor module...\n"
@@ -246,6 +266,53 @@ class TestWorkerProgressRecords:
         assert stages == ["export", "export", "diff"]
         assert [r["fraction"] for r in seen] == [0.0, 0.3, 0.6]
 
+    def test_cancelling_the_diff_still_reports_a_usable_result(self,
+                                                               monkeypatch):
+        """The engine writes what it matched; the worker must report it as a
+        result, not as a failure. A partial .BinDiff is a usable .BinDiff."""
+        import bindiff.headless as headless
+
+        def fake_diff(primary, secondary, output, progress=None):
+            # Returns 0 on a cancelled diff, exactly as the engine does: it
+            # wrote the smaller result rather than failing.
+            assert progress({"step_index": 0, "step_count": 4,
+                             "step_name": "s", "matches": 7}) is False
+            return 0
+
+        module = type(sys)("bindiff")
+        module.diff = fake_diff
+        module.load_matches = lambda path: [1, 2, 3, 4, 5, 6, 7]
+        monkeypatch.setitem(sys.modules, "bindiff", module)
+
+        result = headless.diff("a", "b", "c", should_continue=lambda: False)
+
+        assert result.ok and result.matches == 7
+        assert result.details["cancelled"] is True
+        assert "partial" in result.message
+
+    def test_an_uncancelled_diff_is_not_marked(self):
+        """The flag has to mean something, so it must not be set by default."""
+        import bindiff.headless as headless
+
+        assert "cancelled" not in headless._record("diff", "x")
+
+    def test_the_listener_acknowledges_before_it_sets_the_flag(self, capsys):
+        """The launcher waits on the acknowledgement to decide whether the
+        worker is winding down or wedged inside an export, so it has to go out
+        first -- and it must not be sent for other input."""
+        import io
+
+        from bindiff.headless import watch_stdin_for_cancel
+
+        flag = threading.Event()
+        watch_stdin_for_cancel(
+            flag, io.StringIO("Loading processor module...\ncancel\n"))
+        assert flag.wait(5), "the listener never saw the cancel"
+
+        emitted = [json.loads(line)["progress"]
+                   for line in capsys.readouterr().out.splitlines()]
+        assert [r["stage"] for r in emitted] == ["cancelling"]
+
     def test_emit_writes_one_flushed_line(self, capsys):
         """One line, because the launcher reads line by line -- and flushed,
         because stdout is a pipe there and would otherwise deliver every
@@ -307,15 +374,121 @@ class TestStreamingWorker:
         assert "timed out" in result.message
         assert time.monotonic() - started < 30
 
-    def test_cancel_ends_the_worker(self):
+    def test_cancel_keeps_the_result_the_worker_hands_back(self):
+        """Cancelling asks; it does not kill.
+
+        The worker holds the matches it has already made, and they are worth
+        having -- the matching steps run strongest first. Terminating it would
+        throw them away for no reason: the partial result crosses the process
+        boundary exactly like a complete one, as a .BinDiff on disk named by a
+        JSON line on stdout.
+        """
+        from bindiff.headless import _ProgressSink
+
+        script = (
+            "import json, sys, threading, time\n"
+            "stop = threading.Event()\n"
+            "def watch():\n"
+            "    for line in sys.stdin:\n"
+            "        if line.strip() == 'cancel':\n"
+            "            sys.stdout.write(json.dumps({'progress': "
+            "{'stage': 'cancelling'}}) + '\\n'); sys.stdout.flush()\n"
+            "            stop.set(); return\n"
+            "threading.Thread(target=watch, daemon=True).start()\n"
+            "matched = 0\n"
+            "for step in range(50):\n"
+            "    if stop.is_set(): break\n"
+            "    matched += 10\n"
+            "    sys.stdout.write(json.dumps({'progress': {'stage': 'diff', "
+            "'matches': matched}}) + '\\n'); sys.stdout.flush()\n"
+            "    time.sleep(0.1)\n"
+            "sys.stdout.write(json.dumps({'ok': True, 'stage': 'diff', "
+            "'matches': matched, 'details': {'cancelled': True}}) + '\\n')\n"
+            "sys.stdout.flush()\n"
+        )
         cancel = threading.Event()
-        threading.Timer(0.5, cancel.set).start()
+        threading.Timer(0.8, cancel.set).start()
+
+        started = time.monotonic()
+        result = self._stream(script, cancel=cancel,
+                              sink=_ProgressSink(None))
+        took = time.monotonic() - started
+
+        assert result.ok, result.message
+        assert result.details["cancelled"] is True
+        assert result.matches and result.matches > 0, (
+            "the partial result was thrown away")
+        assert took < 4.0, (
+            f"took {took:.1f}s; a full run is ~5s, so this did not stop early")
+
+    def test_a_worker_that_cannot_answer_is_terminated(self):
+        """An export is the case that cannot answer: idalib does not call back
+        during auto-analysis, so nothing is listening and nothing partial
+        exists to save. It must not hang waiting for a reply."""
+        cancel = threading.Event()
+        threading.Timer(0.2, cancel.set).start()
 
         started = time.monotonic()
         result = self._stream("import time; time.sleep(60)", cancel=cancel)
+        took = time.monotonic() - started
 
-        assert not result.ok and result.message == "cancelled"
-        assert time.monotonic() - started < 30
+        assert not result.ok
+        assert result.details.get("cancelled") is True
+        assert "cancelled" in result.message
+        # Killed once the acknowledgement did not come, not after the full
+        # write-out grace, which is minutes.
+        assert took < 20, f"took {took:.1f}s"
+
+    def test_a_worker_that_finished_first_is_not_reported_as_partial(self):
+        """Asking to cancel is not the same as having cancelled anything.
+
+        A short diff finishes between the request and the worker's next
+        callback. Stamping that result partial would send the reader hunting
+        for matches that were never missing -- so the flag is the worker's to
+        set, and the launcher does not second-guess it.
+        """
+        prompt = ("import json, sys\n"
+                  "sys.stdout.write(json.dumps({'ok': True, 'stage': 'diff', "
+                  "'matches': 737}) + '\\n'); sys.stdout.flush()\n")
+        cancel = threading.Event()
+        cancel.set()
+
+        result = self._stream(prompt, cancel=cancel)
+
+        assert result.ok and result.matches == 737
+        assert "cancelled" not in result.details
+
+    def test_the_acknowledgement_buys_the_worker_time(self):
+        """A worker that says it heard the cancel gets the long grace period.
+
+        Without the acknowledgement the launcher would have to guess: too short
+        kills a worker that was about to hand back its matches, too long makes
+        a stuck export look like a hang.
+        """
+        from bindiff.headless import _CANCEL_ACK_TIMEOUT, _ProgressSink
+
+        slow_but_polite = (
+            "import json, sys, threading, time\n"
+            "def watch():\n"
+            "    for line in sys.stdin:\n"
+            "        if line.strip() == 'cancel':\n"
+            "            sys.stdout.write(json.dumps({'progress': "
+            "{'stage': 'cancelling'}}) + '\\n'); sys.stdout.flush()\n"
+            "            return\n"
+            "threading.Thread(target=watch, daemon=True).start()\n"
+            f"time.sleep({_CANCEL_ACK_TIMEOUT} + 3)\n"
+            "sys.stdout.write(json.dumps({'ok': True, 'stage': 'diff', "
+            "'matches': 42}) + '\\n'); sys.stdout.flush()\n"
+        )
+        cancel = threading.Event()
+        threading.Timer(0.3, cancel.set).start()
+
+        result = self._stream(slow_but_polite, cancel=cancel,
+                              sink=_ProgressSink(None))
+
+        # It took longer than the acknowledgement timeout to finish and was
+        # not killed for it.
+        assert result.ok and result.matches == 42
 
     def test_chatter_is_kept_for_a_worker_that_reports_nothing(self):
         script = ("import sys\n"
@@ -396,6 +569,36 @@ def test_progress_reaches_the_launcher_from_a_real_worker(insider_pair,
     # The engine reports before each step and on each propagation round, so
     # there is more than one report even for a small pair.
     assert len(records) > 1
+
+
+@pytest.mark.requires_extension
+@pytest.mark.e2e
+def test_cancelling_a_real_worker_yields_a_real_database(insider_pair,
+                                                         tmp_path):
+    """The whole cancellation path, with the actual engine behind it.
+
+    The event is set before the worker starts rather than partway through: the
+    insider pair diffs in well under a second, so racing a timer against it
+    would test the machine's load more than the code. What has to be proved
+    here is the transport -- that the request reaches the worker, that the
+    worker answers with a result instead of dying, and that the .BinDiff it
+    names can be read back.
+    """
+    primary, secondary = insider_pair
+    output = tmp_path / "cancelled.BinDiff"
+
+    cancel = threading.Event()
+    cancel.set()
+    result = run_headless(
+        ["diff", str(primary), str(secondary), str(output)],
+        interpreter=Path(sys.executable), timeout=300, cancel=cancel)
+
+    assert result.ok, result.message
+    assert result.details["cancelled"] is True
+    assert Path(result.output).is_file(), "no database was written"
+    # matches is read back with load_matches, so a number here means the file
+    # opened and queried like any other result.
+    assert result.matches is not None
 
 
 @pytest.mark.requires_extension
