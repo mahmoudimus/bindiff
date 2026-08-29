@@ -12,7 +12,7 @@ Local deltas over upstream:
 
 - **Java single-executable.** IDA Pro 9.0+ is 64-bit only and ships one `ida` binary. `IdaHelpers` exposes a single `IDA_EXECUTABLE` and `ExternalAppUtils.getIdaExe()` no longer picks between `ida`/`ida64` by database extension. Upstream fixed this on the C++ side but still carries the 32/64 split in Java.
 - **`python/`** — Cython bindings to the engine plus an IDA plugin (`python/ida_plugin/bindiff_plugin.py`), originally PR #2, rebased onto the current API.
-- **Metadata sidecar** — an extension mechanism for matching signals, with the first feature (`imports/v1`) shipped. See "Architecture".
+- **Metadata sidecar** — an extension mechanism for matching signals; `imports/v1` and `prototype/v1` ship enabled. See "Architecture".
 - **Test harness** — `docker-compose.yml`, `tools/scripts/run_tests_docker.sh`, `.github/workflows/python.yml`, `ida-plugin.json`.
 - **Build/test fixes** in `CMakeLists.txt` and `test_util.h` (see "Gotchas").
 
@@ -113,6 +113,30 @@ Pipeline: a disassembler plugin (BinExport) emits `.BinExport` protobufs → the
 - `change_classifier.cc` classifies *how* a matched pair differs (instructions, operands, branch inversion, loops, calls, entry point).
 
 **The `.BinDiff` schema** (`DatabaseWriter::PrepareDatabase`) is easy to misread, and getting it wrong is silent: `function` **is** the match table — one row per matched pair, carrying `address1`/`name1`/`address2`/`name2` and that pair's counts. Likewise `basicblock` and `instruction` hold matched pairs. There are no `*match` tables. Unmatched functions are **not stored at all**; recovering them means comparing against the `.BinExport` inputs. In `file`, `functions` counts only non-library functions and `libfunctions` holds the rest, so a total is the two summed.
+
+### Which sidecar features are enabled, and why
+
+Measured on 9 pairs of real programs — coreutils, diffutils, findutils across
+optimisation levels and versions, from `DeepBinDiff/experiment_data` — with
+`tools/scripts/measure_real_corpus.py`. 1799 ground-truth pairs, name matching
+off.
+
+| feature | delta | own precision | pairs improved | enabled |
+|---|---|---|---|---|
+| `imports/v1` | +149 (40.9% → 49.1%) | 254/266 95% | 8/9 | yes |
+| `prototype/v1` | +48 (→ 43.5%) | 35/38 92% | **9/9** | yes |
+| `frame/v1` | +4 (→ 41.1%) | 78/98 80% | 2/9, hurt 2/9 | **no** |
+
+Together: 40.9% → 51.3%. Order is not cosmetic — imports before prototype is
+923 correct, the reverse 907, because the steps run strongest first and an
+earlier one claims a pair the later then cannot.
+
+**Measure stripped, or do not bother.** The same corpus unstripped says
+`prototype/v1` is worth **+795** and 74.9% recall — because those builds carry
+`debug_info`, so IDA reads exact signatures out of DWARF. The step fires 1244
+times there against 38 stripped, a 33× collapse. Anything measured against
+symbols or debug info is measuring the debug info. `--strip` is the mode that
+answers the question the default config has to answer.
 
 **Configuration** (`config.{h,cc}`, `bindiff_config.proto`, `bindiff.json`): `bindiff.json` is embedded at build time (`file(READ)` → `config_defaults.h.in`) and also parsed into the `Config` proto. `config::Proto()` lazily loads per-user/system config and merges it over the defaults; `config::MergeInto()` special-cases the matching-step lists because order and uniqueness matter. Editing `bindiff.json` needs a rebuild to affect compiled-in defaults.
 

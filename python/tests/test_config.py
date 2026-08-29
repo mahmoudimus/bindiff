@@ -34,6 +34,31 @@ def test_config_reports_real_matching_steps(bindiff_module):
     assert len(names) == len(set(names)), "duplicate step names in config"
 
 
+def test_the_shipped_sidecar_features_are_enabled(bindiff_module):
+    """Both features that measured their keep are in the default config.
+
+    A step absent from the config is silently skipped -- it gets confidence
+    -1.0 and never runs -- so a feature can be fully built, tested and
+    producing sidecars while contributing nothing, with no error anywhere to
+    say so. That is the failure this pins down.
+    """
+    names = [step["name"]
+             for step in bindiff_module.get_default_config()["function_matching"]]
+
+    assert "function: feature imports/v1" in names
+    assert "function: feature prototype/v1" in names
+    # Measured on stripped real programs at 80% precision and improving only
+    # 2 of 9 pairs, hurting 2 others. See tools/scripts/measure_real_corpus.py.
+    assert "function: feature frame/v1" not in names, (
+        "frame/v1 did not earn a default slot; see the measurement")
+
+    # Order is not cosmetic: the steps run strongest first and an earlier one
+    # claims a pair the later cannot. Measured, imports before prototype is
+    # worth 923 correct matches against 907 the other way round.
+    assert names.index("function: feature imports/v1") < names.index(
+        "function: feature prototype/v1")
+
+
 def test_defaults_are_stable(bindiff_module):
     """get_default_config is the compiled-in baseline, not the live config."""
     defaults = bindiff_module.get_default_config()
