@@ -71,3 +71,35 @@ def bindiff_module():
     if not hasattr(bindiff, "diff"):
         pytest.skip("bindiff imported but has no diff(); extension not built")
     return bindiff
+
+
+@pytest.fixture(scope="session")
+def libssl_pair(fixtures_dir):
+    """Two gcc builds of the same library, four years of compiler apart.
+
+    The pair with real ground truth to measure against: 737 known pairs, and
+    the one where the import feature has room to help, because both sides link
+    against the same runtime.
+    """
+    directory = fixtures_dir / "libssl"
+    primary = directory / "libssl.0.9.8g.x86.gcc.4.3.3.a.BinExport"
+    secondary = directory / "libssl.0.9.8g.x86.gcc.3.4.6.a.BinExport"
+    truth = (directory /
+             "libssl.0.9.8g.x86.gcc.4.3.3.a_vs_libssl.0.9g.x86.gcc.3.4.6.a.truth")
+    for path in (primary, secondary, truth):
+        if not path.is_file():
+            pytest.skip(f"fixture missing: {path}")
+    return primary, secondary, truth
+
+
+@pytest.fixture
+def ground_truth():
+    """Parses a .truth file into {primary address: secondary address}."""
+    def parse(path):
+        pairs = {}
+        for line in pathlib.Path(path).read_text().splitlines():
+            fields = line.split()
+            if len(fields) >= 2:
+                pairs[int(fields[0], 16)] = int(fields[1], 16)
+        return pairs
+    return parse

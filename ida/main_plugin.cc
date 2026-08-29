@@ -472,6 +472,10 @@ absl::StatusOr<bool> DiffAddressRange(ea_t start_address_source,
   MatchingContext context(results->call_graph1_, results->call_graph2_,
                           results->flow_graphs1_, results->flow_graphs2_,
                           results->fixed_points_);
+  // No metadata sidecars here, deliberately: these two .BinExport files were
+  // just written into a temporary directory by BinExport, which does not
+  // produce sidecars, so LoadSidecar would always come back empty. Wiring it
+  // up is only worth doing once something in this path writes one.
   FilterFunctions(start_address_source, end_address_source,
                   &context.primary_call_graph_, &context.primary_flow_graphs_,
                   &results->flow_graph_infos1_);

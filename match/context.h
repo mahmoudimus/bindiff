@@ -21,6 +21,7 @@
 #include <utility>
 
 #include "third_party/absl/container/flat_hash_map.h"
+#include "third_party/absl/base/nullability.h"
 #include "third_party/zynamics/bindiff/fixed_points.h"
 #include "third_party/zynamics/bindiff/flow_graph.h"
 #include "third_party/zynamics/bindiff/graph_util.h"
@@ -29,6 +30,7 @@
 namespace security::bindiff {
 
 class CallGraph;
+class FeatureIndex;
 class MatchingStep;
 class MatchingStepFlowGraph;
 
@@ -90,6 +92,26 @@ class MatchingContext {
     return nullptr;
   }
 
+  // Per-side metadata sidecars, when the caller loaded any.
+  //
+  // These are not part of the FeatureId caching below, which exists for data a
+  // step computes lazily and wants to reuse. A sidecar is read from disk
+  // before any matching starts, is immutable for the whole diff, and is owned
+  // by the caller -- so it is passed in rather than computed, and this holds
+  // only borrowed pointers. Null means no sidecar, which is the normal case.
+  void SetFeatureIndices(const FeatureIndex* absl_nullable primary,
+                         const FeatureIndex* absl_nullable secondary) {
+    primary_features_ = primary;
+    secondary_features_ = secondary;
+  }
+
+  const FeatureIndex* absl_nullable primary_features() const {
+    return primary_features_;
+  }
+  const FeatureIndex* absl_nullable secondary_features() const {
+    return secondary_features_;
+  }
+
   bool HasCachedFeatures(FeatureId id) const {
     return id >= 0 && id < kMaxFeature;
   }
@@ -122,6 +144,8 @@ class MatchingContext {
   FixedPointByAddress fixed_points_by_primary_;
   FixedPointByAddress fixed_points_by_secondary_;
   FeatureRecord features_[kMaxFeature] = {};
+  const FeatureIndex* absl_nullable primary_features_ = nullptr;
+  const FeatureIndex* absl_nullable secondary_features_ = nullptr;
 };
 
 }  // namespace security::bindiff

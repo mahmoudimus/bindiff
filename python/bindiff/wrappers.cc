@@ -20,6 +20,7 @@
 
 #include "third_party/zynamics/bindiff/database_writer.h"
 #include "third_party/zynamics/bindiff/differ.h"
+#include "third_party/zynamics/bindiff/sidecar.h"
 #include "third_party/zynamics/bindiff/flow_graph.h"
 #include "third_party/zynamics/bindiff/instruction.h"
 #include "third_party/zynamics/bindiff/match/call_graph.h"
@@ -67,10 +68,24 @@ int DiffBinaries(const std::string& primary_path,
       return -2;
     }
 
+    // Optional per-side metadata sidecars. Absent is the normal case and
+    // yields an empty index; a sidecar that describes a different executable
+    // is refused, because pairing metadata with the wrong binary produces
+    // confident, wrong matches.
+    auto features1 = LoadSidecar(primary_path, call_graph1.GetExeHash());
+    if (!features1.ok()) {
+      return -5;
+    }
+    auto features2 = LoadSidecar(secondary_path, call_graph2.GetExeHash());
+    if (!features2.ok()) {
+      return -6;
+    }
+
     // Perform diff
     FixedPoints fixed_points;
     MatchingContext context(call_graph1, call_graph2, flow_graphs1,
                            flow_graphs2, fixed_points);
+    context.SetFeatureIndices(&*features1, &*features2);
     Diff(&context, call_graph_steps, basic_block_steps);
 
     // Write results to database
@@ -134,9 +149,21 @@ int IncrementalDiff(const std::string& primary_path,
       return -2;
     }
 
+    // Same sidecars as a fresh diff: an incremental run has to see the same
+    // signals, or re-running it would drop matches the first run made.
+    auto features1 = LoadSidecar(primary_path, call_graph1.GetExeHash());
+    if (!features1.ok()) {
+      return -5;
+    }
+    auto features2 = LoadSidecar(secondary_path, call_graph2.GetExeHash());
+    if (!features2.ok()) {
+      return -6;
+    }
+
     FixedPoints fixed_points;
     MatchingContext context(call_graph1, call_graph2, flow_graphs1,
                             flow_graphs2, fixed_points);
+    context.SetFeatureIndices(&*features1, &*features2);
 
     // Seed from the existing result file.
     const auto primary_index = IndexByEntryPoint(flow_graphs1);

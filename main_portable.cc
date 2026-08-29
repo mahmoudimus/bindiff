@@ -66,6 +66,7 @@
 #include "third_party/zynamics/bindiff/match/context.h"
 #include "third_party/zynamics/bindiff/match/flow_graph.h"
 #include "third_party/zynamics/bindiff/reader.h"
+#include "third_party/zynamics/bindiff/sidecar.h"
 #include "third_party/zynamics/bindiff/start_ui.h"
 #include "third_party/zynamics/bindiff/statistics.h"
 #include "third_party/zynamics/bindiff/version.h"
@@ -262,9 +263,29 @@ void DifferThread::operator()() {
 
     PrintMessage(absl::StrCat("Diffing ", file1, " vs ", file2));
 
+    FeatureIndex features1;
+    FeatureIndex features2;
+    if (auto loaded = LoadSidecar(JoinPath(path_, file1),
+                                  call_graph1.GetExeHash());
+        loaded.ok()) {
+      features1 = *std::move(loaded);
+    } else {
+      // In batch mode one bad sidecar must not stop the run: the pair is
+      // diffed without it, and the reason is printed rather than swallowed.
+      PrintMessage(absl::StrCat("Warning: ", loaded.status().message()));
+    }
+    if (auto loaded = LoadSidecar(JoinPath(path_, file2),
+                                  call_graph2.GetExeHash());
+        loaded.ok()) {
+      features2 = *std::move(loaded);
+    } else {
+      PrintMessage(absl::StrCat("Warning: ", loaded.status().message()));
+    }
+
     FixedPoints fixed_points;
     MatchingContext context(call_graph1, call_graph2, flow_graphs1,
                             flow_graphs2, fixed_points);
+    context.SetFeatureIndices(&features1, &features2);
     Diff(&context, call_graph_steps, basic_block_steps);
 
     Histogram histogram;
@@ -702,9 +723,20 @@ absl::Status BinDiffMain(int argc, char* argv[]) {
     const MatchingSteps default_callgraph_steps(GetDefaultMatchingSteps());
     const MatchingStepsFlowGraph default_basicblock_steps(
         GetDefaultMatchingStepsBasicBlock());
+
+    // Optional per-side metadata. A missing sidecar is the normal case and
+    // yields an empty index; a sidecar that does not describe this executable
+    // is an error, because pairing metadata with the wrong binary produces
+    // confident, wrong matches.
+    ABSL_ASSIGN_OR_RETURN(FeatureIndex features1,
+                          LoadSidecar(primary, call_graph1->GetExeHash()));
+    ABSL_ASSIGN_OR_RETURN(FeatureIndex features2,
+                          LoadSidecar(secondary, call_graph2->GetExeHash()));
+
     FixedPoints fixed_points;
     MatchingContext context(*call_graph1, *call_graph2, flow_graphs1,
                             flow_graphs2, fixed_points);
+    context.SetFeatureIndices(&features1, &features2);
     Diff(&context, default_callgraph_steps, default_basicblock_steps);
 
     Histogram histogram;

@@ -62,6 +62,18 @@ enum FeatureMetric {
 
   // Normalised Hamming distance over `packed`. For fuzzy hashes.
   FEATURE_METRIC_HAMMING = 4;
+
+  // Jaccard overlap over `key_set`: |A n B| / |A u B|. For features that are
+  // an unordered set of things a function has, where two builds will agree on
+  // most of the set but rarely all of it.
+  //
+  // This is here because EXACT could not express it, and the difference is not
+  // marginal. Measured on the four ground-truth fixtures, keying on the set of
+  // imports a function calls: exact set equality proposed 166 pairs, Jaccard
+  // at 0.8 proposed 194, recovering 52 pairs the engine gets wrong or misses
+  // rather than 39 -- with no disagreement against ground truth at any
+  // threshold from 0.6 to 0.9.
+  FEATURE_METRIC_JACCARD = 5;
 }
 
 // One named feature of one function.
@@ -84,6 +96,9 @@ message Feature {
 
     // FEATURE_METRIC_HAMMING.
     bytes packed = 5;
+
+    // FEATURE_METRIC_JACCARD.
+    KeySet key_set = 7;
   }
 
   // How much to trust this feature, 0..1. A default the config can override,
@@ -94,6 +109,13 @@ message Feature {
 
 message FloatVector {
   repeated float values = 1 [packed = true];
+}
+
+// An unordered set, as hashes rather than the source strings, so the C++ side
+// can intersect on integers. Written sorted and deduplicated: a consumer is
+// entitled to assume that and use a linear set intersection.
+message KeySet {
+  repeated uint64 keys = 1 [packed = true];
 }
 
 message FunctionMetadata {
@@ -115,7 +137,21 @@ message BinaryMetadata {
   // SHA-256 of the .BinExport this describes. A sidecar must be refused if it
   // does not match: silently pairing metadata with the wrong export would
   // produce confident, wrong matches, which is worse than no metadata.
+  //
+  // Checked by producers and tooling, which can hash a file cheaply. The
+  // matching engine checks `executable_id` instead -- see below.
   string binexport_sha256 = 1;
+
+  // Copied from BinExport2.Meta.executable_id, which is usually the SHA-256 of
+  // the *input binary*. This is the check the engine can afford: it has the
+  // parsed export in hand already, so comparing this costs nothing, whereas
+  // re-hashing a hundred-megabyte export on every diff would not be free and
+  // would need a cryptographic hash the non-IDA build does not link.
+  //
+  // May be empty when the exporter did not set one, in which case a consumer
+  // is left with the weaker guarantee that the file was found at the expected
+  // path. Producers should always fill it in.
+  string executable_id = 6;
 
   // Tool and version that produced this, e.g. "bindiff-metadata/0.1". Lets a
   // consumer reject or regenerate a stale sidecar.
@@ -139,7 +175,8 @@ message BinaryMetadata {
 message FeatureDescriptor {
   string name = 1;
   FeatureMetric metric = 2;
-  // For vector features: length of `values`. Zero for the others.
+  // For vector features: length of `values`. Zero for the others,
+  // including JACCARD -- set sizes vary per function by design.
   uint32 dimension = 3;
   // How many functions carry it. A feature present on three functions out of
   // four thousand is not worth running a matching pass for.

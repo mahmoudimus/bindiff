@@ -22,9 +22,11 @@
 #include <string>
 #include <utility>
 
+#include "third_party/absl/base/nullability.h"
 #include "third_party/absl/container/flat_hash_map.h"
 #include "third_party/absl/log/check.h"
 #include "third_party/absl/log/log.h"
+#include "third_party/absl/synchronization/mutex.h"
 #include "third_party/zynamics/bindiff/config.h"
 #include "third_party/zynamics/bindiff/fixed_points.h"
 #include "third_party/zynamics/bindiff/flow_graph.h"
@@ -36,6 +38,7 @@
 #include "third_party/zynamics/bindiff/match/function_call_graph_mdindex.h"
 #include "third_party/zynamics/bindiff/match/function_call_graph_mdindex_relaxed.h"
 #include "third_party/zynamics/bindiff/match/function_call_sequence.h"
+#include "third_party/zynamics/bindiff/match/function_feature.h"
 #include "third_party/zynamics/bindiff/match/function_flow_graph_edges_mdindex.h"
 #include "third_party/zynamics/bindiff/match/function_flow_graph_mdindex.h"
 #include "third_party/zynamics/bindiff/match/function_hash.h"
@@ -365,6 +368,37 @@ void BaseMatchingStepEdgesMdIndex::FilterResults(
   }
 }
 
+namespace {
+
+// Steps for sidecar features are created from the configuration rather than
+// registered in the list below, because unlike every other algorithm the set
+// of them is not fixed: a feature is whatever a producer chose to emit, and
+// adding one is meant to be a producer change plus a config entry.
+//
+// One instance per feature name is created on first use and kept for the life
+// of the process. That is what the hardcoded algorithms do too, and it is what
+// makes the raw pointers in MatchingSteps safe to hand out: a step object must
+// outlive every list it appears in, and lists are rebuilt on every call.
+MatchingStep* absl_nullable FeatureStepForName(absl::string_view config_name) {
+  const std::string feature = MatchingStepFeature::FeatureNameFrom(config_name);
+  if (feature.empty()) {
+    return nullptr;
+  }
+
+  static absl::Mutex mutex(absl::kConstInit);
+  static auto* steps =
+      new absl::flat_hash_map<std::string, MatchingStepFeature*>;
+
+  absl::MutexLock lock(&mutex);
+  auto [it, inserted] = steps->emplace(feature, nullptr);
+  if (inserted) {
+    it->second = new MatchingStepFeature(feature);
+  }
+  return it->second;
+}
+
+}  // namespace
+
 MatchingSteps GetDefaultMatchingSteps() {
   static const auto* algorithms =
       []() -> absl::flat_hash_map<std::string, MatchingStep*>* {
@@ -404,16 +438,16 @@ MatchingSteps GetDefaultMatchingSteps() {
   // static; only the selection is rebuilt, and nothing here mutates them, so
   // concurrent diffs still just read.
   //
-  // Note that a step's confidence is read from the config when the object is
-  // constructed, i.e. on first use in the process. Re-ordering and
-  // enabling/disabling take effect immediately; changing a confidence value
-  // needs a fresh process.
+  // Confidence is read from a snapshot the config rebuilds, so changing a
+  // value takes effect on the next diff as well.
   MatchingSteps matching_steps;
   {
     for (const auto& step : config::Proto().function_matching()) {
       if (auto found = algorithms->find(step.name());
           found != algorithms->end()) {
         matching_steps.push_back(found->second);
+      } else if (MatchingStep* feature_step = FeatureStepForName(step.name())) {
+        matching_steps.push_back(feature_step);
       }
     }
   }

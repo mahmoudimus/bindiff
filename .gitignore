@@ -14,3 +14,6 @@ compile_commands.json
 build/
 java/ui/build/
 .tmp/
+
+# Metadata sidecars are generated from their .BinExport, not checked in.
+*.BinExport.meta

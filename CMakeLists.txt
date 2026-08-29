@@ -176,8 +176,16 @@ target_link_libraries(bindiff_config
 set_target_properties(bindiff_config PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION ${BINDIFF_ENABLE_IPO})
 
+# Metadata sidecar schema. Generated rather than checked in, like the config
+# proto above, so the bindings always match the schema in the tree.
+protobuf_generate_cpp(bd_metadata_proto bd_metadata_proto_h
+  bindiff_metadata.proto
+)
+
 # Sources shared by the differ and the IDA plugin.
 add_library(bindiff_shared STATIC
+  "${bd_metadata_proto_h}"
+  "${bd_metadata_proto}"
   call_graph.cc
   call_graph.h
   change_classifier.cc
@@ -241,6 +249,8 @@ add_library(bindiff_shared STATIC
   match/function_call_graph_mdindex_relaxed.h
   match/function_call_sequence.cc
   match/function_call_sequence.h
+  match/function_feature.cc
+  match/function_feature.h
   match/function_flow_graph_edges_mdindex.h
   match/function_flow_graph_mdindex.cc
   match/function_flow_graph_mdindex.h
@@ -262,6 +272,8 @@ add_library(bindiff_shared STATIC
   prime_signature.h
   reader.cc
   reader.h
+  sidecar.cc
+  sidecar.h
   sqlite.cc
   sqlite.h
   start_ui.cc
@@ -281,7 +293,9 @@ target_link_libraries(bindiff_shared
   absl::strings
   absl::status
   absl::status_macros
+  absl::synchronization
   binexport_shared
+  protobuf::libprotobuf
   sqlite
   bindiff_version
   bindiff_config
@@ -343,6 +357,14 @@ if(BUILD_TESTING AND BINDIFF_BUILD_TESTING)
     bindiff_shared
   )
   gtest_discover_tests(prime_signature_test)
+
+  add_executable(sidecar_test sidecar_test.cc)
+  target_link_libraries(sidecar_test
+    absl::status_matchers
+    bindiff_test_base
+    bindiff_shared
+  )
+  gtest_discover_tests(sidecar_test)
 
   add_executable(sqlite_test sqlite_test.cc)
   target_link_libraries(sqlite_test
