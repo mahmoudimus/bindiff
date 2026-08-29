@@ -41,7 +41,8 @@ using ::security::bindiff::python::ThrowingStatement;
 // Simple diff function that runs BinDiff on two files
 int DiffBinaries(const std::string& primary_path,
                  const std::string& secondary_path,
-                 const std::string& output_database) {
+                 const std::string& output_database,
+                 DiffProgressFn progress, void* user_data) {
   try {
     // Setup variables for diff operation
     const MatchingSteps call_graph_steps = GetDefaultMatchingSteps();
@@ -86,7 +87,20 @@ int DiffBinaries(const std::string& primary_path,
     MatchingContext context(call_graph1, call_graph2, flow_graphs1,
                            flow_graphs2, fixed_points);
     context.SetFeatureIndices(&*features1, &*features2);
-    Diff(&context, call_graph_steps, basic_block_steps);
+
+    // Adapts the C callback into the engine's DiffCallback. Built only when
+    // there is one, so the common path keeps passing nullptr and pays nothing.
+    DiffCallback bridge;
+    const DiffCallback* bridge_ptr = nullptr;
+    if (progress != nullptr) {
+      bridge = [progress, user_data](const DiffProgress& state) {
+        return progress(state.step_index, state.step_count,
+                        state.step_name->c_str(), state.fixed_points,
+                        user_data) != 0;
+      };
+      bridge_ptr = &bridge;
+    }
+    Diff(&context, call_graph_steps, basic_block_steps, bridge_ptr);
 
     // Write results to database
     auto database_writer = DatabaseWriter::Create(output_database);

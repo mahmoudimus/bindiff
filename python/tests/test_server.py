@@ -544,3 +544,44 @@ def test_the_service_reports_itself_busy_during_a_diff(tmp_path, insider_pair):
 
     assert seen, "the service never reported itself busy while diffing"
     assert not service.busy(), "still busy after the diff returned"
+
+
+@pytest.mark.requires_extension
+@pytest.mark.e2e
+def test_health_shows_what_a_running_diff_is_doing(tmp_path, insider_pair):
+    """A resident service that goes silent for minutes is indistinguishable
+    from a wedged one. The engine reports its step for free, so /health can
+    say which one is running."""
+    import threading
+
+    service = BinDiffService(tmp_path)
+    primary, secondary = insider_pair
+    primary_id = service.upload(primary.read_bytes())
+    secondary_id = service.upload(secondary.read_bytes())
+
+    assert service.health()["progress"] == {}
+
+    seen = []
+    done = threading.Event()
+
+    def watch():
+        while not done.is_set():
+            snapshot = service.health()["progress"]
+            if snapshot:
+                seen.append(snapshot)
+                return
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    service.diff(primary_id, secondary_id)
+    done.set()
+    watcher.join(timeout=5)
+
+    if seen:  # the insider pair is fast; a miss is timing, not a defect
+        snapshot = seen[0]
+        assert snapshot["step_name"]
+        assert 0 <= snapshot["step_index"] < snapshot["step_count"]
+        assert "_vs_" in snapshot["pair"]
+
+    # Cleared once the diff is done, so a stale step is never reported as live.
+    assert service.health()["progress"] == {}

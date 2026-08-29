@@ -173,6 +173,10 @@ class BinDiffService:
         self._pair_locks: Dict[Tuple[str, str], threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._in_flight = 0
+        # What the running diff is doing, for /health. A resident service that
+        # goes silent for minutes is indistinguishable from a wedged one, and
+        # the engine reports its step and running match count for free.
+        self._progress: Dict[str, object] = {}
         self._stats = {"diffs_run": 0, "diffs_served_from_cache": 0,
                        "uploads": 0}
 
@@ -243,7 +247,20 @@ class BinDiffService:
             cached = database.is_file() and not force
             if not cached:
                 bindiff = self._bindiff()
-                code = bindiff.diff(str(primary), str(secondary), str(database))
+
+                def report(state):
+                    # Cheap enough to do on every call: the engine reports once
+                    # per matching step and once per propagation round, not per
+                    # candidate, so this runs tens of times over a diff rather
+                    # than millions.
+                    self._progress = {
+                        "pair": f"{primary_id[:12]}_vs_{secondary_id[:12]}",
+                        **state,
+                    }
+                    return True
+
+                code = bindiff.diff(str(primary), str(secondary),
+                                    str(database), progress=report)
                 if code != 0:
                     # Never leave a partial result behind to be served as a
                     # cache hit on the next request.
@@ -252,6 +269,7 @@ class BinDiffService:
                         f"diff failed with code {code} for "
                         f"{primary_id[:16]} vs {secondary_id[:16]}")
                 self._stats["diffs_run"] += 1
+                self._progress = {}
             else:
                 self._stats["diffs_served_from_cache"] += 1
 
@@ -300,6 +318,7 @@ class BinDiffService:
     def health(self) -> dict:
         return {
             "busy": self.busy(),
+            "progress": dict(self._progress),
             "ok": True,
             "exports": len(self.exports.ids()),
             "export_bytes": self.exports.total_bytes(),

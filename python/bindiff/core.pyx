@@ -180,7 +180,50 @@ class StatisticsInfo:
                 f"similarity={self.function_similarity:.2%})")
 
 
-def diff(primary_path: str, secondary_path: str, output_path: str) -> int:
+# -- progress plumbing ----------------------------------------------------
+
+cdef class _ProgressState:
+    """Carries the caller's callback across the GIL boundary.
+
+    An object rather than the callable itself so an exception raised inside the
+    callback can be stashed and re-raised on the Python side. Letting it escape
+    the trampoline is not an option: it would unwind through C++ frames that
+    know nothing about Python exceptions.
+    """
+    cdef public object callback
+    cdef public object error
+
+
+cdef int _progress_trampoline(int step_index, int step_count,
+                              const char* step_name, uint64_t fixed_points,
+                              void* user_data) noexcept with gil:
+    """Called from the diff thread, which has released the GIL.
+
+    `with gil` takes it back for the duration. Returning 0 cancels the diff;
+    the engine keeps and classifies whatever it has matched so far.
+    """
+    cdef _ProgressState state = <_ProgressState>user_data
+    if state.error is not None:
+        # Already failed once: keep cancelling rather than calling again.
+        return 0
+    try:
+        outcome = state.callback({
+            "step_index": step_index,
+            "step_count": step_count,
+            "step_name": step_name.decode("utf-8", "replace"),
+            "matches": fixed_points,
+        })
+    except BaseException as exc:
+        state.error = exc
+        return 0
+    # Only an explicit False cancels, so a callback that just prints and
+    # returns None keeps the diff running -- which is what anyone writing one
+    # for the first time expects.
+    return 0 if outcome is False else 1
+
+
+def diff(primary_path: str, secondary_path: str, output_path: str,
+         progress=None) -> int:
     """
     Diff two binary files and save results to a database.
 
@@ -188,6 +231,12 @@ def diff(primary_path: str, secondary_path: str, output_path: str) -> int:
         primary_path: Path to primary BinExport file
         secondary_path: Path to secondary BinExport file
         output_path: Path to output database file
+        progress: optional callable invoked as the diff runs, with a dict of
+            step_index, step_count, step_name and matches. Return False to
+            cancel; anything else (including None) continues. A cancelled diff
+            still writes what it matched, so the result is smaller but usable.
+            The callback runs on the diffing thread with the GIL held for its
+            duration, so keep it short -- post to a queue rather than drawing.
 
     Returns:
         0 on success, negative error code on failure
@@ -207,11 +256,30 @@ def diff(primary_path: str, secondary_path: str, output_path: str) -> int:
     cdef string c_secondary = secondary_path.encode('utf-8')
     cdef string c_output = output_path.encode('utf-8')
     cdef int result
+    cdef _ProgressState state = None
+    cdef core_types.DiffProgressFn fn = NULL
+    cdef void* user = NULL
+
+    if progress is not None:
+        if not callable(progress):
+            raise TypeError("progress must be callable")
+        state = _ProgressState()
+        state.callback = progress
+        state.error = None
+        fn = _progress_trampoline
+        user = <void*>state
 
     # Release the GIL for the duration: this is the long pole, and holding it
     # would block every other Python thread in the process (in IDA, the UI).
     with nogil:
-        result = core_types.DiffBinaries(c_primary, c_secondary, c_output)
+        result = core_types.DiffBinaries(c_primary, c_secondary, c_output,
+                                         fn, user)
+
+    # Raised here rather than swallowed: an exception in the callback cancelled
+    # the diff, and returning a success code for a run the caller aborted by
+    # accident would be a lie.
+    if state is not None and state.error is not None:
+        raise state.error
     return result
 
 

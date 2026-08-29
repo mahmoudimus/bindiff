@@ -218,16 +218,38 @@ void ResetMatches(FlowGraphs* absl_nonnull flow_graphs) {
 
 void Diff(MatchingContext* absl_nonnull context,
           const MatchingSteps& call_graph_steps,
-          const MatchingStepsFlowGraph& basic_block_steps) {
+          const MatchingStepsFlowGraph& basic_block_steps,
+          const DiffCallback* absl_nullable progress) {
+  const int step_count = static_cast<int>(call_graph_steps.size());
+  int step_index = 0;
+
+  // Reports where the diff is and asks whether to keep going. Never called
+  // when there is no callback, so the uninterrupted path costs one null check
+  // per step rather than a std::function dispatch.
+  const auto keep_going = [&](const MatchingStep* step) {
+    if (progress == nullptr) {
+      return true;
+    }
+    const DiffProgress state{step_index, step_count, &step->name(),
+                             context->fixed_points_.size()};
+    return (*progress)(state);
+  };
+
+  bool cancelled = false;
+
   // The outer loop controls the rigorousness for initial matching while the
   // inner loop tries to resolve ambiguities by drilling down the matchingSteps
   // lists.
   for (MatchingSteps matching_steps_for_current_level = call_graph_steps;
-       !matching_steps_for_current_level.empty();
-       matching_steps_for_current_level.pop_front()) {
+       !matching_steps_for_current_level.empty() && !cancelled;
+       matching_steps_for_current_level.pop_front(), ++step_index) {
     context->new_fixed_points_.clear();
     MatchingSteps matching_steps = matching_steps_for_current_level;
     MatchingStep* step = matching_steps.front();
+    if (!keep_going(step)) {
+      cancelled = true;
+      break;
+    }
     step->FindFixedPoints(
         nullptr /* primary_parent */, nullptr /* secondary_parent */,
         context->primary_flow_graphs_, context->secondary_flow_graphs_,
@@ -236,6 +258,10 @@ void Diff(MatchingContext* absl_nonnull context,
 
     bool more_fixed_points_discovered = false;
     do {
+      if (!keep_going(step)) {
+        cancelled = true;
+        break;
+      }
       more_fixed_points_discovered = false;
 
       // Performance: We iterate over _all_ fixed points discovered so far. The
@@ -280,12 +306,20 @@ void Diff(MatchingContext* absl_nonnull context,
       }
     } while (more_fixed_points_discovered);
 
+    if (cancelled) {
+      break;
+    }
+
     // After collecting initial fixed points for this step: iterate over all of
     // them and find call reference fixed points.
     for (auto* fixed_point : context->new_fixed_points_) {
       FindCallReferenceFixedPoints(fixed_point, context, basic_block_steps);
     }
   }
+
+  // Runs even when cancelled: the change flags are what make the matches found
+  // so far readable, and leaving them unset would hand back a result that
+  // claims every pair is unchanged.
   ClassifyChanges(context);
 }
 

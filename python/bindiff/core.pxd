@@ -47,9 +47,22 @@ cdef extern from "python/bindiff/wrappers.h" namespace "security::bindiff":
     # means the UI stops responding for the whole diff.
     #
     # `except +` still works without the GIL: Cython reacquires it to raise.
+    # Progress and cancellation. A plain function pointer rather than a
+    # std::function: a `cdef ... with gil` function can be passed as one, and
+    # that is what lets the callback take the GIL back before calling Python.
+    # Returns int, not bint/bool: Cython's bint generates a C `int`, and a
+    # pointer to a function returning C++ `bool` is a different type that will
+    # not convert. Zero cancels.
+    ctypedef int (*DiffProgressFn)(int step_index, int step_count,
+                                   const char* step_name,
+                                   uint64_t fixed_points,
+                                   void* user_data) noexcept
+
     int DiffBinaries(const string& primary_path,
                     const string& secondary_path,
-                    const string& output_database) except + nogil
+                    const string& output_database,
+                    DiffProgressFn progress,
+                    void* user_data) except + nogil
 
     # Long-running like DiffBinaries, so the GIL is released around it too.
     int IncrementalDiff(const string& primary_path,

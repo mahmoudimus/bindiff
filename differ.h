@@ -16,6 +16,7 @@
 #define DIFFER_H_
 
 #include <cstddef>
+#include <functional>
 #include <string>
 
 #include "third_party/absl/base/nullability.h"
@@ -37,11 +38,42 @@ class MatchingContext;
 using Histogram = absl::btree_map<std::string, size_t>;
 using Confidences = absl::btree_map<std::string, double>;
 
+// Reported to a progress callback as a diff runs: before each matching step,
+// and on each round of propagating matches through the call graph. Propagation
+// is where a step spends its time on a large binary -- it re-walks every fixed
+// point discovered so far -- so a callback that only saw step boundaries would
+// go quiet for exactly as long as the work actually takes.
+struct DiffProgress {
+  // Index of the running step over `call_graph_steps`, and how many there are.
+  int step_index;
+  int step_count;
+
+  // The running step's configuration name, e.g. "function: hash matching".
+  const std::string* absl_nonnull step_name;
+
+  // Function pairs matched so far. Rises within a step as propagation finds
+  // more, which is what makes it worth reporting between rounds.
+  size_t fixed_points;
+};
+
+// Returning false stops the diff early.
+//
+// What has already been matched is kept and classified, so a cancelled diff
+// yields a smaller but coherent result rather than nothing. That matters here
+// in a way it would not for a search: the matching steps run strongest first,
+// so an interrupted diff has the matches worth having and is missing the ones
+// the weakest heuristics would have guessed at.
+using DiffCallback = std::function<bool(const DiffProgress&)>;
+
 // Main entry point to the differ, runs the core algorithm and produces a
 // (partial) matching between the two inputs.
+//
+// `progress` is optional; when null the diff runs uninterruptibly, which is
+// what every caller did before it existed.
 void Diff(MatchingContext* absl_nonnull context,
           const MatchingSteps& call_graph_steps,
-          const MatchingStepsFlowGraph& basic_block_steps);
+          const MatchingStepsFlowGraph& basic_block_steps,
+          const DiffCallback* absl_nullable progress = nullptr);
 
 class ScopedCleanup {
  public:

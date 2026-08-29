@@ -142,6 +142,132 @@ void CompareToGroundTruth(absl::string_view test_name,
   LOG(INFO) << PaddedStr("missing:") << missing_matches;
 }
 
+// Progress reporting and cancellation.
+//
+// Not part of the groundtruth suite: those measure result quality, this
+// measures that a caller can watch a diff and stop it. Uses the smallest
+// fixture, because what matters is the control flow, not the matching.
+class DiffProgressTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    // GetTestSourcePath resolves against $TEST_SRCDIR, which the CMake test
+    // target sets; it returns a path directly rather than a StatusOr.
+    primary_path_ =
+        GetTestSourcePath("bindiff/fixtures/insider/insider_gcc.BinExport");
+    secondary_path_ =
+        GetTestSourcePath("bindiff/fixtures/insider/insider_lcc.BinExport");
+  }
+
+  // Runs a diff with `callback` and returns how many pairs it matched.
+  size_t RunDiff(const DiffCallback* callback) {
+    Instruction::Cache instruction_cache;
+    CallGraph call_graph1;
+    CallGraph call_graph2;
+    FlowGraphs flow_graphs1;
+    FlowGraphs flow_graphs2;
+    ScopedCleanup cleanup(&flow_graphs1, &flow_graphs2, &instruction_cache);
+
+    EXPECT_THAT(Read(primary_path_, &call_graph1, &flow_graphs1,
+                     /*flow_graph_infos=*/nullptr, &instruction_cache),
+                IsOk());
+    EXPECT_THAT(Read(secondary_path_, &call_graph2, &flow_graphs2,
+                     /*flow_graph_infos=*/nullptr, &instruction_cache),
+                IsOk());
+
+    FixedPoints fixed_points;
+    MatchingContext context(call_graph1, call_graph2, flow_graphs1,
+                            flow_graphs2, fixed_points);
+    Diff(&context, GetDefaultMatchingSteps(),
+         GetDefaultMatchingStepsBasicBlock(), callback);
+    last_flags_seen_ = 0;
+    for (const auto& fixed_point : fixed_points) {
+      last_flags_seen_ |= fixed_point.GetFlags();
+    }
+    return fixed_points.size();
+  }
+
+  std::string primary_path_;
+  std::string secondary_path_;
+  int last_flags_seen_ = 0;
+};
+
+TEST_F(DiffProgressTest, ReportsEveryStepInOrder) {
+  std::vector<DiffProgress> seen;
+  DiffCallback callback = [&](const DiffProgress& state) {
+    seen.push_back(state);
+    return true;
+  };
+  const size_t matches = RunDiff(&callback);
+
+  ASSERT_FALSE(seen.empty()) << "the callback was never invoked";
+  EXPECT_GT(matches, 0u);
+  for (const auto& state : seen) {
+    EXPECT_GE(state.step_index, 0);
+    EXPECT_LT(state.step_index, state.step_count);
+    EXPECT_FALSE(state.step_name->empty());
+  }
+  // Steps run in configuration order and never go backwards.
+  for (size_t i = 1; i < seen.size(); ++i) {
+    EXPECT_GE(seen[i].step_index, seen[i - 1].step_index);
+  }
+  EXPECT_EQ(seen.front().step_index, 0);
+}
+
+TEST_F(DiffProgressTest, ReportsMatchesAccumulating) {
+  size_t highest = 0;
+  DiffCallback callback = [&](const DiffProgress& state) {
+    // Monotonic: a diff never un-matches a pair.
+    EXPECT_GE(state.fixed_points, highest);
+    highest = state.fixed_points;
+    return true;
+  };
+  const size_t matches = RunDiff(&callback);
+
+  EXPECT_GT(matches, 0u);
+  // Not strictly greater: the final report happens at the top of a round that
+  // may then find nothing, so the last number reported can equal the total.
+  EXPECT_GE(matches, highest);
+  EXPECT_GT(highest, 0u) << "progress never reported a single match";
+}
+
+TEST_F(DiffProgressTest, NotCancellingMatchesTheUncallbackedResult) {
+  DiffCallback always_continue = [](const DiffProgress&) { return true; };
+  EXPECT_EQ(RunDiff(&always_continue), RunDiff(nullptr))
+      << "merely observing a diff changed its result";
+}
+
+TEST_F(DiffProgressTest, CancellingStopsEarlyAndKeepsWhatItFound) {
+  // Cancels once something has actually been matched, rather than after a
+  // fixed number of calls. The early steps match nothing at all on this pair
+  // -- two different compilers, so no function is byte-identical -- and a
+  // count-based cancel would stop before any work had been kept and prove
+  // nothing.
+  DiffCallback cancel_once_matched = [](const DiffProgress& state) {
+    return state.fixed_points == 0;
+  };
+  const size_t partial = RunDiff(&cancel_once_matched);
+  const size_t complete = RunDiff(nullptr);
+
+  EXPECT_GT(partial, 0u) << "cancelling threw away everything";
+  EXPECT_LT(partial, complete) << "cancelling did not actually stop anything";
+}
+
+TEST_F(DiffProgressTest, ACancelledResultIsStillClassified) {
+  // ClassifyChanges runs even on the way out, so the partial result says how
+  // its pairs differ. Without it every match would claim to be unchanged.
+  DiffCallback cancel_once_matched = [](const DiffProgress& state) {
+    return state.fixed_points == 0;
+  };
+  ASSERT_GT(RunDiff(&cancel_once_matched), 0u);
+  EXPECT_NE(last_flags_seen_, 0)
+      << "no change flags set on a cancelled diff; ClassifyChanges was skipped";
+}
+
+TEST_F(DiffProgressTest, CancellingImmediatelyMatchesNothing) {
+  DiffCallback refuse = [](const DiffProgress&) { return false; };
+  EXPECT_EQ(RunDiff(&refuse), 0u);
+}
+
 struct FixtureMetadata {
   FixtureMetadata& set_name(absl::string_view value) {
     name = std::string(value);
