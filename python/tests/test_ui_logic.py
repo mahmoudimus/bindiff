@@ -280,3 +280,84 @@ class TestFlowGraphDiff:
         diff = build_flow_graph_diff([], [], [])
         assert diff.nodes == [] and diff.edges == []
         assert diff.matched_count == 0
+
+
+class TestColumnVisibility:
+    """Eighteen columns is more than fits; the table hides most by default."""
+
+    def test_defaults_are_the_core_columns(self):
+        from ida_plugin.ui_logic import COLUMNS, ColumnVisibility
+
+        visibility = ColumnVisibility()
+        assert visibility.is_visible("similarity")
+        assert visibility.is_visible("name_primary")
+        # The per-side counts are reference figures, not something to scan.
+        assert not visibility.is_visible("basic_blocks_primary")
+        assert not visibility.is_visible("comments_ported")
+        assert len(visibility.visible_columns()) < len(COLUMNS)
+
+    def test_toggle_round_trips(self):
+        from ida_plugin.ui_logic import ColumnVisibility
+
+        visibility = ColumnVisibility()
+        assert not visibility.is_visible("edges_primary")
+        visibility.toggle("edges_primary")
+        assert visibility.is_visible("edges_primary")
+        visibility.toggle("edges_primary")
+        assert not visibility.is_visible("edges_primary")
+
+    def test_cannot_hide_every_column(self):
+        """A table with no columns cannot be recovered from: the menu used to
+        undo it lives on the header."""
+        from ida_plugin.ui_logic import ColumnVisibility
+
+        visibility = ColumnVisibility(["similarity"])
+        assert visibility.set_visible("similarity", False) is False
+        assert visibility.is_visible("similarity")
+
+    def test_unknown_column_is_an_error(self):
+        from ida_plugin.ui_logic import ColumnVisibility
+
+        with pytest.raises(ValueError, match="unknown column"):
+            ColumnVisibility().set_visible("nonsense", True)
+
+    def test_visible_columns_keep_table_order(self):
+        from ida_plugin.ui_logic import COLUMNS, ColumnVisibility
+
+        visibility = ColumnVisibility(["algorithm", "similarity"])
+        assert [name for name, _ in visibility.visible_columns()] == [
+            "similarity", "algorithm"]
+        order = [name for name, _ in COLUMNS]
+        assert order.index("similarity") < order.index("algorithm")
+
+    def test_serialisation_round_trips(self):
+        from ida_plugin.ui_logic import ColumnVisibility
+
+        original = ColumnVisibility()
+        original.toggle("edges_primary")
+        restored = ColumnVisibility.from_list(original.to_list())
+        assert restored.to_list() == original.to_list()
+
+    def test_a_saved_set_naming_a_dropped_column_still_loads(self):
+        """A set saved by an older version may name a column that no longer
+        exists; keeping it would leave is_visible answering for a column the
+        table has no index for."""
+        from ida_plugin.ui_logic import ColumnVisibility
+
+        visibility = ColumnVisibility(["similarity", "column_we_removed"])
+        assert visibility.to_list() == ["similarity"]
+
+    def test_an_empty_saved_set_falls_back_to_defaults(self):
+        from ida_plugin.ui_logic import ColumnVisibility
+
+        assert (ColumnVisibility([]).to_list()
+                == ColumnVisibility().to_list())
+
+    def test_show_all_and_reset(self):
+        from ida_plugin.ui_logic import COLUMNS, ColumnVisibility
+
+        visibility = ColumnVisibility()
+        visibility.show_all()
+        assert len(visibility.visible_columns()) == len(COLUMNS)
+        visibility.reset()
+        assert len(visibility.visible_columns()) < len(COLUMNS)

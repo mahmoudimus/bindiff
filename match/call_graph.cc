@@ -245,6 +245,10 @@ MatchingStep::MatchingStep(std::string name, std::string display_name)
       display_name_(std::move(display_name)),
       confidence_(GetConfidenceFromConfig(name_)) {}
 
+double MatchingStep::confidence() const {
+  return config::MatchingStepConfidence(name_, confidence_);
+}
+
 void BaseMatchingStepEdgesMdIndex::FeatureDestructor(EdgeFeatures* feature) {
   delete feature;
 }

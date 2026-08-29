@@ -214,6 +214,29 @@ def run_checks() -> None:
     else:
         check("sorting by every column", True)
 
+    # Column visibility: hidden columns must actually be hidden, and the
+    # header menu must not be able to hide the last one.
+    from ida_plugin.ui_logic import COLUMNS
+
+    hidden = [index for index, (name, _) in enumerate(COLUMNS)
+              if form._table.isColumnHidden(index)]
+    check("count columns hidden by default", len(hidden) == 10,
+          f"{len(hidden)} of 18 columns hidden, expected 10")
+
+    form._table.visibility.toggle("edges_primary")
+    form._table._apply_visibility()
+    edges_index = [i for i, (n, _) in enumerate(COLUMNS)
+                   if n == "edges_primary"][0]
+    check("toggling a column shows it",
+          not form._table.isColumnHidden(edges_index))
+
+    from ida_plugin.ui_logic import ColumnVisibility
+
+    form._table.set_visibility(ColumnVisibility(["similarity"]))
+    check("hiding the last column is refused",
+          form._table.visibility.set_visible("similarity", False) is False)
+    form._table.set_visibility(ColumnVisibility())
+
     plugin._show_statistics_widget_check = True
     try:
         from ida_plugin.panels import StatisticsDialog
@@ -232,8 +255,33 @@ def run_checks() -> None:
 
         dialog = AlgorithmConfigDialog(bindiff.get_config(), lambda _c: None)
         check("algorithm dialog lists steps",
-              dialog._function_list.count() > 0,
-              f"{dialog._function_list.count()} function algorithms listed")
+              dialog._function_list.rowCount() > 0,
+              "no function algorithms listed")
+        note("function algorithms listed",
+             str(dialog._function_list.rowCount()))
+
+        # Confidence is editable now, and the edit has to survive being read
+        # back out of the table.
+        confidence_cell = dialog._function_list.item(0, 1)
+        check("confidence cell exists", confidence_cell is not None)
+        if confidence_cell is not None:
+            confidence_cell.setText("0.33")
+            steps = dialog._selected_steps(dialog._function_list)
+            check("edited confidence is read back",
+                  bool(steps) and steps[0]["confidence"] == 0.33,
+                  f"read {steps[0]['confidence'] if steps else None}")
+
+            # A value that will not parse, or is out of range, drops the row
+            # rather than substituting something the user did not type.
+            confidence_cell.setText("not a number")
+            rejected = dialog._selected_steps(dialog._function_list)
+            check("unparseable confidence drops the row",
+                  len(rejected) == len(steps) - 1,
+                  f"{len(rejected)} rows vs {len(steps)}")
+            confidence_cell.setText("5.0")
+            out_of_range = dialog._selected_steps(dialog._function_list)
+            check("out of range confidence drops the row",
+                  len(out_of_range) == len(steps) - 1)
         dialog.close()
     except Exception:
         check("algorithm dialog lists steps", False,

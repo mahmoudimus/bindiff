@@ -74,7 +74,11 @@ class MatchingStep {
 
   const std::string& display_name() const { return display_name_; }
 
-  double confidence() const { return confidence_; }
+  // Read from the configuration on each call rather than returned from the
+  // member, so that changing a confidence takes effect without restarting.
+  // The member remains the fallback for a step absent from the config.
+  // Cheap: one hash lookup in an immutable snapshot, no lock, no write.
+  double confidence() const;
 
   bool strict_equivalence() const { return strict_equivalence_; }
 

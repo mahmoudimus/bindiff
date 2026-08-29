@@ -202,6 +202,10 @@ MatchingStepFlowGraph::MatchingStepFlowGraph(std::string name,
       display_name_(std::move(display_name)),
       confidence_(GetConfidenceFromConfig(name_)) {}
 
+double MatchingStepFlowGraph::confidence() const {
+  return config::MatchingStepConfidence(name_, confidence_);
+}
+
 MatchingStepsFlowGraph GetDefaultMatchingStepsBasicBlock() {
   static const auto* algorithms =
       []() -> absl::flat_hash_map<std::string, MatchingStepFlowGraph*>* {

@@ -52,6 +52,26 @@ void MergeInto(const Config& from, Config& config);
 
 std::string GetBinDiffDirOrDefault(const Config& from);
 
+// Confidence of a matching step, by name, falling back to `fallback` when the
+// step is not in the configuration.
+//
+// Steps used to cache their confidence in a member set at construction, which
+// happens once per process, so a configuration change never reached a running
+// differ -- editing a confidence appeared to work and then silently did not.
+// Reading it per call fixes that, but the value has to be reachable from the
+// matching path without a data race: the differ releases the GIL and runs
+// concurrently, so it must never write to shared state.
+//
+// So the values live in an immutable snapshot behind an atomic shared_ptr.
+// Matching only ever loads and reads it; changing the configuration builds a
+// new map and swaps the pointer, and a diff already in flight keeps the
+// snapshot it started with rather than seeing a half-updated map.
+double MatchingStepConfidence(const std::string& name, double fallback);
+
+// Rebuilds that snapshot from the current Proto(). Call after changing the
+// configuration; a diff running concurrently is unaffected.
+void RefreshMatchingStepConfidences();
+
 }  // namespace security::bindiff::config
 
 #endif  // CONFIG_H_

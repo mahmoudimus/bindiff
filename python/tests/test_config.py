@@ -121,3 +121,63 @@ def test_disabling_steps_changes_the_diff(bindiff_module, insider_pair, tmp_path
     restored_db = tmp_path / "restored.BinDiff"
     assert bindiff_module.diff(str(primary), str(secondary), str(restored_db)) == 0
     assert len(bindiff_module.load_matches(str(restored_db))) == baseline
+
+
+class TestConfidenceIsLive:
+    """Confidence used to be read once per process.
+
+    The engine cached it in a member set when each algorithm object was
+    constructed, so a configuration change never reached a running differ: the
+    dialog could edit the value and the edit silently did nothing. It is now
+    read from a snapshot that set_config rebuilds.
+    """
+
+    def test_confidence_round_trips(self, bindiff_module):
+        config = bindiff_module.get_config()
+        original = config["function_matching"][0]["confidence"]
+        changed = 0.25 if original != 0.25 else 0.75
+
+        config["function_matching"][0]["confidence"] = changed
+        bindiff_module.set_config(config)
+
+        assert bindiff_module.get_config()["function_matching"][0][
+            "confidence"] == changed
+
+    @pytest.mark.e2e
+    def test_confidence_changes_reported_confidence(
+            self, bindiff_module, insider_pair, tmp_path):
+        """The value has to reach the engine, not just the config.
+
+        Confidence weights how much each algorithm's matches are trusted, and
+        feeds the confidence recorded against every match. Dropping every
+        algorithm to a low weight must move those numbers; if the engine were
+        still reading its construction-time copy, the two runs would be
+        identical.
+        """
+        primary, secondary = insider_pair
+
+        baseline_db = tmp_path / "baseline.BinDiff"
+        assert bindiff_module.diff(str(primary), str(secondary),
+                                   str(baseline_db)) == 0
+        baseline = [m.confidence
+                    for m in bindiff_module.load_matches(str(baseline_db))]
+        assert baseline
+
+        config = bindiff_module.get_config()
+        for step in config["function_matching"]:
+            step["confidence"] = 0.05
+        for step in config["basic_block_matching"]:
+            step["confidence"] = 0.05
+        bindiff_module.set_config(config)
+
+        lowered_db = tmp_path / "lowered.BinDiff"
+        assert bindiff_module.diff(str(primary), str(secondary),
+                                   str(lowered_db)) == 0
+        lowered = [m.confidence
+                   for m in bindiff_module.load_matches(str(lowered_db))]
+
+        assert len(lowered) == len(baseline), "the match set should not change"
+        assert lowered != baseline, (
+            "lowering every algorithm's confidence changed nothing -- the "
+            "engine is not reading the configured value")
+        assert max(lowered) < max(baseline)

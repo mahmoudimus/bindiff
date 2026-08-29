@@ -457,3 +457,81 @@ def build_flow_graph_diff(blocks, edges,
         if source in index_by_address and target in index_by_address:
             resolved.append((index_by_address[source], index_by_address[target]))
     return FlowGraphDiff(nodes=nodes, edges=resolved)
+
+# -- column visibility -----------------------------------------------------
+
+# Eighteen columns is more than fits on a screen, and the C++ chooser showed
+# all of them too. These are the ones worth seeing by default; the per-side
+# counts and the ported flag are available but off, because they are reference
+# figures rather than something to scan.
+DEFAULT_VISIBLE_COLUMNS: Sequence[str] = (
+    "similarity", "confidence", "change",
+    "address_primary", "name_primary",
+    "address_secondary", "name_secondary",
+    "algorithm",
+)
+
+
+class ColumnVisibility:
+    """Which of COLUMNS the match table shows.
+
+    Kept out of the widget so the rules -- defaults, the refusal to hide
+    everything, and how a saved set survives a column being added or removed --
+    are testable without a display.
+    """
+
+    def __init__(self, visible: Optional[Iterable[str]] = None) -> None:
+        known = {name for name, _ in COLUMNS}
+        if visible is None:
+            self._visible = set(DEFAULT_VISIBLE_COLUMNS)
+        else:
+            # Unknown names are dropped rather than kept: a saved set from an
+            # older version may name a column that no longer exists, and
+            # carrying it would make is_visible() answer for a column the table
+            # has no index for.
+            self._visible = {name for name in visible if name in known}
+        if not self._visible:
+            self._visible = set(DEFAULT_VISIBLE_COLUMNS)
+
+    def is_visible(self, name: str) -> bool:
+        return name in self._visible
+
+    def set_visible(self, name: str, visible: bool) -> bool:
+        """Shows or hides one column. Returns whether the change was applied.
+
+        Hiding the last visible column is refused: a table with no columns
+        cannot be recovered from through the header menu that would have to be
+        used to undo it.
+        """
+        known = {name_ for name_, _ in COLUMNS}
+        if name not in known:
+            raise ValueError(f"unknown column {name!r}")
+        if visible:
+            self._visible.add(name)
+            return True
+        if self._visible == {name}:
+            return False
+        self._visible.discard(name)
+        return True
+
+    def toggle(self, name: str) -> bool:
+        return self.set_visible(name, not self.is_visible(name))
+
+    def reset(self) -> None:
+        self._visible = set(DEFAULT_VISIBLE_COLUMNS)
+
+    def show_all(self) -> None:
+        self._visible = {name for name, _ in COLUMNS}
+
+    def visible_columns(self) -> List[tuple]:
+        """The visible (name, label) pairs, in COLUMNS order."""
+        return [(name, label) for name, label in COLUMNS
+                if name in self._visible]
+
+    def to_list(self) -> List[str]:
+        """Serialisable form, in COLUMNS order so it reads predictably."""
+        return [name for name, _ in COLUMNS if name in self._visible]
+
+    @classmethod
+    def from_list(cls, names) -> "ColumnVisibility":
+        return cls(names)

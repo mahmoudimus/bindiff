@@ -15,6 +15,7 @@ from typing import Callable, List, Optional, Sequence
 
 from ida_plugin.ui_logic import (
     COLUMNS,
+    ColumnVisibility,
     FlowGraphDiff,
     build_flow_graph_diff,
     UNMATCHED_COLUMNS,
@@ -105,11 +106,66 @@ if IDA_AVAILABLE:
             # in one place: registered once, reachable from both the plugin
             # menu and here, and enabled/disabled by the same predicate.
             self.context_actions: Sequence[str] = ()
+            self._visibility = ColumnVisibility()
+            self.on_visibility_changed: Optional[Callable[[], None]] = None
+            self._apply_visibility()
+
+            # The header carries its own menu: which columns to show is a
+            # property of the table, not an IDA-wide action.
+            header_menu_policy = self.horizontalHeader()
+            try:
+                header_menu_policy.setContextMenuPolicy(
+                    Qt.ContextMenuPolicy.CustomContextMenu)
+            except AttributeError:
+                header_menu_policy.setContextMenuPolicy(Qt.CustomContextMenu)
+            header_menu_policy.customContextMenuRequested.connect(
+                self._show_column_menu)
             try:
                 self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             except AttributeError:
                 self.setContextMenuPolicy(Qt.CustomContextMenu)
             self.customContextMenuRequested.connect(self._show_context_menu)
+
+        @property
+        def visibility(self) -> ColumnVisibility:
+            return self._visibility
+
+        def set_visibility(self, visibility: ColumnVisibility) -> None:
+            self._visibility = visibility
+            self._apply_visibility()
+
+        def _apply_visibility(self) -> None:
+            for index, (name, _label) in enumerate(COLUMNS):
+                self.setColumnHidden(index, not self._visibility.is_visible(name))
+
+        def _show_column_menu(self, position) -> None:
+            menu = QtWidgets.QMenu(self)
+            for name, label in COLUMNS:
+                action = menu.addAction(label)
+                action.setCheckable(True)
+                action.setChecked(self._visibility.is_visible(name))
+                action.setData(name)
+            menu.addSeparator()
+            show_all = menu.addAction("Show all")
+            reset = menu.addAction("Reset to defaults")
+
+            chosen = menu.exec_(
+                self.horizontalHeader().mapToGlobal(position))
+            if chosen is None:
+                return
+            if chosen is show_all:
+                self._visibility.show_all()
+            elif chosen is reset:
+                self._visibility.reset()
+            elif not self._visibility.set_visible(chosen.data(),
+                                                  chosen.isChecked()):
+                # Refused: this was the last visible column.
+                QtWidgets.QMessageBox.information(
+                    self, "BinDiff", "At least one column must stay visible.")
+                return
+            self._apply_visibility()
+            if self.on_visibility_changed is not None:
+                self.on_visibility_changed()
 
         def _show_context_menu(self, position) -> None:
             if not self.context_actions:
@@ -554,13 +610,12 @@ if IDA_AVAILABLE:
             layout.addWidget(buttons)
 
     class AlgorithmConfigDialog(QtWidgets.QDialog):
-        """Enable, disable and reorder the matching algorithms.
+        """Enable, disable, reorder and re-weight the matching algorithms.
 
-        Writes straight through to the engine config, so a change here takes
-        effect on the next diff. Confidence values are shown but not editable:
-        the engine reads those when it constructs its algorithm objects, which
-        happens once per process, so editing them here would appear to work and
-        then not.
+        Writes straight through to the engine config, so everything here takes
+        effect on the next diff -- confidence included. The engine used to read
+        confidence once per process, which made it look editable and silently
+        ignore the edit; it now reads a snapshot that this rebuilds.
         """
 
         def __init__(self, config: dict, on_apply: Callable[[dict], None],
@@ -579,8 +634,9 @@ if IDA_AVAILABLE:
 
             note = QtWidgets.QLabel(
                 "Unchecked algorithms are not run. Order is priority order; "
-                "drag to reorder. Confidence values are fixed for the lifetime "
-                "of the process.")
+                "drag to reorder. Confidence weights how much a match from an "
+                "algorithm is trusted -- double-click to edit. All of it "
+                "applies to the next diff.")
             note.setWordWrap(True)
 
             buttons = QtWidgets.QDialogButtonBox()
@@ -601,35 +657,74 @@ if IDA_AVAILABLE:
             layout.addWidget(self._tabs, 1)
             layout.addWidget(buttons)
 
-        def _build_list(self, key: str) -> QtWidgets.QListWidget:
-            widget = QtWidgets.QListWidget()
+        def _build_list(self, key: str) -> QtWidgets.QTableWidget:
+            """One row per algorithm: enabled, name, editable confidence."""
+            steps = self._config.get(key, [])
+            table = QtWidgets.QTableWidget(len(steps), 2)
+            table.setHorizontalHeaderLabels(["Algorithm", "Confidence"])
+            table.verticalHeader().setVisible(False)
+            table.setSelectionBehavior(_select_rows())
             try:
-                widget.setDragDropMode(
+                table.setDragDropMode(
                     QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
             except AttributeError:
-                widget.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
-            for step in self._config.get(key, []):
-                item = QtWidgets.QListWidgetItem(
-                    f"{step['name']}  (confidence {step.get('confidence', 0)})")
-                item.setData(Qt.UserRole, step)
+                table.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
+
+            for row, step in enumerate(steps):
+                name_item = QtWidgets.QTableWidgetItem(step["name"])
+                name_item.setData(Qt.UserRole, step["name"])
                 try:
-                    item.setCheckState(Qt.CheckState.Checked)
+                    name_item.setFlags(
+                        (name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                        | Qt.ItemFlag.ItemIsUserCheckable)
+                    name_item.setCheckState(Qt.CheckState.Checked)
                 except AttributeError:
-                    item.setCheckState(Qt.Checked)
-                widget.addItem(item)
-            return widget
+                    name_item.setFlags((name_item.flags() & ~Qt.ItemIsEditable)
+                                       | Qt.ItemIsUserCheckable)
+                    name_item.setCheckState(Qt.Checked)
+                table.setItem(row, 0, name_item)
+
+                confidence = QtWidgets.QTableWidgetItem(
+                    f"{float(step.get('confidence', 0.0)):.2f}")
+                table.setItem(row, 1, confidence)
+
+            try:
+                table.horizontalHeader().setSectionResizeMode(
+                    0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+            except AttributeError:
+                table.horizontalHeader().setSectionResizeMode(
+                    0, QtWidgets.QHeaderView.Stretch)
+            return table
 
         @staticmethod
-        def _selected_steps(widget: QtWidgets.QListWidget) -> List[dict]:
+        def _selected_steps(table: QtWidgets.QTableWidget) -> List[dict]:
+            """The enabled rows, in display order, with edited confidences.
+
+            A confidence that will not parse, or falls outside 0..1, is skipped
+            rather than clamped: silently substituting a value the user did not
+            type would be worse than leaving the row as it was.
+            """
             steps = []
-            for index in range(widget.count()):
-                item = widget.item(index)
+            for row in range(table.rowCount()):
+                name_item = table.item(row, 0)
+                if name_item is None:
+                    continue
                 try:
-                    checked = item.checkState() == Qt.CheckState.Checked
+                    checked = name_item.checkState() == Qt.CheckState.Checked
                 except AttributeError:
-                    checked = item.checkState() == Qt.Checked
-                if checked:
-                    steps.append(item.data(Qt.UserRole))
+                    checked = name_item.checkState() == Qt.Checked
+                if not checked:
+                    continue
+
+                confidence_item = table.item(row, 1)
+                try:
+                    confidence = float(confidence_item.text())
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if not 0.0 <= confidence <= 1.0:
+                    continue
+                steps.append({"name": name_item.data(Qt.UserRole),
+                              "confidence": confidence})
             return steps
 
         def _apply(self) -> None:

@@ -404,6 +404,9 @@ void SetConfigJson(const std::string& json) {
   }
 
   config::Proto() = merged;
+  // The matching steps read their confidence from a snapshot of this, so it
+  // has to be rebuilt or the new values would not be seen.
+  config::RefreshMatchingStepConfidences();
 }
 
 }  // namespace security::bindiff

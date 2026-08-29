@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <atomic>
+#include <memory>
+
+#include "third_party/absl/container/flat_hash_map.h"
 #include "third_party/zynamics/bindiff/config.h"
 
 #ifdef BINDIFF_GOOGLE
@@ -185,6 +189,58 @@ void MergeInto(const Config& from, Config& config) {
   if (names.empty() || names.size() != config.basic_block_matching_size()) {
     *config.mutable_basic_block_matching() = std::move(basic_block_matching);
   }
+}
+
+namespace {
+
+using ConfidenceMap = absl::flat_hash_map<std::string, double>;
+
+// An atomic pointer rather than std::atomic<std::shared_ptr>: that
+// specialisation is not implemented in every standard library this builds
+// against, and a raw pointer is trivially copyable so the atomic is lock-free.
+//
+// A superseded snapshot is deliberately never freed. A diff running
+// concurrently may still be reading it, and there is no cheap way to know when
+// the last reader is done without reference counting the read path -- which
+// would put a write back into matching, the thing this exists to avoid.
+// Configuration changes are a user action that happens a handful of times in a
+// session and each map holds about thirty-five entries, so the leak is bounded
+// and tiny. Reads stay a single atomic load.
+std::atomic<const ConfidenceMap*>& ConfidenceSnapshot() {
+  static auto* snapshot = new std::atomic<const ConfidenceMap*>(nullptr);
+  return *snapshot;
+}
+
+const ConfidenceMap* BuildConfidenceSnapshot() {
+  auto* map = new ConfidenceMap();
+  const Config& config = Proto();
+  for (const auto& step : config.function_matching()) {
+    (*map)[step.name()] = step.confidence();
+  }
+  for (const auto& step : config.basic_block_matching()) {
+    (*map)[step.name()] = step.confidence();
+  }
+  return map;
+}
+
+}  // namespace
+
+void RefreshMatchingStepConfidences() {
+  ConfidenceSnapshot().store(BuildConfidenceSnapshot(),
+                             std::memory_order_release);
+}
+
+double MatchingStepConfidence(const std::string& name, double fallback) {
+  const ConfidenceMap* snapshot =
+      ConfidenceSnapshot().load(std::memory_order_acquire);
+  if (snapshot == nullptr) {
+    // First use. Two threads racing here each build an equivalent map and one
+    // store wins; the loser's map leaks, which is the same bounded cost.
+    snapshot = BuildConfidenceSnapshot();
+    ConfidenceSnapshot().store(snapshot, std::memory_order_release);
+  }
+  const auto found = snapshot->find(name);
+  return found != snapshot->end() ? found->second : fallback;
 }
 
 std::string GetBinDiffDirOrDefault(const Config& from) {
