@@ -169,12 +169,19 @@ class BinDiffClient:
 
 def start_service(cache_dir=None, host: str = DEFAULT_HOST,
                   port: int = DEFAULT_PORT,
-                  interpreter=None) -> subprocess.Popen:
+                  interpreter=None,
+                  idle_timeout: float = 3600.0) -> subprocess.Popen:
     """Starts a service in the background and waits for it to answer.
 
     The interpreter matters: the service imports the Cython extension, which is
     built against one specific Python, so it has to be the same one running
     this code -- not whatever `python3` resolves to on PATH.
+
+    `idle_timeout` defaults to an hour rather than forever, because a service
+    started from here is a child of whatever started it: if that process is
+    IDA and IDA exits, the service keeps running with its port bound and its
+    cache open, and nothing ever reaps it. Pass 0 for a service meant to
+    outlive its parent.
     """
     from bindiff.headless import find_python_interpreter
 
@@ -182,7 +189,8 @@ def start_service(cache_dir=None, host: str = DEFAULT_HOST,
         interpreter = find_python_interpreter()
 
     command = [str(interpreter), "-m", "bindiff.server",
-               "--host", host, "--port", str(port)]
+               "--host", host, "--port", str(port),
+               "--idle-timeout", str(idle_timeout)]
     if cache_dir is not None:
         command += ["--cache-dir", str(cache_dir)]
 

@@ -20,6 +20,7 @@ from bindiff.client import (
 )
 from bindiff.server import (
     BinDiffService,
+    IdleShutdown,
     ExportStore,
     UnknownExport,
     digest_of,
@@ -90,9 +91,13 @@ class TestServiceBasics:
 
 @pytest.fixture
 def running_service(tmp_path):
-    """A real HTTP server on a port the OS picks, torn down afterwards."""
+    """A real HTTP server on a port the OS picks, torn down afterwards.
+
+    A short socket timeout so the truncated-body test does not spend the
+    production 30 seconds proving the handler gives up.
+    """
     service = BinDiffService(tmp_path / "cache")
-    server = make_server(service, "127.0.0.1", 0)
+    server = make_server(service, "127.0.0.1", 0, socket_timeout=2.0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -136,6 +141,38 @@ class TestTransport:
         _service, client = running_service
         with pytest.raises(ServiceError, match="no such route"):
             client._request("GET", "/nope")
+
+    def test_a_client_that_lies_about_its_length_does_not_leak_a_thread(
+            self, running_service):
+        """A handler blocked forever on rfile.read is a thread leak.
+
+        The server keeps answering other connections, so the symptom is a slow
+        leak rather than an outage -- which is exactly why it needs a test
+        instead of being noticed in production.
+        """
+        import socket
+
+        _service, client = running_service
+        port = int(client.base_url.rsplit(":", 1)[1])
+
+        connection = socket.create_connection(("127.0.0.1", port))
+        try:
+            connection.sendall(
+                b"POST /upload HTTP/1.1\r\nHost: x\r\n"
+                b"Content-Length: 1048576\r\n\r\n0123456789")
+            # Comfortably longer than the fixture's 2s handler timeout.
+            connection.settimeout(30)
+            try:
+                data = connection.recv(100)
+            except socket.timeout:
+                pytest.fail("the handler never gave up on a truncated body")
+            # Either an error response or a closed connection is fine; hanging
+            # is not.
+            assert data == b"" or data.startswith(b"HTTP/1.")
+        finally:
+            connection.close()
+
+        assert client.health()["ok"], "the server stopped answering"
 
     def test_no_service_is_distinguishable_from_a_failing_one(self):
         """A client that cannot tell "nothing is listening" from "the service
@@ -391,3 +428,119 @@ class TestAsyncClient:
         async_client = make_async_client()()
         async_client.shutdown()
         async_client.shutdown()
+
+
+class TestIdleShutdown:
+    """The watchdog, on its own -- no HTTP, no IDA, no waiting."""
+
+    def test_zero_means_never(self):
+        """A manually started service should stay up."""
+        watchdog = IdleShutdown(ttl=0)
+        watchdog._last_request = 0.0  # ancient
+        assert not watchdog.should_stop()
+
+    def test_it_stops_once_idle_past_the_ttl(self):
+        import time
+
+        watchdog = IdleShutdown(ttl=0.05)
+        assert not watchdog.should_stop()
+        time.sleep(0.1)
+        assert watchdog.should_stop()
+
+    def test_a_request_resets_the_clock(self):
+        import time
+
+        watchdog = IdleShutdown(ttl=0.05)
+        time.sleep(0.1)
+        assert watchdog.should_stop()
+        watchdog.touch()
+        assert not watchdog.should_stop()
+
+    def test_a_long_call_is_not_idle(self):
+        """The subtlety worth having a test for.
+
+        Requests touch the timer when they *arrive*, so a diff running longer
+        than the ttl looks idle by the naive measure and would be shut down
+        mid-work. Large binaries take minutes, so this is not hypothetical.
+        """
+        import time
+
+        watchdog = IdleShutdown(ttl=0.05)
+        watchdog.set_busy_probe(lambda: True)
+        time.sleep(0.1)
+        assert not watchdog.should_stop(), "shut down during a running call"
+
+        watchdog.set_busy_probe(lambda: False)
+        assert watchdog.should_stop()
+
+    def test_it_fires_the_handler_once(self):
+        import time
+
+        watchdog = IdleShutdown(ttl=0.05, poll_interval=0.02)
+        fired = []
+        watchdog.start(lambda: fired.append(True))
+        try:
+            deadline = time.monotonic() + 5
+            while not fired and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert fired, "the watchdog never fired"
+            time.sleep(0.1)
+            assert len(fired) == 1, "the watchdog fired more than once"
+        finally:
+            watchdog.stop()
+
+    def test_the_server_exposes_its_watchdog_for_teardown(self, tmp_path):
+        """make_server attaches it so a caller can stop it; without that the
+        thread keeps polling a server that has been closed."""
+        service = BinDiffService(tmp_path)
+        server = make_server(service, "127.0.0.1", 0, idle_timeout=60.0)
+        try:
+            assert getattr(server, "bindiff_watchdog", None) is not None
+        finally:
+            server.bindiff_watchdog.stop()
+            server.server_close()
+
+    def test_no_watchdog_when_the_timeout_is_off(self, tmp_path):
+        service = BinDiffService(tmp_path)
+        server = make_server(service, "127.0.0.1", 0)
+        try:
+            assert getattr(server, "bindiff_watchdog", None) is None
+        finally:
+            server.server_close()
+
+    def test_stop_is_idempotent(self):
+        watchdog = IdleShutdown(ttl=0.05)
+        watchdog.start(lambda: None)
+        watchdog.stop()
+        watchdog.stop()
+
+
+@pytest.mark.requires_extension
+def test_the_service_reports_itself_busy_during_a_diff(tmp_path, insider_pair):
+    """The busy probe has to be true while the engine is running, or the
+    watchdog would kill a long diff."""
+    import threading
+
+    service = BinDiffService(tmp_path)
+    primary, secondary = insider_pair
+    primary_id = service.upload(primary.read_bytes())
+    secondary_id = service.upload(secondary.read_bytes())
+
+    assert not service.busy()
+    seen = []
+    done = threading.Event()
+
+    def watch():
+        while not done.is_set():
+            if service.busy():
+                seen.append(True)
+                return
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    service.diff(primary_id, secondary_id)
+    done.set()
+    watcher.join(timeout=5)
+
+    assert seen, "the service never reported itself busy while diffing"
+    assert not service.busy(), "still busy after the diff returned"

@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("bindiff.server")
 
@@ -172,6 +172,7 @@ class BinDiffService:
 
         self._pair_locks: Dict[Tuple[str, str], threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._in_flight = 0
         self._stats = {"diffs_run": 0, "diffs_served_from_cache": 0,
                        "uploads": 0}
 
@@ -221,6 +222,23 @@ class BinDiffService:
         database = self.database_for(primary_id, secondary_id)
 
         started = time.monotonic()
+        with self._locks_guard:
+            self._in_flight += 1
+        try:
+            return self._diff_locked(primary_id, secondary_id, primary,
+                                     secondary, database, force, started)
+        finally:
+            with self._locks_guard:
+                self._in_flight -= 1
+
+    def busy(self) -> bool:
+        """True while any diff is in flight, so an idle watchdog can tell a
+        long call from an idle process."""
+        with self._locks_guard:
+            return self._in_flight > 0
+
+    def _diff_locked(self, primary_id, secondary_id, primary, secondary,
+                     database, force, started) -> DiffResult:
         with self._lock_for((primary_id, secondary_id)):
             cached = database.is_file() and not force
             if not cached:
@@ -281,6 +299,7 @@ class BinDiffService:
 
     def health(self) -> dict:
         return {
+            "busy": self.busy(),
             "ok": True,
             "exports": len(self.exports.ids()),
             "export_bytes": self.exports.total_bytes(),
@@ -289,10 +308,97 @@ class BinDiffService:
         }
 
 
+class IdleShutdown:
+    """Exits the process once no request has arrived for `ttl` seconds.
+
+    A service the plugin starts outlives IDA otherwise: start_service returns a
+    Popen, and if the parent dies the child keeps running with its port bound
+    and its cache open. A manually started service usually wants to stay up, so
+    a ttl of zero means never.
+
+    The subtlety, which ida-pro-mcp's worker_lifecycle gets right and a naive
+    version does not: requests touch the timer when they *arrive*, so a diff
+    that runs longer than the ttl looks idle and gets shut down mid-work. A
+    busy probe is consulted before exiting for that reason -- and diffs of large
+    binaries take minutes, so this is not a hypothetical.
+
+    No IDA and no HTTP dependencies, so it is testable on its own.
+    """
+
+    def __init__(self, ttl: float, poll_interval: float = 5.0):
+        self.ttl = ttl
+        self.poll_interval = poll_interval
+        self._lock = threading.Lock()
+        self._last_request = time.monotonic()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._busy_probe = None
+
+    def set_busy_probe(self, probe) -> None:
+        """Registers a callable reporting whether work is in flight."""
+        self._busy_probe = probe
+
+    def touch(self) -> None:
+        with self._lock:
+            self._last_request = time.monotonic()
+
+    def idle_seconds(self) -> float:
+        with self._lock:
+            return time.monotonic() - self._last_request
+
+    def should_stop(self) -> bool:
+        if self.ttl <= 0:
+            return False
+        if self._busy_probe is not None and self._busy_probe():
+            return False
+        return self.idle_seconds() > self.ttl
+
+    def start(self, on_idle) -> None:
+        if self.ttl <= 0 or self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run, args=(on_idle,), daemon=True,
+            name="bindiff-idle-watchdog")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=5.0)
+
+    def _run(self, on_idle) -> None:
+        while not self._stop.wait(self.poll_interval):
+            if self.should_stop():
+                logger.info("idle for %.0fs, shutting down",
+                            self.idle_seconds())
+                try:
+                    on_idle()
+                except Exception:
+                    logger.exception("idle shutdown handler raised")
+                return
+
+
 class _Handler(BaseHTTPRequestHandler):
     """Routes requests to the service. One instance per request."""
 
     protocol_version = "HTTP/1.1"
+
+    #: Set on the bound subclass when the server has an idle watchdog.
+    watchdog = None
+
+    # Bounds every socket read. Without it a client that announces a large
+    # Content-Length and then stops sending parks a handler thread on
+    # rfile.read forever -- verified: no response after 20s and the thread
+    # never returns. The server keeps answering other connections, so the
+    # symptom is a slow thread leak rather than an outage, which is worse to
+    # notice. Borrowed from ida-pro-mcp, which sets the same guard.
+    #
+    # This is an idle timeout on socket operations, not a budget for the work:
+    # a diff taking minutes is unaffected, because the read finished before it
+    # started and the write happens in one go afterwards.
+    timeout = 30
+
     service: BinDiffService  # set on the server class
 
     def log_message(self, format, *args):  # noqa: A002 - stdlib signature
@@ -325,6 +431,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802 - stdlib signature
         service = type(self).service
+        if type(self).watchdog is not None:
+            type(self).watchdog.touch()
         try:
             if self.path == "/health":
                 self._send_json(service.health())
@@ -345,6 +453,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802 - stdlib signature
         service = type(self).service
+        if type(self).watchdog is not None:
+            type(self).watchdog.touch()
         try:
             if self.path == "/upload":
                 # Raw bytes rather than JSON: base64 would inflate a
@@ -373,16 +483,39 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def make_server(service: BinDiffService, host: str = "127.0.0.1",
-                port: int = 0) -> ThreadingHTTPServer:
+                port: int = 0,
+                socket_timeout: float = 30.0,
+                idle_timeout: float = 0.0) -> ThreadingHTTPServer:
     """Builds a server bound to `host:port`.
 
     Port 0 asks the OS for a free one, which is what tests use; read it back
     from `server.server_address[1]`. Bound to loopback by default: the service
     runs the engine on files a caller names, so it has no business on a public
     interface without a deliberate decision.
+
+    `socket_timeout` bounds every socket read, so a client that stops sending
+    mid-body cannot park a handler thread forever. Adjustable mainly so a test
+    does not have to wait out the production value.
+
+    `idle_timeout` shuts the server down after that many seconds without a
+    request; zero keeps it up forever. A service the plugin spawned wants one,
+    or it outlives the IDA that started it.
     """
-    handler = type("BoundHandler", (_Handler,), {"service": service})
-    return ThreadingHTTPServer((host, port), handler)
+    watchdog = IdleShutdown(idle_timeout) if idle_timeout > 0 else None
+    if watchdog is not None:
+        watchdog.set_busy_probe(service.busy)
+
+    handler = type("BoundHandler", (_Handler,),
+                   {"service": service, "timeout": socket_timeout,
+                    "watchdog": watchdog})
+    server = ThreadingHTTPServer((host, port), handler)
+    if watchdog is not None:
+        # shutdown() from the watchdog thread, not this one: calling it from
+        # the thread running serve_forever would deadlock.
+        watchdog.start(lambda: threading.Thread(target=server.shutdown,
+                                                daemon=True).start())
+        server.bindiff_watchdog = watchdog
+    return server
 
 
 def main(argv=None) -> int:
@@ -393,6 +526,11 @@ def main(argv=None) -> int:
     parser.add_argument("--port", type=int, default=8710)
     parser.add_argument("--cache-dir",
                         default=str(Path.home() / ".cache" / "bindiff-server"))
+    parser.add_argument(
+        "--idle-timeout", type=float, default=0.0,
+        help="exit after this many seconds with no requests (0 = never). A "
+             "service started by the plugin should set one, or it outlives "
+             "the IDA that started it.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -401,7 +539,8 @@ def main(argv=None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     service = BinDiffService(Path(args.cache_dir))
-    server = make_server(service, args.host, args.port)
+    server = make_server(service, args.host, args.port,
+                         idle_timeout=args.idle_timeout)
     host, port = server.server_address[:2]
     logger.info("bindiff service on http://%s:%s, cache in %s",
                 host, port, args.cache_dir)
@@ -410,6 +549,12 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         logger.info("shutting down")
     finally:
+        # Stopped explicitly: it is a daemon thread, so it would not hold the
+        # process open, but leaving it polling a server that has been closed is
+        # untidy and confuses anything that inspects threads.
+        watchdog = getattr(server, "bindiff_watchdog", None)
+        if watchdog is not None:
+            watchdog.stop()
         server.server_close()
     return 0
 
