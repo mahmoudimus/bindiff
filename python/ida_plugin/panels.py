@@ -11,16 +11,19 @@ PySide6 (IDA 9.2+) or PyQt5 (IDA 9.1) and papers over the differences.
 
 from __future__ import annotations
 
+import time
 from typing import Callable, List, Optional, Sequence
 
 from ida_plugin.ui_logic import (
     COLUMNS,
     ColumnVisibility,
+    DiffProgress,
     FlowGraphDiff,
     build_flow_graph_diff,
     UNMATCHED_COLUMNS,
     UnmatchedRow,
     filter_unmatched,
+    format_elapsed,
     sort_unmatched,
     MatchFilter,
     MatchRow,
@@ -389,6 +392,128 @@ if IDA_AVAILABLE:
         def _on_double_clicked(self, row: int, _column: int) -> None:
             if self.on_activated and 0 <= row < len(self._rows):
                 self.on_activated(self._rows[row])
+
+    class DiffProgressForm(ida_kernwin.PluginForm):
+        """Live status for a diff running in a worker process.
+
+        A dockable panel rather than IDA's wait box, which is modal: the point
+        of running the diff out of process is that the database stays usable
+        while it runs, and a modal box would give that back.
+
+        Nothing here pumps the event loop. A script that does its work on the
+        UI thread has to call processEvents() to stay responsive -- eidolon's
+        pattern -- but the work is in another process entirely, so the UI
+        thread is already free and re-entering the event loop by hand would
+        only invite reentrancy bugs.
+
+        Every method must be called on the UI thread; see the plugin's
+        _run_diff_async, which posts them there.
+        """
+
+        def __init__(self, title: str,
+                     on_cancel: Optional[Callable[[], None]] = None) -> None:
+            super().__init__()
+            self._title = title
+            self._on_cancel = on_cancel
+            self._started = time.monotonic()
+            self._last: Optional[DiffProgress] = None
+            self._done = False
+            self.parent = None
+
+        def OnCreate(self, form) -> None:
+            self.parent = self.FormToPyQtWidget(form)
+            layout = QtWidgets.QVBoxLayout(self.parent)
+
+            self._status = QtWidgets.QLabel(self._title)
+            self._status.setWordWrap(True)
+            self._detail = QtWidgets.QLabel("starting...")
+            self._elapsed = QtWidgets.QLabel("Elapsed: 0s")
+
+            self._bar = QtWidgets.QProgressBar()
+            # 0/0 is Qt's indeterminate bar: the right thing to show while an
+            # export runs, because there is genuinely no fraction to report.
+            self._bar.setRange(0, 0)
+
+            self._cancel = QtWidgets.QPushButton("Cancel")
+            self._cancel.setEnabled(self._on_cancel is not None)
+            self._cancel.clicked.connect(self._request_cancel)
+
+            buttons = QtWidgets.QHBoxLayout()
+            buttons.addWidget(self._elapsed)
+            buttons.addStretch(1)
+            buttons.addWidget(self._cancel)
+
+            layout.addWidget(self._status)
+            layout.addWidget(self._bar)
+            layout.addWidget(self._detail)
+            layout.addLayout(buttons)
+            layout.addStretch(1)
+
+            # The elapsed clock ticks on its own rather than only when a
+            # progress record arrives: a matching step can run for minutes
+            # without one, and a status panel that stops moving reads as a
+            # hang. Same reason eidolon runs a 1s QTimer beside its worker.
+            self._timer = QtCore.QTimer(self.parent)
+            self._timer.timeout.connect(self._tick)
+            self._timer.start(1000)
+            if self._last is not None:
+                self.update_progress(self._last)
+
+        def OnClose(self, form) -> None:
+            timer = getattr(self, "_timer", None)
+            if timer is not None:
+                timer.stop()
+            self.parent = None
+
+        def _tick(self) -> None:
+            if self.parent is None or self._done:
+                return
+            self._elapsed.setText(
+                f"Elapsed: {format_elapsed(time.monotonic() - self._started)}")
+
+        def _request_cancel(self) -> None:
+            if self._on_cancel is None:
+                return
+            self._cancel.setEnabled(False)
+            self._detail.setText("cancelling...")
+            self._on_cancel()
+
+        def update_progress(self, progress: DiffProgress) -> None:
+            """Shows one progress record. Cheap enough to call per record."""
+            self._last = progress
+            if self.parent is None:
+                return  # Created later; OnCreate replays the last record.
+            percentage = progress.percentage
+            if percentage is None:
+                self._bar.setRange(0, 0)
+            else:
+                self._bar.setRange(0, 100)
+                self._bar.setValue(percentage)
+            self._detail.setText(progress.describe())
+
+        def finish(self, message: str) -> None:
+            """Stops the clock and leaves the outcome on screen.
+
+            The panel is not closed: when a diff fails, the last thing it said
+            it was doing is the most useful thing on the screen.
+            """
+            self._done = True
+            if self.parent is None:
+                return
+            self._timer.stop()
+            self._bar.setRange(0, 100)
+            self._bar.setValue(100)
+            self._cancel.setEnabled(False)
+            self._detail.setText(message)
+            self._elapsed.setText(
+                f"Took {format_elapsed(time.monotonic() - self._started)}")
+
+        def Show(self):
+            return ida_kernwin.PluginForm.Show(
+                self, self._title,
+                options=(ida_kernwin.PluginForm.WOPN_PERSIST
+                         | ida_kernwin.PluginForm.WOPN_TAB),
+            )
 
     class UnmatchedFunctionsForm(ida_kernwin.PluginForm):
         """Dockable list of unmatched functions for one side."""

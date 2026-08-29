@@ -316,6 +316,62 @@ def similarity_color(similarity: float) -> tuple[int, int, int]:
     )
 
 @dataclass(frozen=True)
+class DiffProgress:
+    """One progress report from a running diff.
+
+    Built from the record `bindiff.headless` puts on the worker's stdout. The
+    weighting between stages is the worker's decision -- only it knows whether
+    there are exports to do -- so `fraction` is taken as given.
+    """
+
+    stage: str = ""
+    message: str = ""
+    fraction: Optional[float] = None
+    step_index: Optional[int] = None
+    step_count: Optional[int] = None
+    matches: Optional[int] = None
+
+    @classmethod
+    def from_record(cls, record: dict) -> "DiffProgress":
+        return cls(stage=record.get("stage", ""),
+                   message=record.get("message", ""),
+                   fraction=record.get("fraction"),
+                   step_index=record.get("step_index"),
+                   step_count=record.get("step_count"),
+                   matches=record.get("matches"))
+
+    @property
+    def percentage(self) -> Optional[int]:
+        """0-100, or None when the stage cannot say how far along it is.
+
+        An export has no honest answer: idalib's auto-analysis does not call
+        back. A bar shown for it should be indeterminate rather than invented.
+        """
+        if self.fraction is None:
+            return None
+        return max(0, min(100, round(self.fraction * 100)))
+
+    def describe(self) -> str:
+        """One line for a status label."""
+        parts = [self.message or self.stage or "working"]
+        if self.step_index is not None and self.step_count:
+            parts.append(f"step {self.step_index + 1}/{self.step_count}")
+        if self.matches is not None:
+            parts.append(f"{self.matches} matched")
+        return " - ".join(parts)
+
+
+def format_elapsed(seconds: float) -> str:
+    """Elapsed time for a status line: 47s, 3m 05s, 1h 02m."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
+
+
+@dataclass(frozen=True)
 class UnmatchedRow:
     """One row of an unmatched-functions view."""
 

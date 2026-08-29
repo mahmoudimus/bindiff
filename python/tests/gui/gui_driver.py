@@ -320,6 +320,64 @@ def run_checks() -> None:
     except Exception:
         check("unmatched dock exists", False, traceback.format_exc(limit=3))
 
+    # -- the diff progress panel ---------------------------------------------
+    #
+    # The only place this code runs at all: headless there is no QProgressBar
+    # to set a range on. What the headless suite checks is the arithmetic
+    # behind it (ui_logic.DiffProgress); what is checked here is that the
+    # widget reflects it.
+
+    try:
+        from ida_plugin.panels import DiffProgressForm
+        from ida_plugin.ui_logic import DiffProgress
+
+        cancelled = []
+        progress_form = DiffProgressForm("BinDiff - progress probe",
+                                         on_cancel=lambda: cancelled.append(1))
+        progress_form.Show()
+        check("progress dock exists",
+              ida_kernwin.find_widget("BinDiff - progress probe") is not None)
+
+        progress_form.update_progress(DiffProgress.from_record(
+            {"stage": "export", "message": "exporting primary: a.exe",
+             "fraction": None}))
+        # 0/0 is Qt's indeterminate bar, which is what an export deserves:
+        # idalib's auto-analysis reports nothing to make a fraction from.
+        check("an export shows an indeterminate bar",
+              (progress_form._bar.minimum(),
+               progress_form._bar.maximum()) == (0, 0),
+              f"range was {progress_form._bar.minimum()}-"
+              f"{progress_form._bar.maximum()}")
+
+        progress_form.update_progress(DiffProgress.from_record(
+            {"stage": "diff", "message": "function: MD index matching",
+             "fraction": 0.75, "step_index": 3, "step_count": 8,
+             "matches": 412}))
+        check("a diff step shows its percentage",
+              progress_form._bar.maximum() == 100
+              and progress_form._bar.value() == 75,
+              f"value was {progress_form._bar.value()} of "
+              f"{progress_form._bar.maximum()}")
+        check("the status line names the step and the match count",
+              "MD index" in progress_form._detail.text()
+              and "412 matched" in progress_form._detail.text(),
+              progress_form._detail.text())
+
+        progress_form._cancel.click()
+        check("cancel reaches the caller", cancelled == [1])
+        check("cancel disables itself once pressed",
+              not progress_form._cancel.isEnabled())
+
+        progress_form.finish("116 matches")
+        check("finishing stops the clock",
+              not progress_form._timer.isActive())
+        check("finishing leaves the outcome on screen",
+              progress_form._detail.text() == "116 matches"
+              and progress_form._bar.value() == 100,
+              progress_form._detail.text())
+    except Exception:
+        check("progress dock exists", False, traceback.format_exc(limit=5))
+
     # -- the asynchronous service client -------------------------------------
     #
     # This is the only place it can run. The client needs a Qt binding already

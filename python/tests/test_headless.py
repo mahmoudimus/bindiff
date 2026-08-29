@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -112,6 +114,223 @@ class TestRunHeadless:
                             runner=runner).ok
 
 
+class TestProgressProtocol:
+    """Progress records share stdout with the result and must never be
+    confused for one, in either direction."""
+
+    def _runner_for(self, lines):
+        def runner(command, **kwargs):
+            return subprocess.CompletedProcess(command, 0,
+                                               stdout="\n".join(lines),
+                                               stderr="")
+        return runner
+
+    def test_records_reach_the_handler_and_the_result_still_arrives(self):
+        seen = []
+        runner = self._runner_for([
+            "Loading processor module...",
+            json.dumps({"progress": {"stage": "export", "message": "a"}}),
+            json.dumps({"progress": {"stage": "diff", "message": "b"}}),
+            StageResult(ok=True, stage="diff", matches=3).to_json(),
+        ])
+
+        result = run_headless(["pipeline"], interpreter=Path("/x"),
+                              runner=runner, on_progress=seen.append)
+
+        assert result.ok and result.matches == 3
+        assert [r["message"] for r in seen] == ["a", "b"]
+
+    def test_a_progress_record_is_never_taken_for_a_result(self):
+        """A record arriving after the result must not replace it."""
+        runner = self._runner_for([
+            StageResult(ok=True, stage="diff", matches=9).to_json(),
+            json.dumps({"progress": {"stage": "diff", "message": "late"}}),
+        ])
+
+        result = run_headless(["diff"], interpreter=Path("/x"), runner=runner)
+        assert result.ok and result.matches == 9
+
+    def test_no_handler_is_not_an_error(self):
+        """An older caller passes no handler; the records are just skipped."""
+        runner = self._runner_for([
+            json.dumps({"progress": {"stage": "diff"}}),
+            StageResult(ok=True, stage="diff").to_json(),
+        ])
+        assert run_headless(["diff"], interpreter=Path("/x"), runner=runner).ok
+
+    def test_a_broken_handler_does_not_cost_the_result(self):
+        """The handler draws; the launcher delivers. A drawing bug must not
+        turn a finished diff into no result at all -- but it must be visible,
+        or it looks like the worker stopped reporting on its own."""
+        calls = []
+
+        def explode(record):
+            calls.append(record)
+            raise RuntimeError("widget is gone")
+
+        runner = self._runner_for([
+            json.dumps({"progress": {"stage": "diff", "message": "one"}}),
+            json.dumps({"progress": {"stage": "diff", "message": "two"}}),
+            StageResult(ok=True, stage="diff", matches=5).to_json(),
+        ])
+
+        result = run_headless(["diff"], interpreter=Path("/x"), runner=runner,
+                              on_progress=explode)
+
+        assert result.ok and result.matches == 5
+        assert "widget is gone" in result.details["progress_error"]
+        # Called once, not once per record: a handler that failed will fail
+        # again, and repeating it buries the real output.
+        assert len(calls) == 1
+
+
+class TestWorkerProgressRecords:
+    def test_diff_reports_each_step(self, monkeypatch):
+        """The engine's step dicts become records with an overall fraction."""
+        import bindiff.headless as headless
+
+        def fake_diff(primary, secondary, output, progress=None):
+            progress({"step_index": 0, "step_count": 4,
+                      "step_name": "function: hash matching", "matches": 0})
+            progress({"step_index": 2, "step_count": 4,
+                      "step_name": "function: call sequence", "matches": 40})
+            return 0
+
+        module = type(sys)("bindiff")
+        module.diff = fake_diff
+        module.load_matches = lambda path: [1, 2, 3]
+        monkeypatch.setitem(sys.modules, "bindiff", module)
+
+        seen = []
+        result = headless.diff("a", "b", "c", progress=seen.append)
+
+        assert result.ok and result.matches == 3
+        assert [r["stage"] for r in seen] == ["diff", "diff"]
+        assert seen[0]["message"] == "function: hash matching"
+        # Work finished before the step starts, so the first report is 0 and
+        # the bar never claims a running step is done.
+        assert seen[0]["fraction"] == 0.0
+        assert seen[1]["fraction"] == 0.5
+        assert seen[1]["matches"] == 40
+
+    def test_pipeline_weights_the_exports_ahead_of_the_diff(self, monkeypatch,
+                                                            tmp_path):
+        """Exports are the slow half; a bar that ignored them would sit near
+        zero for most of the run and then jump."""
+        import bindiff.headless as headless
+
+        def fake_diff(primary, secondary, output, progress=None):
+            progress({"step_index": 0, "step_count": 2, "step_name": "s",
+                      "matches": 0})
+            return 0
+
+        module = type(sys)("bindiff")
+        module.diff = fake_diff
+        module.load_matches = lambda path: []
+        monkeypatch.setitem(sys.modules, "bindiff", module)
+
+        # Stubbed rather than driven with an injected exporter: export() still
+        # opens a real database through idalib, and what is under test here is
+        # how the stages are weighted, not the disassembler.
+        monkeypatch.setattr(headless, "export", lambda source, target, **kw:
+                            StageResult(ok=True, stage="export",
+                                        output=str(target)))
+
+        seen = []
+        result = headless.pipeline(
+            str(tmp_path / "one"), str(tmp_path / "two"),
+            str(tmp_path / "out.BinDiff"), progress=seen.append)
+
+        assert result.ok, result.message
+        stages = [r["stage"] for r in seen]
+        assert stages == ["export", "export", "diff"]
+        assert [r["fraction"] for r in seen] == [0.0, 0.3, 0.6]
+
+    def test_emit_writes_one_flushed_line(self, capsys):
+        """One line, because the launcher reads line by line -- and flushed,
+        because stdout is a pipe there and would otherwise deliver every
+        record at once when the worker exits."""
+        from bindiff.headless import emit_progress
+
+        emit_progress({"stage": "diff", "message": "x"})
+        out = capsys.readouterr().out
+        assert out.count("\n") == 1
+        assert json.loads(out)["progress"]["message"] == "x"
+
+
+class TestStreamingWorker:
+    """The streaming path, exercised directly.
+
+    run_headless always runs `python -m bindiff.headless`, so a worker that
+    hangs or is slow on purpose cannot be expressed through it. _stream is
+    where the timeout, the cancellation and the incremental reads live.
+    """
+
+    def _stream(self, script, **kwargs):
+        from bindiff.headless import _ProgressSink, _stream
+
+        kwargs.setdefault("timeout", None)
+        kwargs.setdefault("cancel", None)
+        sink = kwargs.pop("sink", None) or _ProgressSink(None)
+        return _stream([sys.executable, "-c", script], sink=sink, **kwargs)
+
+    def test_records_arrive_while_the_worker_is_still_running(self):
+        """The point of the whole exercise: a record read at exit is not
+        progress, it is history."""
+        from bindiff.headless import _ProgressSink
+
+        script = (
+            "import json, time\n"
+            "print(json.dumps({'progress': {'stage': 'diff'}}), flush=True)\n"
+            "time.sleep(3)\n"
+            "print(json.dumps({'ok': True, 'stage': 'diff'}), flush=True)\n"
+        )
+        arrivals = []
+        started = time.monotonic()
+        result = self._stream(
+            script, sink=_ProgressSink(
+                lambda record: arrivals.append(time.monotonic() - started)))
+
+        assert result.ok
+        assert arrivals, "no progress record arrived"
+        assert arrivals[0] < 2.0, (
+            f"record arrived after {arrivals[0]:.1f}s; the worker sleeps for "
+            f"3s before exiting, so this was read from a buffer at exit")
+
+    def test_timeout_returns_a_result_rather_than_raising(self):
+        """A caller on a worker thread has nowhere to catch an exception, and
+        a thread that dies quietly leaves the UI waiting forever."""
+        started = time.monotonic()
+        result = self._stream("import time; time.sleep(60)", timeout=1.0)
+
+        assert not result.ok
+        assert "timed out" in result.message
+        assert time.monotonic() - started < 30
+
+    def test_cancel_ends_the_worker(self):
+        cancel = threading.Event()
+        threading.Timer(0.5, cancel.set).start()
+
+        started = time.monotonic()
+        result = self._stream("import time; time.sleep(60)", cancel=cancel)
+
+        assert not result.ok and result.message == "cancelled"
+        assert time.monotonic() - started < 30
+
+    def test_chatter_is_kept_for_a_worker_that_reports_nothing(self):
+        script = ("import sys\n"
+                  "print('autoanalysis complete')\n"
+                  "sys.stderr.write('terminated by signal\\n')\n"
+                  "sys.exit(3)\n")
+        result = self._stream(script)
+
+        assert not result.ok
+        assert "exit 3" in result.message
+        # stderr is merged into stdout rather than read afterwards, so a
+        # crash message written there is not lost.
+        assert "terminated by signal" in result.message
+
+
 class TestCli:
     def test_no_arguments_is_an_error(self, capsys):
         assert main([]) == 2
@@ -149,6 +368,34 @@ def test_diff_runs_in_a_real_subprocess(insider_pair, tmp_path):
     assert result.stage == "diff"
     assert Path(result.output).is_file()
     assert result.matches and result.matches > 0
+
+
+@pytest.mark.requires_extension
+@pytest.mark.e2e
+def test_progress_reaches_the_launcher_from_a_real_worker(insider_pair,
+                                                          tmp_path):
+    """The whole path: engine callback -> worker stdout -> launcher handler."""
+    primary, secondary = insider_pair
+    records = []
+
+    result = run_headless(
+        ["diff", str(primary), str(secondary),
+         str(tmp_path / "progress.BinDiff")],
+        interpreter=Path(sys.executable), timeout=300,
+        on_progress=records.append)
+
+    assert result.ok, result.message
+    assert records, "the worker reported no progress at all"
+    assert {r["stage"] for r in records} == {"diff"}
+    assert all(r["message"] for r in records), "a step reported no name"
+
+    fractions = [r["fraction"] for r in records if r["fraction"] is not None]
+    assert fractions == sorted(fractions), "progress went backwards"
+    assert max(fractions) < 1.0, (
+        "a step reported itself complete while it was still running")
+    # The engine reports before each step and on each propagation round, so
+    # there is more than one report even for a small pair.
+    assert len(records) > 1
 
 
 @pytest.mark.requires_extension

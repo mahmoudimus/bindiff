@@ -655,18 +655,54 @@ if IDA_AVAILABLE:
             import threading
 
             from bindiff.headless import run_headless
+            from ida_plugin.panels import DiffProgressForm
+            from ida_plugin.ui_logic import DiffProgress
+
+            cancel = threading.Event()
+            form = DiffProgressForm(f"BinDiff - diffing {Path(primary).name}",
+                                    on_cancel=cancel.set)
+            form.Show()
+
+            def on_progress(record: dict) -> None:
+                # Runs on the worker thread, where neither Qt nor IDA may be
+                # touched. execute_sync hands it to the UI thread and blocks
+                # until it has run, which also keeps a fast worker from
+                # queueing up more repaints than the UI can draw.
+                progress = DiffProgress.from_record(record)
+
+                def show():
+                    form.update_progress(progress)
+                    return 1
+
+                ida_kernwin.execute_sync(show, ida_kernwin.MFF_FAST)
 
             def work():
                 result = run_headless(
-                    ["pipeline", primary, secondary, output], timeout=3600)
+                    ["pipeline", primary, secondary, output], timeout=3600,
+                    on_progress=on_progress, cancel=cancel)
 
                 def finish():
+                    # The launcher keeps going when a progress handler throws,
+                    # rather than losing a finished diff to a drawing bug, and
+                    # leaves the reason here. Silence would make it look like
+                    # the worker simply stopped reporting.
+                    broken = result.details.get("progress_error")
+                    if broken:
+                        self._report(f"progress reporting stopped: {broken}")
+                    if cancel.is_set():
+                        # Asked for, so reported without a warning box.
+                        form.finish("cancelled")
+                        self._report("diff cancelled")
+                        return 1
                     if not result.ok:
+                        form.finish(f"failed: {result.message}")
                         ida_kernwin.warning(f"Diff failed:\n{result.message}")
-                        return
+                        return 1
+                    form.finish(f"{result.matches} matches")
                     self.controller.open_database(output)
                     self._report(f"diff complete: {result.matches} matches")
                     self._show_matches()
+                    return 1
 
                 # Touching IDA from a worker thread is not safe; hand the
                 # result back to the UI thread.

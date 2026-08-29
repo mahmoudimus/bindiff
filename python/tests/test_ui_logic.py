@@ -10,6 +10,7 @@ import pytest
 from ida_plugin.ui_logic import (
     COLUMNS,
     ChangeType,
+    DiffProgress,
     MatchFilter,
     MatchRow,
     build_statistics,
@@ -17,6 +18,7 @@ from ida_plugin.ui_logic import (
     filter_rows,
     format_address,
     format_change_flags,
+    format_elapsed,
     rows_from_database,
     similarity_color,
     sort_rows,
@@ -171,6 +173,65 @@ class TestFormatting:
         assert not make_row(similarity=1.0,
                             change_flags=int(ChangeType.CALLS)).identical
         assert not make_row(similarity=0.99, change_flags=0).identical
+
+
+class TestDiffProgress:
+    def test_reads_a_worker_record(self):
+        progress = DiffProgress.from_record({
+            "stage": "diff", "message": "function: MD index matching",
+            "fraction": 0.75, "step_index": 3, "step_count": 8,
+            "matches": 412})
+
+        assert progress.percentage == 75
+        assert progress.describe() == (
+            "function: MD index matching - step 4/8 - 412 matched")
+
+    def test_an_export_has_no_percentage(self):
+        """idalib's auto-analysis does not call back, so there is no fraction
+        to report. An indeterminate bar is the honest rendering; a made-up
+        number is not."""
+        progress = DiffProgress.from_record(
+            {"stage": "export", "message": "exporting primary: a.exe",
+             "fraction": None})
+
+        assert progress.percentage is None
+        assert progress.describe() == "exporting primary: a.exe"
+
+    def test_percentage_is_clamped(self):
+        assert DiffProgress(fraction=-0.5).percentage == 0
+        assert DiffProgress(fraction=1.4).percentage == 100
+
+    def test_an_empty_record_still_describes_itself(self):
+        """A status label with nothing in it reads as a hang."""
+        assert DiffProgress.from_record({}).describe() == "working"
+
+    def test_step_number_is_shown_one_based(self):
+        """The engine counts steps from zero; nobody reads a progress line
+        that starts at 'step 0'."""
+        assert "step 1/9" in DiffProgress(message="x", step_index=0,
+                                          step_count=9).describe()
+
+    def test_zero_matches_is_shown_rather_than_hidden(self):
+        """0 and 'not reported' are different facts, and early steps really do
+        match nothing."""
+        assert "0 matched" in DiffProgress(message="x", matches=0).describe()
+
+
+class TestFormatElapsed:
+    @pytest.mark.parametrize("seconds,expected", [
+        (0, "0s"),
+        (47, "47s"),
+        (59.9, "59s"),
+        (60, "1m 00s"),
+        (185, "3m 05s"),
+        (3600, "1h 00m"),
+        (7325, "2h 02m"),
+    ])
+    def test_reads_as_a_duration(self, seconds, expected):
+        assert format_elapsed(seconds) == expected
+
+    def test_a_negative_clock_does_not_produce_nonsense(self):
+        assert format_elapsed(-5) == "0s"
 
 
 class _FakeFile:
