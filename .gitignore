@@ -13,3 +13,4 @@ compile_commands.json
 # Build artifacts
 build/
 java/ui/build/
+.tmp/
