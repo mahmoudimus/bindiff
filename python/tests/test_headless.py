@@ -206,6 +206,13 @@ def test_export_opens_and_closes_a_database(tmp_path):
 
 @pytest.mark.slow
 def test_export_reports_an_unopenable_input(tmp_path):
+    """A missing input must be reported, not handed to the disassembler.
+
+    On IDA 9.1 idapro.open_database() with a nonexistent path terminates the
+    process rather than returning non-zero, so this used to kill the whole
+    pytest run on the 9.1 leg -- with no summary and no traceback, which looked
+    from the outside like a hang rather than a failure.
+    """
     import importlib.util
 
     if importlib.util.find_spec("idapro") is None:
@@ -217,4 +224,6 @@ def test_export_reports_an_unopenable_input(tmp_path):
                     str(tmp_path / "out.BinExport"),
                     exporter=lambda path: None)
     assert not result.ok
+    assert result.stage == "export"
     assert "could not open" in result.message
+    assert "no such file" in result.message

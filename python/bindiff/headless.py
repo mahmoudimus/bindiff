@@ -107,6 +107,15 @@ def export(input_path: str, output_path: str,
     if exporter is None:
         exporter = _invoke_binexport
 
+    # Checked here rather than left to idalib: on IDA 9.1 open_database() with a
+    # path that does not exist terminates the process outright instead of
+    # returning non-zero, which takes the whole worker down and leaves the
+    # caller with no result to report. 9.4 returns an error. Either way a
+    # missing input is the caller's mistake and needs no disassembler to detect.
+    if not Path(input_path).exists():
+        return StageResult(ok=False, stage="export",
+                           message=f"could not open {input_path}: no such file")
+
     if idapro.open_database(str(input_path), True) != 0:
         return StageResult(ok=False, stage="export",
                            message=f"could not open {input_path}")
