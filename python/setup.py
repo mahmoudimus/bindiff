@@ -339,10 +339,17 @@ extensions = [
             "bindiff/core.pyx",
             "bindiff/wrappers.cc",
         ],
+        # The static archives are listed as dependencies, not just linked.
+        # Without this, changing a C++ source rebuilds libbindiff_shared.a but
+        # setuptools sees no newer *source* and skips the relink, so the
+        # extension keeps the old object code -- and a fix to the engine
+        # silently does not reach the Python tests. That cost real time to
+        # find: an engine bug looked unfixed through three rebuilds because the
+        # .so was never relinked.
         depends=[
             "bindiff/core.pxd",
             "bindiff/wrappers.h",
-        ],
+        ] + link_objects,
         include_dirs=include_dirs,
         library_dirs=library_dirs,
         libraries=libraries,

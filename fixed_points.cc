@@ -24,34 +24,35 @@
 #include "third_party/zynamics/bindiff/differ.h"
 #include "third_party/zynamics/bindiff/flow_graph.h"
 #include "third_party/zynamics/bindiff/instruction.h"
+#include "third_party/absl/container/node_hash_set.h"
+#include "third_party/absl/synchronization/mutex.h"
 #include "third_party/zynamics/bindiff/match/call_graph.h"
 #include "third_party/zynamics/bindiff/match/context.h"
 
 namespace security::bindiff {
 
 const std::string* FindString(const std::string& name) {
-  static absl::NoDestructor<std::string> string_pool_empty;
-  static absl::NoDestructor<std::vector<std::string>> string_pool([]() {
-    std::vector<std::string> pool;
-    Confidences confidences;
-    Histogram histogram;
-    // Will CHECK-fail if no matching algorithms are registered.
-    GetConfidence(histogram, &confidences);
-    pool.reserve(confidences.size());
-    for (const auto& [key, _] : confidences) {
-      pool.push_back(key);
-    }
+  // Interns on demand rather than from a pool frozen at first use.
+  //
+  // The pool used to be built once, from the matching steps registered the
+  // first time any fixed point was created, and a name that was not in it
+  // silently returned the empty string. That was survivable while the step
+  // list was a compile-time constant. It is not survivable now: the list comes
+  // from the configuration, so enabling a step between two diffs in one
+  // process -- which is every diff after the first in the IDA plugin -- gave
+  // every match from that step an empty name. The writer then looked the empty
+  // name up in its step table, got the default 0, and wrote matches pointing
+  // at an algorithm id that does not exist. Nothing failed; the results file
+  // was just wrong about which algorithm found what.
+  //
+  // node_hash_set because the returned pointer has to stay valid as the set
+  // grows, and callers keep it for the life of the fixed point. The vocabulary
+  // is the set of matching step names, so this stays tiny.
+  static absl::NoDestructor<absl::Mutex> mutex;
+  static absl::NoDestructor<absl::node_hash_set<std::string>> string_pool;
 
-    pool.push_back(MatchingStep::kFunctionManualName);
-    std::sort(pool.begin(), pool.end());
-    return pool;
-  }());
-
-  auto it = std::lower_bound(string_pool->begin(), string_pool->end(), name);
-  if (it != string_pool->end() && *it == name) {
-    return &(*it);
-  }
-  return &*string_pool_empty;
+  absl::MutexLock lock(mutex.get());
+  return &*string_pool->insert(name).first;
 }
 
 BasicBlockFixedPoint::BasicBlockFixedPoint(

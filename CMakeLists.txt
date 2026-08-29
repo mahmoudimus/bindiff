@@ -285,6 +285,7 @@ add_library(bindiff_shared STATIC
 target_link_libraries(bindiff_shared
   absl::btree
   absl::flat_hash_map
+  absl::node_hash_set
   absl::hash
   absl::memory
   absl::no_destructor

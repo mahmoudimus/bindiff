@@ -7,6 +7,8 @@ process-wide static on first use -- so even a real setter would have been
 ignored from the second diff onwards.
 """
 
+import sqlite3
+
 import pytest
 
 pytestmark = pytest.mark.requires_extension
@@ -181,3 +183,55 @@ class TestConfidenceIsLive:
             "lowering every algorithm's confidence changed nothing -- the "
             "engine is not reading the configured value")
         assert max(lowered) < max(baseline)
+
+
+@pytest.mark.e2e
+def test_a_step_enabled_after_the_first_diff_is_attributed(
+        bindiff_module, insider_pair, tmp_path):
+    """Every match must name an algorithm that exists in the result file.
+
+    The engine interns matching step names in a process-wide pool. That pool
+    used to be built once, from whatever steps were registered the first time a
+    fixed point was created, and a name that was not in it silently became the
+    empty string -- so the writer looked up "" in its step table, got the
+    default 0, and wrote matches referencing an algorithm id that does not
+    exist. Nothing failed and no count changed; the results file was simply
+    wrong about which algorithm found what.
+
+    It takes two diffs in one process to show up, with the second enabling a
+    step the first did not have -- which is every diff after the first in a
+    long-lived host like IDA, where the point of the algorithm dialog is to
+    change the selection between runs.
+    """
+    primary, secondary = insider_pair
+    full = bindiff_module.get_default_config()["function_matching"]
+    reduced = [step for step in full
+               if step["name"] in ("function: hash matching",
+                                   "function: name hash matching")]
+    assert len(reduced) < len(full), "expected the reduced list to be smaller"
+
+    # First diff: a deliberately small selection.
+    bindiff_module.set_config({"function_matching": reduced})
+    first = tmp_path / "first.BinDiff"
+    assert bindiff_module.diff(str(primary), str(secondary), str(first)) == 0
+
+    # Second diff: everything, including steps the first run never registered.
+    bindiff_module.set_config({"function_matching": full})
+    second = tmp_path / "second.BinDiff"
+    assert bindiff_module.diff(str(primary), str(secondary), str(second)) == 0
+
+    connection = sqlite3.connect(str(second))
+    try:
+        known = {row[0] for row in
+                 connection.execute("SELECT id FROM functionalgorithm")}
+        used = dict(connection.execute(
+            "SELECT algorithm, COUNT(*) FROM function GROUP BY algorithm"))
+    finally:
+        connection.close()
+
+    assert used, "the second diff matched nothing"
+    dangling = {identifier: count for identifier, count in used.items()
+                if identifier not in known}
+    assert not dangling, (
+        f"{sum(dangling.values())} matches reference algorithm ids that are "
+        f"not in functionalgorithm: {sorted(dangling)}")
