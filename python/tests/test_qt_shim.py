@@ -158,3 +158,27 @@ def test_plugin_loads_the_way_ida_loads_it(tmp_path):
     # and a broken relative import would still look fine.
     assert controller.match_rows() == []
     assert controller.statistic_rows() == []
+
+
+def test_signal_and_slot_are_spelled_both_ways():
+    """Either binding's spelling has to work under either binding.
+
+    The alias used to run one way only, so code written with the PySide6 names
+    failed on PyQt5 with a bare AttributeError -- which is the incompatibility
+    the shim exists to hide.
+    """
+    from bindiff.ida_env import is_interactive
+
+    if not is_interactive():
+        # The shim keys on the *GUI*, not on whether a binding is importable:
+        # outside the IDA GUI it serves a stub with no signals at all. That is
+        # true even on IDA 9.1, whose headless interpreter has PyQt5 loaded --
+        # so this is checked in the GUI harness, and the async client reads the
+        # loaded binding directly rather than going through the shim.
+        pytest.skip("the shim only installs a real binding inside the GUI")
+    from bindiff.qt_shim import QtCore
+
+    for name in ("Signal", "Slot", "pyqtSignal", "pyqtSlot"):
+        assert hasattr(QtCore, name), f"QtCore.{name} is missing"
+    assert QtCore.Signal is QtCore.pyqtSignal
+    assert QtCore.Slot is QtCore.pyqtSlot

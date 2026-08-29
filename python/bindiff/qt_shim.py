@@ -767,12 +767,20 @@ def _setup_compatibility() -> None:
     if not hasattr(QDialog, "exec_"):
         QDialog.exec_ = QDialog.exec  # type: ignore[method-assign]
 
-    # PySide6 uses Signal/Slot, but PyQt5 uses pyqtSignal/pyqtSlot
-    # Create aliases for backward compatibility
+    # PySide6 uses Signal/Slot, but PyQt5 uses pyqtSignal/pyqtSlot.
+    # Aliased in both directions, so code written against either spelling works
+    # under either binding. Aliasing only one way -- which this did originally
+    # -- means code using the PySide6 names fails on PyQt5 with a bare
+    # AttributeError, which is exactly the incompatibility the shim exists to
+    # hide.
     if not hasattr(QtCore, "pyqtSignal"):
         QtCore.pyqtSignal = QtCore.Signal  # type: ignore[attr-defined]
     if not hasattr(QtCore, "pyqtSlot"):
         QtCore.pyqtSlot = QtCore.Slot  # type: ignore[attr-defined]
+    if not hasattr(QtCore, "Signal"):
+        QtCore.Signal = QtCore.pyqtSignal  # type: ignore[attr-defined]
+    if not hasattr(QtCore, "Slot"):
+        QtCore.Slot = QtCore.pyqtSlot  # type: ignore[attr-defined]
 
     # Ensure keyboard modifier shortcuts work (Qt.CTRL, Qt.ALT, etc.)
     # PySide6 may use different enum access patterns

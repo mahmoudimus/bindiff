@@ -91,6 +91,23 @@ class FileInfo:
     instructions: int
 
 
+@dataclass(frozen=True)
+class DiffMetadata:
+    """The `metadata` row: what the engine concluded about the pair as a whole.
+
+    Overall similarity and confidence live only here -- the `file` table has
+    per-binary counts and the `function` table has per-match scores, so a
+    caller wanting "how alike are these two binaries" has nowhere else to look.
+    """
+
+    version: str
+    description: str
+    created: str
+    modified: str
+    similarity: float
+    confidence: float
+
+
 class BinDiffDatabase:
     """A .BinDiff file, opened for reading or for editing.
 
@@ -235,6 +252,27 @@ class BinDiffDatabase:
                          functions=r["functions"], calls=r["calls"],
                          basic_blocks=r["basicblocks"], edges=r["edges"],
                          instructions=r["instructions"]) for r in rows]
+
+    def metadata(self) -> Optional[DiffMetadata]:
+        """The overall result, or None for a file that carries no metadata row.
+
+        None rather than a zeroed record: a result written by an older tool may
+        genuinely have nothing here, and reporting 0% similarity would be a
+        claim rather than an absence.
+        """
+        row = self._connection.execute(
+            "SELECT version, description, created, modified, similarity, "
+            "confidence FROM metadata LIMIT 1").fetchone()
+        if row is None:
+            return None
+        return DiffMetadata(
+            version=row["version"] or "",
+            description=row["description"] or "",
+            created=str(row["created"] or ""),
+            modified=str(row["modified"] or ""),
+            similarity=row["similarity"] or 0.0,
+            confidence=row["confidence"] or 0.0,
+        )
 
     def instruction_matches(self, match_id: Optional[int] = None
                             ) -> List[tuple]:

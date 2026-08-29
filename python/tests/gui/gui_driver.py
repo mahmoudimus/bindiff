@@ -24,7 +24,10 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
+import time
 import traceback
+from pathlib import Path
 
 import ida_auto
 import ida_funcs
@@ -316,6 +319,74 @@ def run_checks() -> None:
               ida_kernwin.find_widget("BinDiff - Unmatched (primary)") is not None)
     except Exception:
         check("unmatched dock exists", False, traceback.format_exc(limit=3))
+
+    # -- the asynchronous service client -------------------------------------
+    #
+    # This is the only place it can run. The client needs a Qt binding already
+    # loaded, and importing one inside a headless IDA takes the interpreter
+    # down -- so the headless suite skips these and they are checked here,
+    # where Qt is up because IDA's UI is.
+
+    try:
+        from bindiff.client import qt_already_loaded
+
+        check("a Qt binding is loaded in the GUI", qt_already_loaded())
+    except Exception:
+        check("a Qt binding is loaded in the GUI", False,
+              traceback.format_exc(limit=3))
+
+    try:
+        from bindiff.qt_shim import QtCore
+
+        check("shim exposes both signal spellings",
+              all(hasattr(QtCore, n)
+                  for n in ("Signal", "Slot", "pyqtSignal", "pyqtSlot")))
+    except Exception:
+        check("shim exposes both signal spellings", False,
+              traceback.format_exc(limit=3))
+
+    try:
+        import threading
+
+        from bindiff.client import make_async_client
+        from bindiff.server import BinDiffService, make_server
+
+        service = BinDiffService(Path(tempfile.mkdtemp()) / "cache")
+        server = make_server(service, "127.0.0.1", 0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+
+        primary = Path(tempfile.mkdtemp()) / "a.BinExport"
+        secondary = primary.with_name("b.BinExport")
+        # Deliberately not real exports: this checks that the failure path
+        # comes back as a signal rather than an exception on the UI thread,
+        # which is the property that matters for not taking IDA down.
+        primary.write_bytes(b"not an export")
+        secondary.write_bytes(b"also not an export")
+
+        AsyncClient = make_async_client("127.0.0.1", port)
+        async_client = AsyncClient()
+        outcome = {}
+        async_client.finished.connect(lambda r: outcome.setdefault("reply", r))
+        async_client.failed.connect(lambda m: outcome.setdefault("error", m))
+        async_client.submit_diff(str(primary), str(secondary))
+
+        # Spin the UI event loop briefly rather than blocking it: a blocking
+        # wait here would deadlock against the very thing being tested.
+        deadline = time.time() + 30
+        while not outcome and time.time() < deadline:
+            QtCore.QCoreApplication.processEvents()
+            time.sleep(0.05)
+
+        check("async client reports through a signal", bool(outcome),
+              "neither finished nor failed fired within 30s")
+        check("a bad diff fails without raising on the UI thread",
+              "error" in outcome, f"outcome was {outcome!r}")
+        async_client.shutdown()
+        server.shutdown()
+    except Exception:
+        check("async client reports through a signal", False,
+              traceback.format_exc(limit=5))
 
     plugin.term()
 

@@ -49,6 +49,7 @@ from .results import (
 
 from .database import (
     BinDiffDatabase,
+    DiffMetadata,
     FunctionMatch,
     FileInfo,
     MANUAL_ALGORITHM,
@@ -63,6 +64,7 @@ __all__ = [
     "BinDiffDatabase",
     "FunctionMatch",
     "FileInfo",
+    "DiffMetadata",
     "MANUAL_ALGORITHM",
 
 
