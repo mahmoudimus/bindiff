@@ -65,7 +65,7 @@ Needs `protobuf` but not the Cython extension, so it runs on the host.
 
 `-R '^[A-Z]'` is not cosmetic: BinDiff's own suites start with an uppercase letter, and the other ~250 registered tests are Abseil's.
 
-30 tests, including four end-to-end `GtTest/GroundtruthTest.Run/{insider,libssl_0_9_8g__x86_,minievil,mydoom}` cases that diff the `.BinExport` pairs in `fixtures/` and compare against the checked-in `.truth` files. `differ_test` resolves those paths against `$TEST_SRCDIR`, which its CMake target points at `build/out/src_include/third_party/zynamics` — the configure-time `bindiff` symlink there keeps the paths independent of the checkout directory's name.
+48 tests, including four end-to-end `GtTest/GroundtruthTest.Run/{insider,libssl_0_9_8g__x86_,minievil,mydoom}` cases that diff the `.BinExport` pairs in `fixtures/` and compare against the checked-in `.truth` files. `differ_test` resolves those paths against `$TEST_SRCDIR`, which its CMake target points at `build/out/src_include/third_party/zynamics` — the configure-time `bindiff` symlink there keeps the paths independent of the checkout directory's name.
 
 `BinDiffEnvironment` (`test_util.h`) installs a test config that **disables name-based matching** — both fixture binaries carry full symbols, so with the shipped defaults everything would match by name and the tests would prove nothing. Build graphs with `test_util.h`'s `FunctionBuilder` / `BasicBlockBuilder` / `InstructionBuilder`.
 
@@ -77,8 +77,23 @@ The Cython extension is loaded by IDA's own interpreter, so it must be **compile
 ./tools/scripts/run_tests_docker.sh all              # ctest + pytest on IDA 9.4
 ./tools/scripts/run_tests_docker.sh python -- -k stats
 ./tools/scripts/run_tests_docker.sh shell --service idapro-tests-9.1
+./tools/scripts/run_tests_docker.sh python --with-binexport   # + the export stage
 ./tools/scripts/run_tests_docker.sh --help
 ```
+
+`--with-binexport` builds BinExport's IDA plugin (a second CMake tree with
+`BINEXPORT_ENABLE_IDAPRO=ON` and the IDA SDK fetched — minutes on a cold run,
+then cached under `build/`) and installs it into the image's `/app/ida/plugins`.
+Do **not** install it via `IDAUSR`: `/root/.idapro/plugins` is the read-only bind
+mount carrying the bindiff package, and overriding `IDAUSR` breaks idalib's
+discovery of the installation.
+
+It unlocks the tests that need a `.BinExport` generated at test time.
+`python/tests/fixture_builder.py` compiles one generated C source twice (`-O0`
+and `-O2`), exports both, and derives ground truth from the symbol names — which
+is what makes the IDA-only sidecar features measurable at all. The checked-in
+`.idb` fixtures cannot serve: they are 32-bit databases IDA 9.x refuses without
+an `upg32` the image does not ship.
 
 9.4 is the primary leg (BinExport pins the IDA SDK to 9.4); 9.1 is a compatibility leg. Images come from `docker-compose.yml`, overridable via `BINDIFF_TEST_IMAGE_94` / `BINDIFF_TEST_IMAGE_91`. Container deps live in `.github/docker-apt-deps.txt` (cmake, ninja — the images ship gcc but no generator) and `.github/docker-deps.txt` (Cython, pytest); CI hashes both for its image cache key.
 

@@ -37,6 +37,13 @@
 #   -j, --jobs N         Parallel build jobs (default: nproc in the container).
 #       --rebuild        Discard the existing build tree and configure from scratch.
 #       --no-build       Skip the build step; assume a previous run left one behind.
+#       --with-binexport Also build BinExport's IDA plugin and install it into
+#                        the container's IDA, which lets the export stage and
+#                        anything needing a freshly generated .BinExport run.
+#                        Off by default: it is a second CMake tree with the IDA
+#                        SDK fetched and roughly 560 more objects to compile, so
+#                        it adds minutes to a cold run. The tree persists under
+#                        /work/build, so only the first run pays for it.
 #   --                   Remaining args go to ctest / pytest, or are the exec command.
 #
 # Environment (host):
@@ -56,6 +63,7 @@ SERVICE="idapro-tests"
 JOBS=""
 REBUILD=""
 NO_BUILD=""
+WITH_BINEXPORT="${BINDIFF_WITH_BINEXPORT:-}"
 EXTRA=()
 
 # Container-side paths. The build tree lives under /work so it survives between
@@ -84,6 +92,7 @@ while [ $# -gt 0 ]; do
     -j|--jobs)    JOBS="$2"; shift 2 ;;
     --rebuild)    REBUILD=1; shift ;;
     --no-build)   NO_BUILD=1; shift ;;
+    --with-binexport) WITH_BINEXPORT=1; shift ;;
     --)           shift; EXTRA=("$@"); break ;;
     *)            echo "Unknown option: $1" >&2; exit 1 ;;
   esac
@@ -167,6 +176,35 @@ echo "[build] building the Cython extension against IDA's interpreter"
 cd /work/python && $IDA_PYTHON setup.py build_ext --inplace
 EOF
 
+# BinExport's IDA plugin, in its own tree because it needs
+# BINEXPORT_ENABLE_IDAPRO=ON and the IDA SDK, neither of which the main build
+# wants. Installed into the image's own plugin directory rather than IDAUSR:
+# /root/.idapro/plugins is the read-only bind mount carrying the bindiff
+# package, and overriding IDAUSR breaks idalib's discovery of the installation.
+read -r -d '' BINEXPORT_CMD <<EOF || true
+set -e
+BE_BUILD_DIR="$CONTAINER_BUILD_DIR-binexport"
+if [ ! -f "\$BE_BUILD_DIR/ida/binexport12_ida.so" ]; then
+  echo "[binexport] configuring (fetches the IDA SDK on first use)"
+  cmake -S /work -B "\$BE_BUILD_DIR" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTING=OFF \
+    -DBINDIFF_BINEXPORT_DIR=/binexport \
+    -DBINEXPORT_ENABLE_IDAPRO=ON \
+    -DBINEXPORT_ENABLE_BINARYNINJA=OFF >/dev/null
+  echo "[binexport] compiling the IDA plugin"
+  cmake --build "\$BE_BUILD_DIR" -j "\${JOBS:-\$(nproc)}" --target binexport12_ida
+else
+  echo "[binexport] plugin already built"
+fi
+cp -f "\$BE_BUILD_DIR/ida/binexport12_ida.so" /app/ida/plugins/
+echo "[binexport] installed into /app/ida/plugins"
+EOF
+
+if [ -z "$WITH_BINEXPORT" ]; then
+  BINEXPORT_CMD="echo '[binexport] not requested (pass --with-binexport)'"
+fi
+
 if [ -n "$NO_BUILD" ]; then
   BUILD_CMD="echo '[build] skipped (--no-build)'"
 fi
@@ -187,27 +225,27 @@ run_in_container() {
 
 case "$CMD" in
   build)
-    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD" -T
+    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD"$'\n'"$BINEXPORT_CMD" -T
     ;;
   ctest)
     # -R '^[A-Z]': BinDiff's own gtest suites start with an uppercase letter;
     # the ~250 other registered tests are Abseil's and are not ours to run.
-    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD"$'\n'"cd $CONTAINER_BUILD_DIR && ctest --output-on-failure -R '^[A-Z]' $(quote_args "${EXTRA[@]}")" -T
+    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD"$'\n'"$BINEXPORT_CMD"$'\n'"cd $CONTAINER_BUILD_DIR && ctest --output-on-failure -R '^[A-Z]' $(quote_args "${EXTRA[@]}")" -T
     ;;
   python)
-    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD"$'\n'"cd /work && $IDA_PYTHON -m pytest python/tests -v -p no:cacheprovider $(quote_args "${EXTRA[@]}")" -T
+    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD"$'\n'"$BINEXPORT_CMD"$'\n'"cd /work && $IDA_PYTHON -m pytest python/tests -v -p no:cacheprovider $(quote_args "${EXTRA[@]}")" -T
     ;;
   all)
-    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD"$'\n'"cd $CONTAINER_BUILD_DIR && ctest --output-on-failure -R '^[A-Z]'"$'\n'"cd /work && $IDA_PYTHON -m pytest python/tests -v -p no:cacheprovider" -T
+    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD"$'\n'"$BINEXPORT_CMD"$'\n'"cd $CONTAINER_BUILD_DIR && ctest --output-on-failure -R '^[A-Z]'"$'\n'"cd /work && $IDA_PYTHON -m pytest python/tests -v -p no:cacheprovider" -T
     ;;
   shell)
-    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD"$'\n'"exec bash"
+    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD"$'\n'"$BINEXPORT_CMD"$'\n'"exec bash"
     ;;
   exec)
     if [ ${#EXTRA[@]} -eq 0 ]; then
       echo "ERROR: exec requires a command after -- (e.g. $0 exec -- python3 -c 'print(1)')" >&2
       exit 1
     fi
-    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD"$'\n'"$(quote_args "${EXTRA[@]}")" -T
+    run_in_container "$SETUP_CMD"$'\n'"$BUILD_CMD"$'\n'"$BINEXPORT_CMD"$'\n'"$(quote_args "${EXTRA[@]}")" -T
     ;;
 esac

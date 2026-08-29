@@ -17,3 +17,11 @@ java/ui/build/
 
 # Metadata sidecars are generated from their .BinExport, not checked in.
 *.BinExport.meta
+
+# IDA unpacks a .idb into these while a database is open; they are not inputs.
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+*.upgrade.log

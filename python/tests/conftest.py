@@ -37,6 +37,10 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "e2e: diffs real fixtures end to end")
     config.addinivalue_line(
         "markers", "slow: takes seconds -- opens a database with idalib")
+    config.addinivalue_line(
+        "markers",
+        "requires_binexport: needs BinExport's IDA plugin installed; run the "
+        "harness with --with-binexport")
 
 
 @pytest.fixture(scope="session")
@@ -103,3 +107,36 @@ def ground_truth():
                 pairs[int(fields[0], 16)] = int(fields[1], 16)
         return pairs
     return parse
+
+
+@pytest.fixture(scope="session")
+def generated_pair(tmp_path_factory):
+    """Two builds of one generated program, exported, with ground truth.
+
+    Session-scoped because building it means two compiles and two full IDA
+    analyses; the pair is immutable once made, so sharing it is safe.
+
+    Skips unless gcc, idalib and BinExport's IDA plugin are all present. That
+    last one is opt-in:
+
+        ./tools/scripts/run_tests_docker.sh python --with-binexport
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("idapro") is None:
+        pytest.skip("idalib not available")
+
+    from fixture_builder import FixtureUnavailable, build_pair
+
+    directory = tmp_path_factory.mktemp("generated")
+    try:
+        pair = build_pair(directory)
+    except FixtureUnavailable as exc:
+        pytest.skip(
+            f"could not generate a fixture pair: {exc}. Needs gcc and "
+            f"BinExport's IDA plugin (run the harness with --with-binexport)")
+    if len(pair.truth) < 20:
+        pytest.skip(
+            f"generated pair has only {len(pair.truth)} known pairs, too few "
+            f"to measure against")
+    return pair
