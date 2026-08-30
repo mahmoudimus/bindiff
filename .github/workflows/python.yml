@@ -181,11 +181,14 @@ jobs:
               with:
                   persist-credentials: false
 
+            # Inside the workspace: actions/checkout refuses a path outside it,
+            # so `../binexport` failed every run and this job has never once
+            # executed. cmake.yml already uses build/binexport; matching it.
             - name: Checkout BinExport
               uses: actions/checkout@v5
               with:
                   repository: google/binexport
-                  path: ../binexport
+                  path: build/binexport
                   persist-credentials: false
 
             - name: Login to GHCR (same-account image, GITHUB_TOKEN)
@@ -237,7 +240,7 @@ jobs:
               env:
                   BINDIFF_TEST_IMAGE_94: bindiff-tests:idapro-tests
                   BINDIFF_TEST_IMAGE_91: bindiff-tests:idapro-tests-9.1
-                  BINDIFF_BINEXPORT_DIR: ${{ github.workspace }}/../binexport
+                  BINDIFF_BINEXPORT_DIR: ${{ github.workspace }}/build/binexport
               run: |
                   timeout 2400s ./tools/scripts/run_tests_docker.sh all \
                     --service ${{ matrix.service }}

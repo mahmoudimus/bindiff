@@ -194,11 +194,21 @@ class TestCommandConstruction:
             "pipeline", "a.exe", "b.exe", "o.BinDiff"]
 
     def test_paths_are_stringified(self):
+        """A Path must not reach the command line as a Path.
+
+        Compared against str(path) rather than a literal, because a literal
+        bakes in the separator: str(WindowsPath("/x/a.exe")) is "\\x\\a.exe",
+        and this test failed on Windows for that reason alone while the code
+        under it was correct. The claim is that paths are stringified, not that
+        they look like POSIX.
+        """
         from pathlib import Path
 
-        assert worker_arguments(Path("/x/a.exe"), Path("/x/b.exe"),
-                                Path("/x/o.BinDiff")) == [
-            "pipeline", "/x/a.exe", "/x/b.exe", "/x/o.BinDiff"]
+        paths = [Path("/x/a.exe"), Path("/x/b.exe"), Path("/x/o.BinDiff")]
+        arguments = worker_arguments(*paths)
+
+        assert arguments == ["pipeline"] + [str(p) for p in paths]
+        assert all(isinstance(argument, str) for argument in arguments)
 
     def test_the_panel_title_names_the_file_not_the_path(self):
         assert panel_title("/very/long/path/to/sample.exe") == (
