@@ -242,7 +242,7 @@ def prepare(pair: Pair, work: Path) -> Pair:
 
 # -- sidecars --------------------------------------------------------------
 
-def write_sidecars(pair: Pair, features: List[str]) -> None:
+def write_sidecars(pair: Pair, features: List[str], model=None) -> None:
     """Writes each side's sidecar holding exactly `features`.
 
     Rewritten per configuration rather than written once and filtered by the
@@ -254,6 +254,7 @@ def write_sidecars(pair: Pair, features: List[str]) -> None:
 
     from bindiff.metadata import sidecar_path_for, write_sidecar
     from bindiff.metadata_binexport import build_sidecar
+    from bindiff.asm2vec import FEATURE_ASM2VEC
     from bindiff.metadata_embedding import (FEATURE_MNEMONIC_HISTOGRAM,
                                             build_sidecar as build_embedding)
     from bindiff.metadata_ida import merge
@@ -278,8 +279,19 @@ def write_sidecars(pair: Pair, features: List[str]) -> None:
             # producer has no reason to pay for.
             merge(metadata, build_embedding(str(export)))
 
+        if FEATURE_ASM2VEC in features:
+            if model is None:
+                raise Unavailable(
+                    f"{FEATURE_ASM2VEC} needs a trained model; pass "
+                    f"--asm2vec-model. Training per binary would put the two "
+                    f"sides in unrelated spaces")
+            from bindiff.asm2vec import build_sidecar as build_learned
+
+            merge(metadata, build_learned(str(export), model))
+
         wanted = [f for f in features
-                  if f not in ("imports/v1", FEATURE_MNEMONIC_HISTOGRAM)]
+                  if f not in ("imports/v1", FEATURE_MNEMONIC_HISTOGRAM,
+                               FEATURE_ASM2VEC)]
         if wanted and ida_metadata is not None:
             # Deep-copied because merge() appends by reference and the captured
             # metadata is reused for every configuration in the run.
@@ -398,6 +410,12 @@ def main(argv=None) -> int:
                         help="comma-separated features to measure, each on its "
                              "own and then all together")
     parser.add_argument("--keep-name-matching", action="store_true")
+    parser.add_argument("--asm2vec-model",
+                        help="frozen model for the asm2vec/v1 feature. It has "
+                             "to be one model for both sides: two separately "
+                             "trained ones put the binaries in unrelated "
+                             "spaces and every cosine between them is "
+                             "meaningless while still looking like a number")
     parser.add_argument("--strip", action="store_true",
                         help="diff stripped copies, taking ground truth from "
                              "the originals. This is the case that decides "
@@ -416,6 +434,15 @@ def main(argv=None) -> int:
         return 2
 
     features = [f.strip() for f in args.features.split(",") if f.strip()]
+
+    model = None
+    if args.asm2vec_model:
+        from bindiff.asm2vec import Asm2VecModel
+
+        model = Asm2VecModel.load(args.asm2vec_model)
+        print(f"[model] {args.asm2vec_model}: {len(model.tokens)} tokens x "
+              f"{model.dimension} dimensions, trained on "
+              f"{len(model.trained_on)} binaries", flush=True)
     # Baseline first so every later number is a delta against it, then one
     # configuration per feature, then all of them -- a feature can be worth
     # something alone and nothing beside another that already found the same
@@ -456,7 +483,7 @@ def main(argv=None) -> int:
                   "own_correct": 0, "own_total": 0}
         per_pair = {}
         for pair in pairs:
-            write_sidecars(pair, wanted)
+            write_sidecars(pair, wanted, model)
             config = write_config(work / f"config-{pair.name}.json", bindiff,
                                   wanted, args.keep_name_matching)
             database = run_one(bindiff, config, pair,
