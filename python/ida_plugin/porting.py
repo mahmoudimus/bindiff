@@ -26,6 +26,34 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence
 from bindiff.ida_env import is_interactive
 
 
+# How good a match has to be before its name or comments are copied.
+#
+# Not zero, which is what these were. Porting writes into the primary database
+# and a wrong name is not obviously wrong afterwards -- it looks like analysis
+# somebody did. Measured on nine pairs of real stripped programs, porting every
+# match copies 1440 names of which **516 are wrong**: 36% of the engine's
+# judgeable matches disagree with ground truth, because the weakest matching
+# steps pair up whatever is left over and the engine records that in the
+# similarity and confidence it stores.
+#
+# What a floor on both costs and buys, from that measurement:
+#
+#   floor   ported   wrong   precision   share of correct kept
+#    0.0      1440     516       64.2%                  100.0%
+#    0.3       886     117       86.8%                   83.2%
+#    0.5       676      42       93.8%                   68.6%
+#    0.8       507      15       97.0%                   53.2%
+#
+# 0.5 is chosen because the asymmetry is severe: a skipped port costs a rename
+# the user can still do by hand, and a wrong port costs a wrong name they have
+# no reason to doubt. Raising it further buys little and loses a lot.
+#
+# A caller who wants the old behaviour passes 0.0 explicitly, which is a
+# different thing from getting it by default.
+DEFAULT_PORT_MIN_SIMILARITY = 0.5
+DEFAULT_PORT_MIN_CONFIDENCE = 0.5
+
+
 @dataclass(frozen=True)
 class SymbolPort:
     """A rename to apply to the primary database."""
@@ -62,16 +90,21 @@ def _is_generated_name(name: str) -> bool:
                             "ymmword_"))
 
 
-def plan_symbol_ports(matches: Iterable, *, min_similarity: float = 0.0,
-                      min_confidence: float = 0.0,
-                      overwrite_existing: bool = False) -> List[SymbolPort]:
+def plan_symbol_ports(
+        matches: Iterable, *,
+        min_similarity: float = DEFAULT_PORT_MIN_SIMILARITY,
+        min_confidence: float = DEFAULT_PORT_MIN_CONFIDENCE,
+        overwrite_existing: bool = False) -> List[SymbolPort]:
     """Decides which primary functions should take their match's name.
 
-    Skips a match when the secondary name is auto-generated (nothing to learn),
-    when the names already agree, or -- unless `overwrite_existing` -- when the
-    primary already has a name of its own. Thresholds let a caller refuse to
-    trust weak matches, which is the whole reason the engine records
-    similarity and confidence per match.
+    Skips a match when it is too weak to trust (see the thresholds above),
+    when the secondary name is auto-generated (nothing to learn), when the
+    names already agree, or -- unless `overwrite_existing` -- when the primary
+    already has a name of its own.
+
+    The thresholds are why the engine records similarity and confidence per
+    match, and they default to refusing weak matches rather than accepting
+    them: this writes into the user's database.
     """
     ports: List[SymbolPort] = []
     for match in matches:
@@ -90,10 +123,12 @@ def plan_symbol_ports(matches: Iterable, *, min_similarity: float = 0.0,
     return ports
 
 
-def plan_comment_ports(database, comments_by_address: Dict[int, str], *,
-                       match_ids: Optional[Sequence[int]] = None,
-                       min_similarity: float = 0.0,
-                       min_confidence: float = 0.0) -> List[CommentPort]:
+def plan_comment_ports(
+        database, comments_by_address: Dict[int, str], *,
+        match_ids: Optional[Sequence[int]] = None,
+        min_similarity: float = DEFAULT_PORT_MIN_SIMILARITY,
+        min_confidence: float = DEFAULT_PORT_MIN_CONFIDENCE
+) -> List[CommentPort]:
     """Maps secondary comments onto primary addresses.
 
     `comments_by_address` is what bindiff.load_comments() returns for the

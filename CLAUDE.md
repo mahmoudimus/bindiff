@@ -140,6 +140,43 @@ The threshold is **not** comparable to the Jaccard one and was swept separately:
 
 It is not enabled by default: 5 pairs improved and 4 got worse. The split is structural, not noise — it is strong on cross-*version* pairs (151/154, 65/70, 55/59) and weak across optimisation levels, because `-O2` rewrites the instruction mix and a version bump barely touches it. Worth revisiting for a workload that is mostly version-to-version.
 
+### Where the wrong matches come from
+
+36% of the engine's judgeable matches disagree with ground truth (523 of 1447
+on the nine-pair corpus). Diagnosed rather than assumed, and the answer is not
+what the residual analysis suggested:
+
+**The engine already knows.** Wrong matches have median similarity **0.124**
+against 0.875 for correct ones, and median confidence 0.269 against 0.933. The
+information needed to distrust them is already recorded per match.
+
+**They come from five steps.** `function: call sequence matching(sequence)`
+alone produces 342 of the 523, at **88.4% wrong**. With `(topology)`,
+`(exact)`, `address sequence` and `loop count matching` it is 433 of 523 — 83%.
+Three of those already carry a configured confidence of 0, 0 and 0.1: the
+config says they are worthless and they run anyway, pairing up leftovers by
+position. The strong steps are clean — `hash matching` and `prime signature`
+0% wrong, `imports/v1` 1.6%.
+
+**They are not permutation errors.** Only 2.7% are clean swaps a global
+assignment would untangle; 54.5% sit in longer cycles and 34.8% took the
+counterpart of a function that has no match at all. This is the same conclusion
+the cross-tabulation reached from the other side.
+
+Removing those five steps, measured by running the engine rather than filtering
+its output: **924 correct / 472 wrong → 795 / 76**. 128 correct traded for 396
+fewer wrong, 3.1 to 1, precision 66% → 91%. Whether that is the right default
+depends on the workload, so the steps are left enabled and
+`measure_real_corpus.py --drop-steps` makes the trade reproducible.
+
+Where it is *not* a judgement call is porting. `plan_symbol_ports` and
+`plan_comment_ports` defaulted `min_similarity` and `min_confidence` to 0.0,
+so every match copied its name — 1440 names of which 516 were wrong, written
+silently into the primary database, where a wrong name looks like analysis
+somebody did. They now default to 0.5 (93.8% precision, keeping 69% of correct
+ports); `DEFAULT_PORT_MIN_SIMILARITY` carries the measurement. A caller can
+still pass 0.0, which is a different thing from getting it by default.
+
 ### The learned embedding, and the baseline it did not beat
 
 `python/bindiff/asm2vec.py` is asm2vec's shape — PV-DM over instruction tokens

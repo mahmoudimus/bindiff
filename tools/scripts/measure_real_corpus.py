@@ -307,7 +307,7 @@ def write_sidecars(pair: Pair, features: List[str], model=None) -> None:
 # -- running ---------------------------------------------------------------
 
 def write_config(destination: Path, bindiff: Path, features: List[str],
-                 keep_name_matching: bool) -> Path:
+                 keep_name_matching: bool, drop_steps=()) -> Path:
     """The binary's own effective configuration, with the steps under test.
 
     Read from --print_config rather than bindiff.json so the measurement
@@ -326,6 +326,11 @@ def write_config(destination: Path, bindiff: Path, features: List[str],
         # name and the measurement says nothing about the algorithms.
         steps = [s for s in steps if "name hash" not in s["name"]]
     steps = [s for s in steps if not s["name"].startswith(STEP_PREFIX)]
+    if drop_steps:
+        # Removed rather than set to zero confidence: a confidence of zero
+        # still runs the step and still commits its matches, which is exactly
+        # how the weakest steps came to produce most of the wrong ones.
+        steps = [s for s in steps if s["name"] not in drop_steps]
 
     at = next((i for i, s in enumerate(steps) if s["name"] == AFTER_STEP),
               0) + 1
@@ -410,6 +415,9 @@ def main(argv=None) -> int:
                         help="comma-separated features to measure, each on its "
                              "own and then all together")
     parser.add_argument("--keep-name-matching", action="store_true")
+    parser.add_argument("--drop-steps", default="",
+                        help="comma-separated step names to remove from the "
+                             "configuration entirely")
     parser.add_argument("--asm2vec-model",
                         help="frozen model for the asm2vec/v1 feature. It has "
                              "to be one model for both sides: two separately "
@@ -434,6 +442,10 @@ def main(argv=None) -> int:
         return 2
 
     features = [f.strip() for f in args.features.split(",") if f.strip()]
+    drop_steps = {s.strip() for s in args.drop_steps.split(",") if s.strip()}
+    if drop_steps:
+        print(f"[dropped] {len(drop_steps)} steps: "
+              f"{', '.join(sorted(drop_steps))}")
 
     model = None
     if args.asm2vec_model:
@@ -485,7 +497,8 @@ def main(argv=None) -> int:
         for pair in pairs:
             write_sidecars(pair, wanted, model)
             config = write_config(work / f"config-{pair.name}.json", bindiff,
-                                  wanted, args.keep_name_matching)
+                                  wanted, args.keep_name_matching,
+                                  drop_steps=drop_steps)
             database = run_one(bindiff, config, pair,
                                work / pair.name / label)
             matches = read_matches(database)

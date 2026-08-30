@@ -58,7 +58,36 @@ class TestSymbolPlanning:
         weak = _Match(similarity=0.3, confidence=0.3)
         assert plan_symbol_ports([weak], min_similarity=0.5) == []
         assert plan_symbol_ports([weak], min_confidence=0.5) == []
-        assert len(plan_symbol_ports([weak])) == 1
+        # And a caller can still ask for everything, deliberately.
+        assert len(plan_symbol_ports([weak], min_similarity=0.0,
+                                     min_confidence=0.0)) == 1
+
+    def test_a_weak_match_is_refused_by_default(self):
+        """This used to default to porting everything.
+
+        Measured on nine pairs of real stripped programs, that copies 1440
+        names of which 516 are wrong -- the weakest matching steps pair up
+        whatever is left over, and the engine records exactly that in the
+        similarity and confidence it stores. A wrong name written into the
+        database does not look wrong afterwards; it looks like analysis
+        somebody did.
+        """
+        from ida_plugin.porting import (DEFAULT_PORT_MIN_CONFIDENCE,
+                                        DEFAULT_PORT_MIN_SIMILARITY)
+
+        assert DEFAULT_PORT_MIN_SIMILARITY > 0.0
+        assert DEFAULT_PORT_MIN_CONFIDENCE > 0.0
+
+        just_below = _Match(similarity=DEFAULT_PORT_MIN_SIMILARITY - 0.01,
+                            confidence=1.0)
+        assert plan_symbol_ports([just_below]) == []
+
+        low_confidence = _Match(similarity=1.0,
+                                confidence=DEFAULT_PORT_MIN_CONFIDENCE - 0.01)
+        assert plan_symbol_ports([low_confidence]) == []
+
+        strong = _Match(similarity=1.0, confidence=1.0)
+        assert len(plan_symbol_ports([strong])) == 1
 
     def test_the_old_name_is_recorded(self):
         """A preview, and any undo, needs to know what it replaced."""
