@@ -163,11 +163,32 @@ assignment would untangle; 54.5% sit in longer cycles and 34.8% took the
 counterpart of a function that has no match at all. This is the same conclusion
 the cross-tabulation reached from the other side.
 
-Removing those five steps, measured by running the engine rather than filtering
-its output: **924 correct / 472 wrong → 795 / 76**. 128 correct traded for 396
-fewer wrong, 3.1 to 1, precision 66% → 91%. Whether that is the right default
-depends on the workload, so the steps are left enabled and
-`measure_real_corpus.py --drop-steps` makes the trade reproducible.
+**`function: call sequence matching(sequence)` is disabled by default** — the
+one local delta to upstream's ladder. It is wrong on every corpus available:
+76.5% on the checked-in fixtures (MinGW vs LCC, MSVC, 32-bit x86, human-
+confirmed truth), 88.2% on cross-optimisation pairs, 93.3% on cross-version
+ones. Its own configured confidence was already 0.
+
+Removing it is not the recall-for-precision trade it looks like. It is better
+on **both** axes:
+
+| | correct | wrong | precision |
+|---|---|---|---|
+| with the step | 924 | 484 | 65.6% |
+| without | **932** | **212** | **81.5%** |
+
+The fixtures agree — baseline 620 → 640 correct and 255 → 184 wrong. Recall
+rises because the step was *blocking*: the ladder is re-entered on every
+propagation round and on bucket drill-down, so a bad pair taken in one round
+denies it to a better step in a later one. A step that runs "last" is not
+therefore harmless.
+
+The other four weak steps stay, and the per-pair split is why:
+`address sequence` and `loop count matching` are **0% wrong on version pairs**
+and only fail across optimisation levels, where address order is meaningless by
+construction. They are conditionally valid heuristics, not noise, and
+disabling them would break the case they exist for. `measure_real_corpus.py
+--drop-steps` makes that measurable for a workload that differs.
 
 Where it is *not* a judgement call is porting. `plan_symbol_ports` and
 `plan_comment_ports` defaulted `min_similarity` and `min_confidence` to 0.0,

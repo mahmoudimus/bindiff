@@ -94,10 +94,6 @@
   {
    "name": "function: call sequence matching(topology)",
    "confidence": 0
-  },
-  {
-   "name": "function: call sequence matching(sequence)",
-   "confidence": 0
   }
  ],
  "basic_block_matching": [
