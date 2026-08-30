@@ -61,6 +61,12 @@ class FeatureIndex {
   // width for the whole file; a function whose vector disagrees is dropped on
   // load, because comparing two different embeddings would produce a number
   // that means nothing.
+  //
+  // Read from the first vector stored rather than tracked alongside them. A
+  // second copy of the same fact is a second thing that can disagree, and the
+  // map that held it instantiated absl::flat_hash_map<std::string, int> --
+  // which BinExport also instantiates, and which mold then rejected as a
+  // duplicate symbol under LTO. That broke the Linux build for eight commits.
   int Dimension(absl::string_view feature) const;
 
   // How many functions carry `feature`. A feature present on three functions
@@ -104,7 +110,6 @@ class FeatureIndex {
       exact_keys_;
   absl::flat_hash_map<std::string, absl::flat_hash_map<Address, Vector>>
       vectors_;
-  absl::flat_hash_map<std::string, int> dimensions_;
 };
 
 // Jaccard overlap of two sorted, deduplicated key sets: |A n B| / |A u B|.

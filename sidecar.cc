@@ -59,8 +59,11 @@ const FeatureIndex::Vector* absl_nullable FeatureIndex::LookupVector(
 }
 
 int FeatureIndex::Dimension(absl::string_view feature) const {
-  auto found = dimensions_.find(feature);
-  return found != dimensions_.end() ? found->second : 0;
+  auto by_name = vectors_.find(feature);
+  if (by_name == vectors_.end() || by_name->second.empty()) {
+    return 0;
+  }
+  return static_cast<int>(by_name->second.begin()->second.size());
 }
 
 int FeatureIndex::Count(absl::string_view feature) const {
@@ -96,13 +99,11 @@ bool FeatureIndex::AddVector(absl::string_view feature, Address address,
   if (values.empty()) {
     return false;
   }
+  // The first vector seen sets the width. A producer that changed its model
+  // halfway through a file would otherwise have half its functions compared
+  // against the other half on a prefix, which is not a similarity.
   const int dimension = static_cast<int>(values.size());
-  auto [known, inserted] =
-      dimensions_.emplace(std::string(feature), dimension);
-  if (!inserted && known->second != dimension) {
-    // The first vector seen sets the width. A producer that changed its model
-    // halfway through a file would otherwise have half its functions compared
-    // against the other half on a prefix, which is not a similarity.
+  if (const int known = Dimension(feature); known != 0 && known != dimension) {
     return false;
   }
 

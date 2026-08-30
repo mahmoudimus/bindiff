@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <functional>
 #include <limits>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -275,7 +276,11 @@ bool MatchingStepCallGraphNeighbourAssignment::FindFixedPoints(
   // the dense matrix would be |left| x |right|.
   absl::flat_hash_map<int, absl::flat_hash_map<int, double>> agreements;
   for (int row = 0; row < static_cast<int>(left.size()); ++row) {
-    absl::flat_hash_map<int, int> shared;
+    // std::map rather than absl::flat_hash_map<int, int>: BinExport also
+    // instantiates that policy, and mold rejects the pair as a duplicate
+    // symbol under LTO. The map is a handful of entries per row, so the
+    // difference is not measurable here.
+    std::map<int, int> shared;
     for (FlowGraph* neighbour :
          Neighbours(context.primary_call_graph_, left[row])) {
       FlowGraph* counterpart = MatchedCounterpart(neighbour);
@@ -339,14 +344,20 @@ bool MatchingStepCallGraphNeighbourAssignment::FindFixedPoints(
     } else {
       std::vector<double> weights(
           component.rows.size() * component.columns.size(), 0.0);
-      absl::flat_hash_map<int, int> column_position;
-      for (int i = 0; i < static_cast<int>(component.columns.size()); ++i) {
-        column_position[component.columns[i]] = i;
-      }
+      // Sorted and searched rather than hashed, for the same duplicate-symbol
+      // reason as above, and because a component is capped at
+      // kMaxComponentSize entries.
+      std::vector<int> ordered_columns = component.columns;
+      std::sort(ordered_columns.begin(), ordered_columns.end());
       for (int i = 0; i < static_cast<int>(component.rows.size()); ++i) {
         for (const auto& [column, weight] : agreements[component.rows[i]]) {
-          weights[i * component.columns.size() + column_position[column]] =
-              weight;
+          const auto found = std::lower_bound(ordered_columns.begin(),
+                                              ordered_columns.end(), column);
+          if (found == ordered_columns.end() || *found != column) {
+            continue;
+          }
+          weights[i * ordered_columns.size()
+                  + (found - ordered_columns.begin())] = weight;
         }
       }
       const std::vector<int> assignment =
@@ -363,7 +374,7 @@ bool MatchingStepCallGraphNeighbourAssignment::FindFixedPoints(
           continue;
         }
         chosen.push_back({component.rows[i],
-                          component.columns[assignment[i]]});
+                          ordered_columns[assignment[i]]});
       }
     }
 
