@@ -251,6 +251,8 @@ add_library(bindiff_shared STATIC
   match/function_call_sequence.h
   match/function_feature.cc
   match/function_feature.h
+  match/function_neighbour_assignment.cc
+  match/function_neighbour_assignment.h
   match/function_flow_graph_edges_mdindex.h
   match/function_flow_graph_mdindex.cc
   match/function_flow_graph_mdindex.h
@@ -344,7 +346,10 @@ if(BUILD_TESTING AND BINDIFF_BUILD_TESTING)
   )
   gtest_discover_tests(database_writer_test)
 
-  add_executable(match_tests match/basic_block_instruction_count_test.cc)
+  add_executable(match_tests
+    match/basic_block_instruction_count_test.cc
+    match/function_neighbour_assignment_test.cc
+  )
   target_link_libraries(match_tests
     bindiff_test_base
     bindiff_test_util

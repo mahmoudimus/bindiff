@@ -140,6 +140,39 @@ The threshold is **not** comparable to the Jaccard one and was swept separately:
 
 It is not enabled by default: 5 pairs improved and 4 got worse. The split is structural, not noise — it is strong on cross-*version* pairs (151/154, 65/70, 55/59) and weak across optimisation levels, because `-O2` rewrites the instruction mix and a version bump barely touches it. Worth revisiting for a workload that is mostly version-to-version.
 
+### Global assignment, and why it is not a last step
+
+`match/function_neighbour_assignment.{h,cc}` scores each surviving candidate
+pair by how many of their call-graph neighbours are already matched to each
+other — the quantity IsoRank propagates and BinSlayer's Hungarian pass scores —
+and resolves the result as one global assignment (`SolveAssignment`, an exact
+O(n³) Hungarian, verified against brute force in
+`match/function_neighbour_assignment_test.cc`). It is **built and not enabled**,
+because measuring it produced the clearest negative result in this repository.
+
+Two conditions must hold together to recover a miss: neighbour **evidence**, and
+the correct counterpart still being **free**. On the nine-pair corpus:
+
+| | counterpart free | counterpart taken |
+|---|---|---|
+| **neighbour evidence** | **0** | 129 |
+| no evidence | 104 | 152 |
+
+**The overlap is exactly zero.** Where there is evidence, greedy propagation
+already used it and spent the counterpart; where the counterpart is free, the
+function is isolated and there is nothing to reason from. Enabled, the step took
+8 pairs across nine binaries and got none of them right.
+
+Read the margins separately and you get "129 have evidence, 104 are free, so
+over a hundred are recoverable" — which is how the first version of
+`analyze_residual.py` misled me. It now prints the cross-tabulation and refuses
+to report the margins alone.
+
+The conclusion is not that global assignment is useless. It is that it cannot
+run *last*: to help it must revise matches other steps committed, which is what
+BinSlayer does — it scores everything rather than treating the greedy result as
+fixed. `SolveAssignment` is there for that when it is built.
+
 **Measure stripped, or do not bother.** The same corpus unstripped says
 `prototype/v1` is worth **+795** and 74.9% recall — because those builds carry
 `debug_info`, so IDA reads exact signatures out of DWARF. The step fires 1244

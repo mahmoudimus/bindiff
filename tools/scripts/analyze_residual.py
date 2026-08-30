@@ -13,20 +13,30 @@ no graph method can reach.
     tools/scripts/analyze_residual.py --pairs pairs.json --work build/corpus \\
         --configuration all
 
-Three numbers per miss:
+Two conditions have to hold together for a later pass to recover a miss:
 
-  neighbours      how many of the function's call-graph neighbours are already
-                  correctly matched to a neighbour of its counterpart. This is
-                  exactly the evidence IsoRank propagates; zero means no amount
-                  of propagation reaches this function.
-  reachable       whether the correct counterpart survives in the *unmatched*
-                  pool on both sides. If the differ has already spent the
-                  counterpart on some other function, a later pass cannot have
-                  it back without undoing that.
-  contested       how many other unmatched functions on the far side share the
-                  same neighbour evidence. One means a global assignment would
-                  settle it outright; many means the evidence is real but not
-                  by itself decisive.
+  evidence   at least one of the function's call-graph neighbours is already
+             matched to a neighbour of its counterpart. This is what IsoRank
+             propagates and what a Hungarian pass scores; without it no graph
+             method reaches the function at all.
+  free       the correct counterpart is still unclaimed. If the differ already
+             spent it on some other function, a pass that only fills gaps
+             cannot have it back without undoing that match.
+
+**Report the cross-tabulation, never the two margins.** Reading them
+separately is what made this tool mislead its first user: on the nine-pair
+corpus 129 misses had evidence and 104 had a free counterpart, which looks
+like well over a hundred recoverable pairs -- and the overlap is *exactly
+zero*. Where there is evidence, greedy propagation already used it and took
+the counterpart; where the counterpart is free, the function is isolated and
+there is nothing to reason from. A leftovers-only global assignment therefore
+has a ceiling of zero here, and measuring one confirmed it: 8 pairs taken
+across nine binaries, none correct.
+
+The implication is not that global assignment is useless but that it cannot be
+a *last* step. To help it would have to revise matches other steps committed,
+which is what BinSlayer does -- it scores everything rather than accepting the
+greedy result as fixed.
 """
 
 from __future__ import annotations
@@ -134,14 +144,20 @@ def analyse(name: str, work: Path, configuration: str) -> dict:
         candidate_support[b] = secondary_neighbours.get(b, set())
 
     buckets = {"no evidence": 0, "unique": 0, "contested": 0}
+    # The cross-tabulation, which is the number that decides anything. Keyed
+    # "evidence,free" so the margins can still be summed but never reported on
+    # their own.
+    cross = {"yes,yes": 0, "yes,no": 0, "no,yes": 0, "no,no": 0}
     reachable = 0
     support_histogram = defaultdict(int)
     for a in missed:
         b = truth[a]
-        if b not in claimed_secondary:
+        free = b not in claimed_secondary
+        if free:
             reachable += 1
         support = supporting(a, b)
         support_histogram[min(support, 5)] += 1
+        cross[f"{'yes' if support else 'no'},{'yes' if free else 'no'}"] += 1
         if support == 0:
             buckets["no evidence"] += 1
             continue
@@ -154,7 +170,7 @@ def analyse(name: str, work: Path, configuration: str) -> dict:
     return {
         "truth": len(truth), "correct": len(correct), "wrong": len(wrong),
         "missed": len(missed), "reachable": reachable,
-        "buckets": buckets,
+        "buckets": buckets, "cross": cross,
         "support": {str(k): v for k, v in sorted(support_histogram.items())},
     }
 
@@ -185,6 +201,7 @@ def main(argv=None) -> int:
     total = defaultdict(int)
     buckets = defaultdict(int)
     support = defaultdict(int)
+    cross = defaultdict(int)
     for row in per_pair.values():
         for key in ("truth", "correct", "wrong", "missed", "reachable"):
             total[key] += row[key]
@@ -192,6 +209,8 @@ def main(argv=None) -> int:
             buckets[key] += value
         for key, value in row["support"].items():
             support[key] += value
+        for key, value in row["cross"].items():
+            cross[key] += value
 
     print(f"{len(per_pair)} pairs, configuration {args.configuration!r}\n")
     print(f"  ground truth        {total['truth']}")
@@ -199,10 +218,20 @@ def main(argv=None) -> int:
           f"({100.0 * total['correct'] / total['truth']:.1f}%)")
     print(f"  matched wrongly     {total['wrong']}")
     print(f"  not matched at all  {total['missed']}")
-    print(f"\nof the {total['missed']} unmatched truth pairs:")
-    print(f"  counterpart still free   {total['reachable']} "
-          f"({100.0 * total['reachable'] / total['missed']:.1f}%) "
-          f"-- a later pass could still claim it")
+    print(f"\nof the {total['missed']} unmatched truth pairs, both conditions "
+          f"a later pass needs:\n")
+    print(f"  {'':<22}{'counterpart free':>18}{'counterpart taken':>19}")
+    for evidence, label in (("yes", "neighbour evidence"),
+                            ("no", "no evidence")):
+        print(f"  {label:<22}{cross[f'{evidence},yes']:>18}"
+              f"{cross[f'{evidence},no']:>19}")
+    recoverable = cross["yes,yes"]
+    print(f"\n  recoverable by a pass that only fills gaps: {recoverable}")
+    if recoverable == 0 and total["missed"]:
+        print("  -- the two conditions do not co-occur. Where there is "
+              "evidence the\n     counterpart is already spent; where it is "
+              "free there is no evidence.\n     Such a pass cannot help; it "
+              "would have to revise existing matches.")
     for label in ("no evidence", "unique", "contested"):
         count = buckets[label]
         print(f"  {label:<24} {count:>5} "
@@ -216,7 +245,8 @@ def main(argv=None) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(
             {"pairs": per_pair, "totals": dict(total),
-             "buckets": dict(buckets), "support": dict(support)}, indent=1))
+             "buckets": dict(buckets), "cross": dict(cross),
+             "support": dict(support)}, indent=1))
     return 0
 
 

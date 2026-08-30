@@ -39,6 +39,7 @@
 #include "third_party/zynamics/bindiff/match/function_call_graph_mdindex_relaxed.h"
 #include "third_party/zynamics/bindiff/match/function_call_sequence.h"
 #include "third_party/zynamics/bindiff/match/function_feature.h"
+#include "third_party/zynamics/bindiff/match/function_neighbour_assignment.h"
 #include "third_party/zynamics/bindiff/match/function_flow_graph_edges_mdindex.h"
 #include "third_party/zynamics/bindiff/match/function_flow_graph_mdindex.h"
 #include "third_party/zynamics/bindiff/match/function_hash.h"
@@ -424,6 +425,7 @@ MatchingSteps GetDefaultMatchingSteps() {
              new MatchingStepFunctionStringReferences(),
              new MatchingStepFunctionInstructionCount(),
              new MatchingStepSequence(),
+             new MatchingStepCallGraphNeighbourAssignment(),
          }) {
       (*algorithms)[step->name()] = step;
     }
