@@ -141,6 +141,32 @@ jobs:
               run: python -m pip install --disable-pip-version-check
                    build wheel "Cython>=3.0" setuptools protobuf
 
+            # Generated, never checked in -- python/bindiff/_pb does not exist
+            # in a fresh checkout, and pyproject.toml names bindiff._pb as a
+            # package, so setuptools fails outright without this. The protoc
+            # used is the one the CMake build just produced, so the bindings
+            # always match the schema in the tree. Same two protos the docker
+            # harness generates.
+            - name: Generate the protobuf bindings
+              if: steps.gate.outputs.run == 'yes'
+              shell: bash
+              run: |
+                  protoc="${GITHUB_WORKSPACE}/build/_deps/protobuf-build/protoc"
+                  [ -x "$protoc" ] || protoc="$protoc.exe"
+                  [ -x "$protoc" ] || {
+                    echo "::error::no protoc under build/_deps/protobuf-build"
+                    find "${GITHUB_WORKSPACE}/build/_deps" -name 'protoc*' \
+                      -maxdepth 3 2>/dev/null | head
+                    exit 1
+                  }
+                  mkdir -p python/bindiff/_pb
+                  touch python/bindiff/_pb/__init__.py
+                  "$protoc" --proto_path="${GITHUB_WORKSPACE}/build/binexport" \
+                    --python_out=python/bindiff/_pb binexport2.proto
+                  "$protoc" --proto_path="${GITHUB_WORKSPACE}" \
+                    --python_out=python/bindiff/_pb bindiff_metadata.proto
+                  ls -l python/bindiff/_pb
+
             - name: Build the wheel
               if: steps.gate.outputs.run == 'yes'
               working-directory: python
