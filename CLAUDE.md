@@ -365,6 +365,34 @@ run *last*: to help it must revise matches other steps committed, which is what
 BinSlayer does — it scores everything rather than treating the greedy result as
 fixed. `SolveAssignment` is there for that when it is built.
 
+### The weak steps that stayed, and why
+
+After `call sequence matching(sequence)` was removed, the remaining error
+sources were measured the same way. Two were kept, on evidence:
+
+| candidate | nine real pairs | four fixtures |
+|---|---|---|
+| drop `call sequence matching(exact)` | −19 correct, −2 wrong | not run |
+| drop `address sequence` | −2 correct, −18 wrong | **−87 correct**, −60 wrong |
+
+`(exact)` gives up 19 correct matches to remove 2. It is 33% wrong on
+cross-optimisation pairs and 30% on cross-version ones — bad on both, like its
+removed sibling — but unlike that sibling it is also contributing, and a size
+guard does not separate it (correct median 0.57, wrong 0.47).
+
+`address sequence` looked like the clearest remaining cut: 25% precision
+overall, and 9 wrong removed per correct lost on the real corpus. The fixtures
+refused it, losing 87 correct matches — it is load-bearing on cross-toolchain
+pairs, where it was 99 correct of 197. **Two corpora that disagree is the only
+reason that change did not ship**, and it is the second time in this file that
+has been true; the first was the call-reference guard.
+
+A size-ratio guard does help some steps and not others — it separates
+`loop count matching` (correct 0.82, wrong 0.44) and `MD index (flowgraph, top
+down)` (0.79 against 0.43), and does nothing at all for `address sequence`
+(0.96 against 1.00, because pairing leftovers by address order picks functions
+that are the same size). Applying one globally would therefore be wrong.
+
 ### The shelved features, re-measured
 
 Every shelved decision here was originally taken against an engine making 616
