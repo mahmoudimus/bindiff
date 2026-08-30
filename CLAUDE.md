@@ -365,6 +365,41 @@ run *last*: to help it must revise matches other steps committed, which is what
 BinSlayer does — it scores everything rather than treating the greedy result as
 fixed. `SolveAssignment` is there for that when it is built.
 
+### What a match's confidence actually means
+
+Not what the step that found it is worth. `Count(const FixedPoint&)` puts the
+function-level step into the histogram **once**, alongside one entry per matched
+basic block, and `GetConfidence` takes the weighted average. For a function with
+ten matched blocks the function step carries one eleventh of the number.
+
+That matters for reading a result: the confidence column is dominated by how
+well the *basic blocks* matched, not by which function-level algorithm proposed
+the pair.
+
+It also means the configured confidences are miscalibrated at the bottom of the
+ladder without it mattering. Measured precision against configured value, over
+both corpora:
+
+| step | configured | measured |
+|---|---|---|
+| `hash matching` | 1.00 | 100% |
+| `prime signature`, `imports/v1`, `prototype/v1` | 0.90 | 98–100% |
+| `edges callgraph MD index` | 0.90 | 89% |
+| `call reference matching` | 0.75 | 88% |
+| `loop count matching` | 0.60 | 55% |
+| `call graph neighbour assignment` | 0.40 | **71%** |
+| `address sequence` | 0.40 | 43% |
+| `call sequence matching(exact)` | 0.10 | **65%** |
+| `call sequence matching(topology)` | 0.00 | **74%** |
+
+The top ten are within ±0.10 — upstream's values check out. The bottom four are
+wrong and two are *inverted*, `address sequence` at 43% being trusted more than
+`(exact)` at 65%. Recalibrating them was measured and changes nothing: porting
+at the 0.5 floor gives 717 ports and 93.3% precision either way, because of the
+weighting above. So it was not done. Worth knowing before anyone spends time on
+it, and worth revisiting only if something starts consuming the per-step number
+directly.
+
 ### The weak steps that stayed, and why
 
 After `call sequence matching(sequence)` was removed, the remaining error
