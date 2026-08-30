@@ -25,6 +25,50 @@ permissions:
     contents: read
 
 jobs:
+    # Everything else here needs IDA, so it runs on Linux where the IDA images
+    # are. This leg needs neither IDA nor the compiled extension, which is what
+    # lets it run where the plugin will actually be used.
+    #
+    # It exists because a Windows-only bug shipped: find_python_interpreter
+    # looked for the interpreter under `prefix/bin/`, which does not exist on
+    # Windows, so the launcher reported "no Python interpreter found" with a
+    # working one sitting in the prefix. Nothing in CI ran anywhere it could
+    # have been noticed.
+    #
+    # Deliberately narrow. It runs the tests that import no IDA and no
+    # extension: the plugin's view logic and its diff sequence. Anything
+    # touching `bindiff.*` pulls in the Cython extension and is out of scope --
+    # see the note in the test log about what that would take.
+    portable-tests:
+        name: no-IDA tests (${{ matrix.os }})
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                os:
+                    - macos-15
+                    - windows-2025
+                    - ubuntu-24.04
+        steps:
+            - name: "Checkout ${{ github.ref }}"
+              uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.13"
+
+            - name: Install pytest
+              run: python -m pip install --disable-pip-version-check pytest
+
+            - name: Run the tests that need no IDA
+              working-directory: python
+              run: >-
+                  python -m pytest
+                  tests/test_ui_logic.py
+                  tests/test_diff_runner.py
+                  -q --no-header
+
     hcli-lint:
         runs-on: ubuntu-24.04
         steps:

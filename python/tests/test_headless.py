@@ -20,6 +20,7 @@ import pytest
 from bindiff.headless import (
     StageResult,
     find_python_interpreter,
+    interpreter_candidates,
     main,
     run_headless,
 )
@@ -59,6 +60,79 @@ class TestInterpreterDiscovery:
                             raising=False)
         monkeypatch.setattr(sys, "executable", "/opt/ida/ida64")
         monkeypatch.setattr(sys, "prefix", str(tmp_path))
+        with pytest.raises(RuntimeError, match="no Python interpreter"):
+            find_python_interpreter()
+
+
+class TestInterpreterLayouts:
+    """Where an interpreter sits, per platform.
+
+    Checked here rather than on the platform, because the plugin's tests only
+    ever run on Linux -- which is exactly how the Windows layout came to be
+    missing. The platform is an argument, not os.name: pathlib reads os.name to
+    choose PosixPath or WindowsPath, so faking it globally breaks every path in
+    the process, the test runner's included. That was not a guess; doing it
+    crashed pytest itself.
+    """
+
+    def test_posix_looks_under_bin(self, tmp_path):
+        candidates = interpreter_candidates(tmp_path, windows=False)
+        assert [c.name for c in candidates] == [
+            f"python{sys.version_info.major}.{sys.version_info.minor}",
+            "python3", "python"]
+        assert all(c.parent.name == "bin" for c in candidates)
+
+    def test_windows_has_no_bin_and_no_extensionless_names(self, tmp_path):
+        """The bug this covers: every POSIX candidate misses on Windows, so
+        the search fell through to "no Python interpreter found" with a working
+        interpreter sitting in the prefix."""
+        candidates = interpreter_candidates(tmp_path, windows=True)
+
+        assert all(c.name.endswith(".exe") for c in candidates), candidates
+        assert not any(c.parent.name == "bin" for c in candidates)
+        # A base install puts it in the prefix; a virtual environment under
+        # Scripts. Both have to be tried.
+        relative = [str(c.relative_to(tmp_path)) for c in candidates]
+        assert "python.exe" in relative
+        assert str(Path("Scripts") / "python.exe") in relative
+
+    def test_the_two_layouts_share_nothing(self, tmp_path):
+        """If they overlapped, the POSIX list would have covered Windows by
+        accident and the bug would not have existed."""
+        posix = set(interpreter_candidates(tmp_path, windows=False))
+        windows = set(interpreter_candidates(tmp_path, windows=True))
+        assert not (posix & windows)
+
+    def test_the_first_candidate_that_exists_wins(self, monkeypatch, tmp_path):
+        """The search itself, with only the Scripts copy present -- the layout
+        a Windows virtual environment actually has."""
+        import bindiff.headless as headless
+
+        scripts = tmp_path / "Scripts"
+        scripts.mkdir()
+        (scripts / "python.exe").write_bytes(b"")
+
+        monkeypatch.setattr(sys, "_base_executable", r"C:\IDA\ida.exe",
+                            raising=False)
+        monkeypatch.setattr(sys, "executable", r"C:\IDA\ida.exe")
+        monkeypatch.setattr(headless, "interpreter_candidates",
+                            lambda: interpreter_candidates(tmp_path,
+                                                           windows=True))
+
+        assert find_python_interpreter() == scripts / "python.exe"
+
+    def test_ida_is_rejected_by_name_on_every_platform(self, monkeypatch,
+                                                       tmp_path):
+        """ida.exe contains no "python", which is what stops the launcher
+        starting a second IDA instead of a worker."""
+        import bindiff.headless as headless
+
+        monkeypatch.setattr(sys, "_base_executable", r"C:\IDA\ida64.exe",
+                            raising=False)
+        monkeypatch.setattr(sys, "executable", r"C:\IDA\ida64.exe")
+        monkeypatch.setattr(headless, "interpreter_candidates",
+                            lambda: interpreter_candidates(tmp_path,
+                                                           windows=True))
         with pytest.raises(RuntimeError, match="no Python interpreter"):
             find_python_interpreter()
 

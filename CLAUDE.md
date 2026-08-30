@@ -95,6 +95,10 @@ is what makes the IDA-only sidecar features measurable at all. The checked-in
 `.idb` fixtures cannot serve: they are 32-bit databases IDA 9.x refuses without
 an `upg32` the image does not ship.
 
+`.github/workflows/python.yml` also carries a **`portable-tests`** leg on macOS, Windows and Linux that installs nothing but pytest and runs the tests needing neither IDA nor the extension (`test_ui_logic`, `test_diff_runner`). It exists because a Windows-only bug shipped: `find_python_interpreter` looked under `prefix/bin/`, which does not exist on Windows, so the launcher reported "no Python interpreter found" with a working interpreter sitting in the prefix — and nothing in CI ran anywhere it could have been noticed. `interpreter_candidates(prefix, windows=)` now takes the platform as an argument so both layouts are checked from Linux; monkeypatching `os.name` is not an alternative, since pathlib reads it to choose PosixPath or WindowsPath and faking it globally crashes the test runner.
+
+The leg is narrow on purpose: anything importing `bindiff.*` pulls in the Cython extension through `bindiff/__init__.py`, which is why `test_headless` — including those very Windows tests — is not in it.
+
 9.4 is the primary leg (BinExport pins the IDA SDK to 9.4); 9.1 is a compatibility leg. Images come from `docker-compose.yml`, overridable via `BINDIFF_TEST_IMAGE_94` / `BINDIFF_TEST_IMAGE_91`. Container deps live in `.github/docker-apt-deps.txt` (cmake, ninja — the images ship gcc but no generator) and `.github/docker-deps.txt` (Cython, pytest); CI hashes both for its image cache key.
 
 `python/setup.py` derives its include paths from `compile_commands.json` and its link line by discovering the archives CMake built. Don't reintroduce hand-maintained lists of Abseil libraries — the previous one went stale on every dependency bump and failed one missing `-l` at a time.

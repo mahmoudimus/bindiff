@@ -236,12 +236,17 @@ def test_the_runner_module_stays_free_of_qt_and_ida():
 
 
 @pytest.mark.requires_extension
-def test_the_sequence_runs_against_the_real_worker(insider_pair, tmp_path):
+def test_the_sequence_runs_against_the_real_worker(bindiff_module, insider_pair,
+                                                   tmp_path):
     """Same sequence, with run_headless actually spawning a worker.
 
     The fakes above check the wiring; this checks the wiring is to something
     real -- that run_headless still accepts the arguments DiffRun passes, which
     is exactly the seam a signature change would break silently.
+
+    Takes `bindiff_module` purely to be skipped without it: the marker alone is
+    a label, and importing run_headless pulls in the package, which pulls in the
+    extension. Everything above this line runs on a bare Python.
     """
     import functools
     import sys

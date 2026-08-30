@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import collections
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -37,6 +38,7 @@ __all__ = [
     "diff",
     "pipeline",
     "emit_progress",
+    "interpreter_candidates",
     "find_python_interpreter",
     "run_headless",
     "main",
@@ -375,6 +377,42 @@ def pipeline(primary_input: str, secondary_input: str, output: str,
 # Launcher side. Runs inside the GUI.
 # --------------------------------------------------------------------------
 
+def interpreter_candidates(prefix=None, windows: Optional[bool] = None
+                           ) -> List[Path]:
+    """Where an interpreter sits relative to sys.prefix, on this platform.
+
+    Windows has no `bin/` and no extensionless executables: a base install puts
+    python.exe directly in the prefix and a virtual environment puts it under
+    Scripts. A launcher that only tried the POSIX layout found none of them and
+    fell through to "no Python interpreter found" with a perfectly good
+    interpreter sitting next to it.
+
+    Split out from the search below, and taking the platform as an argument
+    rather than reading os.name, so the layouts can be checked from anywhere --
+    which is the only way this gets tested at all, since the plugin's own tests
+    run on Linux. Monkeypatching os.name instead is not an option: pathlib
+    reads it to choose between PosixPath and WindowsPath, so faking it globally
+    breaks every path in the process, including the test runner's own.
+    """
+    prefix = Path(sys.prefix if prefix is None else prefix)
+    major, minor = sys.version_info.major, sys.version_info.minor
+    if windows is None:
+        windows = os.name == "nt"
+
+    if windows:
+        return [
+            prefix / "python.exe",
+            prefix / "Scripts" / "python.exe",
+            prefix / f"python{major}{minor}.exe",
+            prefix / f"python{major}.exe",
+        ]
+    return [
+        prefix / "bin" / f"python{major}.{minor}",
+        prefix / "bin" / "python3",
+        prefix / "bin" / "python",
+    ]
+
+
 def find_python_interpreter() -> Path:
     """Locates a real Python interpreter to run a worker with.
 
@@ -382,18 +420,17 @@ def find_python_interpreter() -> Path:
     and re-running that would start another IDA rather than a worker.
     sys._base_executable is the underlying interpreter and is what IDA's
     embedded Python leaves behind. Approach taken from ida-taskr.
+
+    The name check is what keeps IDA out: `ida`, `ida64` and `ida.exe` do not
+    contain "python", and an interpreter does on every platform.
     """
     base = getattr(sys, "_base_executable", None)
     if base and "python" in Path(base).name.lower():
         return Path(base)
 
-    # Fall back to a python next to sys.prefix, then to sys.executable if it
-    # actually looks like an interpreter.
-    for candidate in (
-        Path(sys.prefix) / "bin" / f"python{sys.version_info.major}.{sys.version_info.minor}",
-        Path(sys.prefix) / "bin" / "python3",
-        Path(sys.prefix) / "bin" / "python",
-    ):
+    # Then a python next to sys.prefix, then sys.executable if it actually
+    # looks like an interpreter.
+    for candidate in interpreter_candidates():
         if candidate.is_file():
             return candidate
 
