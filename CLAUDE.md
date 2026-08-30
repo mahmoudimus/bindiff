@@ -198,6 +198,25 @@ somebody did. They now default to 0.5 (93.8% precision, keeping 69% of correct
 ports); `DEFAULT_PORT_MIN_SIMILARITY` carries the measurement. A caller can
 still pass 0.0, which is a different thing from getting it by default.
 
+**Call reference matching is not a config step.** It is hardcoded in
+`differ.cc`, runs after *every* matching step on every fixed point that step
+produced, and recurses into its own results. For each matched basic-block pair
+whose two sides make the same number of calls, it pairs the call targets **by
+position** — first with first — and until recently committed them with no test
+of any kind.
+
+It now requires the shorter function to be at least half the longer
+(`kMinCallTargetInstructionRatio`). The pairs it got wrong were the ones that
+are nothing alike: instruction-count ratio median 0.40 against 0.92 for the
+correct ones, with cases like 14 instructions against 1. Corpus 932/212 →
+**948/196**, fixtures 686/163 → **691/164**.
+
+A function with *no* instruction count — an import or thunk whose body this
+binary does not contain — passes. Rejecting those instead cost **226 of 640**
+correct matches on the fixtures, because the recursion means refusing a pair
+also refuses everything that pair would have gone on to seed. Absence of
+evidence is not evidence here, and this mechanism amplifies whichever it is.
+
 ### The learned embedding, and the baseline it did not beat
 
 `python/bindiff/asm2vec.py` is asm2vec's shape — PV-DM over instruction tokens

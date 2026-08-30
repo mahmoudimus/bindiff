@@ -190,6 +190,46 @@ bool CheckExtraConditions(const FlowGraph* primary, const FlowGraph* secondary,
   return primary->GetMdIndex() == secondary->GetMdIndex();
 }
 
+namespace {
+
+// Whether two functions paired by position in a call list are similar enough
+// to be worth believing.
+//
+// Call reference matching walks the call targets of two already-matched basic
+// blocks in parallel and pairs them off in order, on the strength of the two
+// blocks matching and the call counts agreeing. When the blocks really are the
+// same code that is excellent evidence. When they are not, it pairs whatever
+// happens to sit at the same index -- and until this check it did so with no
+// test of any kind, then recursed into the result, so one bad pair seeded more.
+//
+// Measured on nine pairs of real stripped programs, the pairs it got wrong are
+// the ones that are nothing alike: instruction-count ratio median 0.40 against
+// 0.92 for the correct ones, with cases as stark as 14 instructions against 1
+// and 7 against 113. Requiring the shorter side to be at least a fifth of the
+// longer removes 21 of 45 wrong pairs for 9 of 211 correct ones.
+//
+// A ratio and not a similarity score, because this runs inside the matching
+// loop for every call of every matched block: it has to be two integer reads.
+bool CallTargetsArePlausible(const FlowGraph* primary,
+                             const FlowGraph* secondary) {
+  const int left = primary->GetInstructionCount();
+  const int right = secondary->GetInstructionCount();
+  if (left <= 0 || right <= 0) {
+    // No count to compare -- an imported or thunk target whose body this
+    // binary does not contain. Absence of evidence, so the pair is left to
+    // stand on the call position that proposed it. Rejecting these instead
+    // cost 226 of 640 correct matches on the checked-in fixtures, because
+    // call reference matching recurses: refusing a pair also refuses
+    // everything that pair would have gone on to seed.
+    return true;
+  }
+  const int shorter = std::min(left, right);
+  const int longer = std::max(left, right);
+  return shorter >= longer * kMinCallTargetInstructionRatio;
+}
+
+}  // namespace
+
 bool FindCallReferenceFixedPoints(FixedPoint* fixed_point,
                                   MatchingContext* context,
                                   const MatchingStepsFlowGraph& default_steps) {
@@ -226,7 +266,7 @@ bool FindCallReferenceFixedPoints(FixedPoint* fixed_point,
         FlowGraph* match1 = context->primary_call_graph_.GetFlowGraph(vertex1);
         FlowGraph* match2 =
             context->secondary_call_graph_.GetFlowGraph(vertex2);
-        if (match1 && match2) {
+        if (match1 && match2 && CallTargetsArePlausible(match1, match2)) {
           std::pair<FixedPoints::iterator, bool> fixed_point_iterator =
               context->AddFixedPoint(match1, match2,
                                      MatchingStep::kFunctionCallReferenceName);

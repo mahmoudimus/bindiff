@@ -32,6 +32,28 @@ namespace security::bindiff {
 
 MatchingSteps GetDefaultMatchingSteps();
 
+// How alike two functions must be in length before call reference matching
+// will pair them. See CallTargetsArePlausible for why it needs a guard at all.
+//
+// Swept on two corpora, correct/wrong at each value:
+//
+//   ratio    nine real pairs    four fixtures
+//   none        932 / 212         686 / 163
+//   0.2         945 / 210         690 / 167
+//   0.5         948 / 196         691 / 164
+//   0.7         941 / 183         695 / 161
+//
+// Anything from 0.5 to 0.7 is better than no guard on both, and the numbers
+// move by single digits across that range in both directions -- so the value
+// is not delicate, and this sits in the middle of what was actually measured
+// rather than at the argmax of two small corpora.
+//
+// Not in bindiff.json, unlike every matching step, because call reference
+// matching is not one: it is hardcoded in the diff loop and runs after every
+// step on every fixed point that step produced. Worth knowing before looking
+// for a way to switch it off.
+inline constexpr double kMinCallTargetInstructionRatio = 0.5;
+
 bool FindCallReferenceFixedPoints(FixedPoint* fixed_point,
                                   MatchingContext* context,
                                   const MatchingStepsFlowGraph& default_steps);
