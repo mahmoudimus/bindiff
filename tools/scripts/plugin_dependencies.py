@@ -11,7 +11,7 @@ Python version it was built for, resolves to exactly one candidate on any
 machine. pip evaluates the markers and downloads that one.
 
     tools/scripts/plugin_dependencies.py --wheels dist/ --tag v8.0.0 \\
-        --repo mahmoudimus/bindiff --write ida-plugin.json
+        --repo mahmoudimus/bindiff-ng --write ida-plugin.json
 
 Without --write it prints the list, which is what the tests use.
 

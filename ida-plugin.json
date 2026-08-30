@@ -31,7 +31,7 @@
         ],
         "license": "Apache-2.0",
         "urls": {
-            "repository": "https://github.com/mahmoudimus/bindiff",
+            "repository": "https://github.com/mahmoudimus/bindiff-ng",
             "homepage": "https://github.com/google/bindiff"
         },
         "authors": [

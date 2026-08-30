@@ -30,7 +30,7 @@ check_unambiguous = plugin_dependencies.check_unambiguous
 marker_for = plugin_dependencies.marker_for
 parse_wheel = plugin_dependencies.parse_wheel
 
-REPO = "mahmoudimus/bindiff"
+REPO = "mahmoudimus/bindiff-ng"
 TAG = "v8.0.0"
 
 # One release's worth: the platforms the workflow builds.

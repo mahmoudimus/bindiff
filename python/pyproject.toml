@@ -60,9 +60,9 @@ embeddings = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mahmoudimus/bindiff"
-Repository = "https://github.com/mahmoudimus/bindiff"
-Issues = "https://github.com/mahmoudimus/bindiff/issues"
+Homepage = "https://github.com/mahmoudimus/bindiff-ng"
+Repository = "https://github.com/mahmoudimus/bindiff-ng"
+Issues = "https://github.com/mahmoudimus/bindiff-ng/issues"
 
 [tool.setuptools]
 # bindiff._pb holds the generated protobuf bindings, which are built rather
