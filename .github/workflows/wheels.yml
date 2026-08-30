@@ -51,21 +51,30 @@ jobs:
             # One platform failing must not hide the others: the point of this
             # workflow is to find out which ones work.
             fail-fast: false
+            # Every leg is spelled out in `include` with no base matrix keys
+            # alongside it. An `include` entry whose keys do not collide with a
+            # base key is *merged into* each existing combination rather than
+            # adding a job -- so `python: ["3.13"]` here plus four includes
+            # produced exactly one job carrying the last entry's values, and
+            # three platforms silently never ran.
             matrix:
-                python: ["3.13"]
                 include:
                     - name: linux-x86_64
                       runs-on: ubuntu-24.04
                       family: linux
+                      python: "3.13"
                     - name: linux-aarch64
                       runs-on: ubuntu-24.04-arm
                       family: linux
+                      python: "3.13"
                     - name: macos-arm64
                       runs-on: macos-15
                       family: macos
+                      python: "3.13"
                     - name: windows-x86_64
                       runs-on: windows-2025
                       family: windows
+                      python: "3.13"
         steps:
             - name: Skip unselected platform
               id: gate
