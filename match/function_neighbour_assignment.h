@@ -56,13 +56,25 @@ class MatchingStepCallGraphNeighbourAssignment : public MatchingStep {
                        const MatchingStepsFlowGraph& default_steps) override;
 };
 
-// Minimum number of neighbour pairs that must already agree. One is enough
-// *because* the assignment is global: a single shared neighbour rarely picks
-// out one candidate on its own, but combined with every other function's
-// claims it frequently does. Requiring two would discard most of the evidence
-// -- of the misses that have any neighbour support at all, most have exactly
-// one.
-inline constexpr int kMinAgreeingNeighbours = 1;
+// Minimum number of neighbour pairs that must already agree.
+//
+// I first argued that one was enough *because* the assignment is global -- a
+// single shared neighbour rarely picks out one candidate alone, but combined
+// with every other function's claims it often does. Measured, that is wrong.
+// One shared neighbour is mostly noise, and a global optimum over noise is
+// still noise. Correct/wrong for the step's own matches, and for the whole
+// diff on two corpora:
+//
+//   minimum   step's own      nine real pairs    four fixtures
+//   (off)          --            948 / 196         691 / 164
+//   1         163/231  41%      1058 / 377         717 / 185
+//   2         136/ 92  60%      1042 / 248         720 / 172
+//   3         103/ 44  70%      1027 / 211         710 / 172
+//
+// Three adds about 98 correct matches across both corpora at a precision
+// indistinguishable from not running the step at all (81.9% against 82.0%),
+// which is the only version of this that pays for itself.
+inline constexpr int kMinAgreeingNeighbours = 3;
 
 // Size ratio below which a pair is not considered however well its neighbours
 // agree. Two functions can sit in the same place in the call graph and still

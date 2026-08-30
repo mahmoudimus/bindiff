@@ -94,6 +94,10 @@
   {
    "name": "function: call sequence matching(topology)",
    "confidence": 0
+  },
+  {
+   "name": "function: call graph neighbour assignment",
+   "confidence": 0.4
   }
  ],
  "basic_block_matching": [
