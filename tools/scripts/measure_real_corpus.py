@@ -414,6 +414,12 @@ def main(argv=None) -> int:
     parser.add_argument("--features", default="imports/v1,prototype/v1,frame/v1",
                         help="comma-separated features to measure, each on its "
                              "own and then all together")
+    parser.add_argument("--base-features", default="",
+                        help="features present in every configuration, "
+                             "including the baseline. Use the shipped set to "
+                             "ask what a candidate adds to what is already "
+                             "enabled, which is a different question from what "
+                             "it adds to nothing")
     parser.add_argument("--keep-name-matching", action="store_true")
     parser.add_argument("--drop-steps", default="",
                         help="comma-separated step names to remove from the "
@@ -459,10 +465,14 @@ def main(argv=None) -> int:
     # configuration per feature, then all of them -- a feature can be worth
     # something alone and nothing beside another that already found the same
     # functions.
-    configurations = [("baseline", [])]
-    configurations += [(f, [f]) for f in features]
+    base = [f.strip() for f in args.base_features.split(",") if f.strip()]
+    if base:
+        print(f"[base] every configuration also carries: {', '.join(base)}")
+    configurations = [("baseline", list(base))]
+    configurations += [(f, base + [f]) for f in features if f not in base]
     if len(features) > 1:
-        configurations.append(("all", features))
+        configurations.append(("all", base + [f for f in features
+                                              if f not in base]))
 
     strip_tool = find_strip_tool() if args.strip else ""
     pairs = []
@@ -505,7 +515,7 @@ def main(argv=None) -> int:
             correct, wrong, missing = score(pair.truth, matches)
 
             own_correct = own_total = 0
-            for feature in wanted:
+            for feature in [f for f in wanted if f not in base] or wanted:
                 attributed = read_attributed(database, STEP_PREFIX + feature)
                 own_total += len(attributed)
                 own_correct += sum(1 for a, b in attributed.items()

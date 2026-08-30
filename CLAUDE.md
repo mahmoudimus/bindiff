@@ -365,6 +365,32 @@ run *last*: to help it must revise matches other steps committed, which is what
 BinSlayer does — it scores everything rather than treating the greedy result as
 fixed. `SolveAssignment` is there for that when it is built.
 
+### The shelved features, re-measured
+
+Every shelved decision here was originally taken against an engine making 616
+wrong matches, so all three were re-run against the current one — each added to
+the shipped `imports/v1` + `prototype/v1` rather than to nothing, which is the
+question that actually matters (`--base-features`):
+
+| feature | net | pairs | own precision | verdict |
+|---|---|---|---|---|
+| `mnemonic-histogram/v1` | **+6** | 4 up, 2 down | 108/119 91% | still shelved |
+| `asm2vec/v1` | **−2** | 1 up, 2 down | 66/70 94% | still shelved |
+| `frame/v1` | **−5** | 2 up, 3 down | 65/93 70% | still shelved |
+
+All three verdicts held, which is worth knowing: they were *not* artefacts of
+the noisy baseline, unlike the global assignment step's ceiling of zero.
+
+`asm2vec/v1` is the interesting one. Its own matches are 94% correct — better
+than the histogram's — and the net is still negative. High own-precision with a
+negative net means **redundancy, not error**: it finds what other steps already
+find, and occasionally takes a pair one of them would have got right. "The
+model is weak" and "the model adds nothing the engine lacks" are different
+diagnoses, and this is the second.
+
+The headroom these were built for has largely been taken by fixing the matching
+noise instead — the baseline they compete against went from 735 to 1027.
+
 **Measure stripped, or do not bother.** The same corpus unstripped says
 `prototype/v1` is worth **+795** and 74.9% recall — because those builds carry
 `debug_info`, so IDA reads exact signatures out of DWARF. The step fires 1244
