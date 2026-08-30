@@ -35,12 +35,14 @@ namespace security::bindiff {
 // the index is simply empty and every step that consumes it finds nothing,
 // which is how the engine behaves with no sidecars anywhere.
 //
-// Only the metrics the engine can act on are indexed. Vectors and fuzzy hashes
-// are parsed and dropped rather than stored, because nothing consumes them yet
-// and holding an embedding per function for a large binary is not free.
+// Only the metrics the engine can act on are indexed. Fuzzy hashes are parsed
+// and dropped rather than stored, because nothing consumes them yet.
 class FeatureIndex {
  public:
   using KeySet = std::vector<uint64_t>;
+  // Normalised on the way in, so cosine similarity is a plain dot product and
+  // no consumer has to remember to divide.
+  using Vector = std::vector<float>;
 
   // Sorted, deduplicated key set for `feature` at `address`, or nullptr when
   // this function does not carry the feature.
@@ -50,6 +52,16 @@ class FeatureIndex {
   // Exact key for `feature` at `address`, or nullptr.
   const uint64_t* absl_nullable LookupExactKey(absl::string_view feature,
                                                Address address) const;
+
+  // Unit-length embedding for `feature` at `address`, or nullptr.
+  const Vector* absl_nullable LookupVector(absl::string_view feature,
+                                           Address address) const;
+
+  // Dimension of `feature`'s vectors, or 0 when it has none. A feature is one
+  // width for the whole file; a function whose vector disagrees is dropped on
+  // load, because comparing two different embeddings would produce a number
+  // that means nothing.
+  int Dimension(absl::string_view feature) const;
 
   // How many functions carry `feature`. A feature present on three functions
   // out of four thousand is not worth running a matching pass over, and a
@@ -66,13 +78,22 @@ class FeatureIndex {
   bool HasExactKeys(absl::string_view feature) const {
     return exact_keys_.contains(feature);
   }
+  bool HasVectors(absl::string_view feature) const {
+    return vectors_.contains(feature);
+  }
 
-  bool empty() const { return key_sets_.empty() && exact_keys_.empty(); }
+  bool empty() const {
+    return key_sets_.empty() && exact_keys_.empty() && vectors_.empty();
+  }
 
   // Adds one function's value. Public so tests can build an index without a
   // file on disk; the loader below is the usual way in.
   void AddKeySet(absl::string_view feature, Address address, KeySet keys);
   void AddExactKey(absl::string_view feature, Address address, uint64_t key);
+  // Returns false when `values` disagrees with the width already recorded for
+  // this feature, or is empty or all zero -- a zero vector has no direction and
+  // so no cosine to anything.
+  bool AddVector(absl::string_view feature, Address address, Vector values);
 
  private:
   // Feature name -> address -> value. Two hashes per lookup, which is the same
@@ -81,6 +102,9 @@ class FeatureIndex {
       key_sets_;
   absl::flat_hash_map<std::string, absl::flat_hash_map<Address, uint64_t>>
       exact_keys_;
+  absl::flat_hash_map<std::string, absl::flat_hash_map<Address, Vector>>
+      vectors_;
+  absl::flat_hash_map<std::string, int> dimensions_;
 };
 
 // Jaccard overlap of two sorted, deduplicated key sets: |A n B| / |A u B|.
@@ -88,6 +112,15 @@ class FeatureIndex {
 // not thereby similar.
 double JaccardSimilarity(const FeatureIndex::KeySet& lhs,
                          const FeatureIndex::KeySet& rhs);
+
+// Cosine similarity of two vectors the index has already normalised, so this
+// is their dot product. Returns 0 for differing widths rather than comparing a
+// prefix, which would be a number with no meaning.
+//
+// Mapped from [-1, 1] onto [0, 1]: an opposed pair is as far from a match as
+// two vectors get, and every threshold in the engine is a similarity in [0, 1].
+double CosineSimilarity(const FeatureIndex::Vector& lhs,
+                        const FeatureIndex::Vector& rhs);
 
 // Loads the sidecar for `binexport_path`, if there is one.
 //

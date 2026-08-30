@@ -186,20 +186,96 @@ TEST(LoadSidecarTest, AcceptsWhenEitherSideHasNoId) {
 }
 
 TEST(LoadSidecarTest, SkipsMetricsNothingConsumes) {
-  // Vectors are parsed and dropped: keeping an embedding per function would
-  // cost real memory for no benefit until something compares them.
+  // Fuzzy hashes are still parsed and dropped: nothing compares them yet, and
+  // keeping a value per function costs memory for no benefit.
+  BinaryMetadata metadata;
+  auto* function = metadata.add_functions();
+  function->set_address(0x401000);
+  auto* feature = function->add_features();
+  feature->set_name("fuzzy/v1");
+  feature->set_metric(FEATURE_METRIC_HAMMING);
+  feature->set_packed("\x01\x02\x03\x04");
+
+  const std::string binexport = WriteSidecar("unconsumed-metric", metadata);
+  absl::StatusOr<FeatureIndex> index = LoadSidecar(binexport, "");
+  ASSERT_THAT(index.status(), IsOk());
+  EXPECT_TRUE(index->empty());
+}
+
+TEST(LoadSidecarTest, ReadsEmbeddingsAndNormalisesThem) {
+  // The vector arrives with whatever magnitude the model produced; the index
+  // stores it unit length so a comparison is a dot product and no consumer has
+  // to remember to divide.
   BinaryMetadata metadata;
   auto* function = metadata.add_functions();
   function->set_address(0x401000);
   auto* feature = function->add_features();
   feature->set_name("asm2vec/v1");
   feature->set_metric(FEATURE_METRIC_COSINE);
-  feature->mutable_vector()->add_values(1.5);
+  for (float value : {3.0f, 4.0f}) {  // norm 5
+    feature->mutable_vector()->add_values(value);
+  }
 
-  const std::string binexport = WriteSidecar("unconsumed-metric", metadata);
+  const std::string binexport = WriteSidecar("embedding", metadata);
   absl::StatusOr<FeatureIndex> index = LoadSidecar(binexport, "");
   ASSERT_THAT(index.status(), IsOk());
-  EXPECT_TRUE(index->empty());
+  EXPECT_TRUE(index->HasVectors("asm2vec/v1"));
+  EXPECT_THAT(index->Dimension("asm2vec/v1"), Eq(2));
+
+  const auto* stored = index->LookupVector("asm2vec/v1", 0x401000);
+  ASSERT_NE(stored, nullptr);
+  EXPECT_NEAR((*stored)[0], 0.6f, 1e-6);
+  EXPECT_NEAR((*stored)[1], 0.8f, 1e-6);
+}
+
+TEST(LoadSidecarTest, DropsAVectorThatCannotBeCompared) {
+  // A width that disagrees with the feature's own, and a vector with no
+  // direction. Both are dropped rather than failing the load: one bad function
+  // should cost one candidate, not the whole sidecar.
+  BinaryMetadata metadata;
+  for (const auto& [address, values] :
+       std::vector<std::pair<Address, std::vector<float>>>{
+           {0x401000, {1.0f, 0.0f}},
+           {0x402000, {1.0f, 0.0f, 0.0f}},  // wrong width
+           {0x403000, {0.0f, 0.0f}},        // no direction
+       }) {
+    auto* function = metadata.add_functions();
+    function->set_address(address);
+    auto* feature = function->add_features();
+    feature->set_name("asm2vec/v1");
+    feature->set_metric(FEATURE_METRIC_COSINE);
+    for (float value : values) {
+      feature->mutable_vector()->add_values(value);
+    }
+  }
+
+  const std::string binexport = WriteSidecar("bad-vectors", metadata);
+  absl::StatusOr<FeatureIndex> index = LoadSidecar(binexport, "");
+  ASSERT_THAT(index.status(), IsOk());
+  EXPECT_THAT(index->Count("asm2vec/v1"), Eq(1));
+  EXPECT_NE(index->LookupVector("asm2vec/v1", 0x401000), nullptr);
+  EXPECT_EQ(index->LookupVector("asm2vec/v1", 0x402000), nullptr);
+  EXPECT_EQ(index->LookupVector("asm2vec/v1", 0x403000), nullptr);
+}
+
+TEST(CosineSimilarityTest, MapsOntoTheSameScaleEveryThresholdUses) {
+  FeatureIndex index;
+  ASSERT_TRUE(index.AddVector("f", 0x1, {1.0f, 0.0f}));
+  ASSERT_TRUE(index.AddVector("f", 0x2, {2.0f, 0.0f}));    // same direction
+  ASSERT_TRUE(index.AddVector("f", 0x3, {0.0f, 1.0f}));    // orthogonal
+  ASSERT_TRUE(index.AddVector("f", 0x4, {-1.0f, 0.0f}));   // opposed
+
+  const auto& a = *index.LookupVector("f", 0x1);
+  EXPECT_NEAR(CosineSimilarity(a, *index.LookupVector("f", 0x2)), 1.0, 1e-6);
+  EXPECT_NEAR(CosineSimilarity(a, *index.LookupVector("f", 0x3)), 0.5, 1e-6);
+  EXPECT_NEAR(CosineSimilarity(a, *index.LookupVector("f", 0x4)), 0.0, 1e-6);
+}
+
+TEST(CosineSimilarityTest, RefusesToComparePrefixesOfDifferentWidths) {
+  // Comparing the overlap of two different embeddings would produce a
+  // confident number about nothing.
+  EXPECT_THAT(CosineSimilarity({1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}), Eq(0.0));
+  EXPECT_THAT(CosineSimilarity({}, {}), Eq(0.0));
 }
 
 TEST(LoadSidecarTest, RejectsAFileThatIsNotASidecar) {

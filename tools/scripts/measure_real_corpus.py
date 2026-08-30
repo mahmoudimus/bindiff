@@ -254,6 +254,8 @@ def write_sidecars(pair: Pair, features: List[str]) -> None:
 
     from bindiff.metadata import sidecar_path_for, write_sidecar
     from bindiff.metadata_binexport import build_sidecar
+    from bindiff.metadata_embedding import (FEATURE_MNEMONIC_HISTOGRAM,
+                                            build_sidecar as build_embedding)
     from bindiff.metadata_ida import merge
 
     for export, ida_metadata in ((pair.primary_export, pair.primary_ida),
@@ -270,7 +272,14 @@ def write_sidecars(pair: Pair, features: List[str]) -> None:
         if "imports/v1" not in features:
             metadata.functions = []
 
-        wanted = [f for f in features if f != "imports/v1"]
+        if FEATURE_MNEMONIC_HISTOGRAM in features:
+            # Produced from the .BinExport like the import sets, but a separate
+            # producer: it walks the whole instruction table, which the import
+            # producer has no reason to pay for.
+            merge(metadata, build_embedding(str(export)))
+
+        wanted = [f for f in features
+                  if f not in ("imports/v1", FEATURE_MNEMONIC_HISTOGRAM)]
         if wanted and ida_metadata is not None:
             # Deep-copied because merge() appends by reference and the captured
             # metadata is reused for every configuration in the run.

@@ -315,6 +315,35 @@ def imports_feature(import_names: Iterable[str],
                    key_set=keys, confidence=confidence)
 
 
+def embedding_feature(name: str, values: Sequence[float],
+                      confidence: float = 1.0) -> Feature:
+    """A dense function embedding, compared by cosine.
+
+    This is how a learned representation enters the engine, which never runs a
+    model: a producer -- a bag of mnemonics, asm2vec, jTrans -- writes vectors
+    here and the C++ side compares them. The model lives in the sidecar
+    producer, which runs in a worker process, so nothing heavy is ever imported
+    inside IDA or linked into the differ.
+
+    The name carries the model *and its version*, because two embeddings are
+    only comparable if they came from the same one. The engine checks that the
+    widths agree, which catches a changed dimension but not a retrained model
+    of the same shape -- that part is the name's job.
+    """
+    values = [float(v) for v in values]
+    if not values:
+        raise ValueError(f"{name!r} embedding is empty")
+    if not any(values):
+        # An all-zero vector has no direction, so it has no cosine to anything.
+        # Rejected here rather than silently dropped on load, because a
+        # producer emitting them is producing nothing and should hear about it.
+        raise ValueError(f"{name!r} embedding has no direction (all zero)")
+    if any(v != v or v in (float("inf"), float("-inf")) for v in values):
+        raise ValueError(f"{name!r} embedding contains a non-finite value")
+    return Feature(name=name, metric=METRIC_COSINE, vector=values,
+                   confidence=confidence)
+
+
 # -- serialisation ---------------------------------------------------------
 
 def _load_pb2():

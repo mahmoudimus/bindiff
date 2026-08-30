@@ -126,10 +126,19 @@ off.
 | `imports/v1` | +149 (40.9% → 49.1%) | 254/266 95% | 8/9 | yes |
 | `prototype/v1` | +48 (→ 43.5%) | 35/38 92% | **9/9** | yes |
 | `frame/v1` | +4 (→ 41.1%) | 78/98 80% | 2/9, hurt 2/9 | **no** |
+| `mnemonic-histogram/v1` | +8 (→ 41.3%) | 286/303 94% | 5/9, hurt 4/9 | **no** |
 
-Together: 40.9% → 51.3%. Order is not cosmetic — imports before prototype is
+Together: 40.9% → **52.0%**. Order is not cosmetic — imports before prototype is
 923 correct, the reverse 907, because the steps run strongest first and an
 earlier one claims a pair the later then cannot.
+
+**Embeddings enter through `COSINE`.** `sidecar.cc` reads `FloatVector` values, normalises them on load so a comparison is a dot product, and `match/function_feature.cc` runs the same mutual-best-match rule the set features use. Candidates come from LSH over signed random projections (`kVectorHashBands` × `kVectorHashBits`, fixed seed) — dense vectors share no discrete keys, so the inverted index the set features use has nothing to key on and the search would be all-pairs. The seed is fixed because a matcher whose answers moved between runs would make every regression test a coin flip.
+
+The threshold is **not** comparable to the Jaccard one and was swept separately: a set feature scores unrelated functions at zero, while a dense embedding returns a number for every pair. At 0.9 the mnemonic histogram ran at 70% precision; at 0.98 it reaches 94%, matching `imports/v1`. `kDefaultVectorThreshold` carries the sweep.
+
+`python/bindiff/metadata_embedding.py` is the baseline producer — a TF-IDF bag of mnemonics, no model, no dependencies. It exists to be beaten: a learned producer (asm2vec, jTrans) replaces that one file and changes nothing else, and now has a number to beat. **PyTorch would live there**, in the headless worker, never in IDA's interpreter and never linked into the differ, which only ever reads floats from a file.
+
+It is not enabled by default: 5 pairs improved and 4 got worse. The split is structural, not noise — it is strong on cross-*version* pairs (151/154, 65/70, 55/59) and weak across optimisation levels, because `-O2` rewrites the instruction mix and a version bump barely touches it. Worth revisiting for a workload that is mostly version-to-version.
 
 **Measure stripped, or do not bother.** The same corpus unstripped says
 `prototype/v1` is worth **+795** and 74.9% recall — because those builds carry

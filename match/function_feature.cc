@@ -14,6 +14,9 @@
 
 #include "third_party/zynamics/bindiff/match/function_feature.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -94,6 +97,106 @@ BestMatch FindBest(const FeatureIndex::KeySet& keys,
   return best;
 }
 
+// One side's embedding candidates.
+struct VectorCandidate {
+  FlowGraph* flow_graph;
+  const FeatureIndex::Vector* values;
+};
+
+std::vector<VectorCandidate> CollectVectorCandidates(
+    const FlowGraphs& flow_graphs, const FeatureIndex& index,
+    absl::string_view feature) {
+  std::vector<VectorCandidate> candidates;
+  for (FlowGraph* flow_graph : flow_graphs) {
+    if (!IsValidCandidate(flow_graph)) {
+      continue;
+    }
+    if (const auto* values =
+            index.LookupVector(feature, flow_graph->GetEntryPointAddress())) {
+      candidates.push_back({flow_graph, values});
+    }
+  }
+  return candidates;
+}
+
+// The random projections both sides hash against.
+//
+// Generated rather than stored, from a fixed seed, so the two sides of a diff
+// always agree without carrying a matrix around -- and so two runs of the same
+// diff produce the same matches. std::mt19937_64 is specified exactly by the
+// standard, which a platform's rand() is not.
+class RandomProjections {
+ public:
+  RandomProjections(int dimension, int planes)
+      : dimension_(dimension), planes_(planes) {
+    std::mt19937_64 generator(kVectorHashSeed);
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    values_.resize(static_cast<size_t>(dimension) * planes);
+    for (float& value : values_) {
+      value = normal(generator);
+    }
+  }
+
+  // The band keys for `vector`: one key per band, each packing that band's
+  // sign bits together with the band index so two bands cannot collide.
+  std::vector<uint64_t> BandKeys(const FeatureIndex::Vector& vector) const {
+    std::vector<uint64_t> keys;
+    keys.reserve(kVectorHashBands);
+    int plane = 0;
+    for (int band = 0; band < kVectorHashBands; ++band) {
+      uint64_t bits = 0;
+      for (int bit = 0; bit < kVectorHashBits; ++bit, ++plane) {
+        const float* row = &values_[static_cast<size_t>(plane) * dimension_];
+        double dot = 0.0;
+        for (int i = 0; i < dimension_; ++i) {
+          dot += static_cast<double>(vector[i]) * row[i];
+        }
+        bits = (bits << 1) | (dot >= 0.0 ? 1u : 0u);
+      }
+      keys.push_back((static_cast<uint64_t>(band) << 56) | bits);
+    }
+    return keys;
+  }
+
+ private:
+  int dimension_;
+  int planes_;
+  std::vector<float> values_;
+};
+
+// Best and runner-up over the candidates that share a band with `vector`.
+BestMatch FindBestVector(
+    const FeatureIndex::Vector& vector,
+    const std::vector<VectorCandidate>& others,
+    const absl::flat_hash_map<uint64_t, std::vector<int>>& postings,
+    const RandomProjections& projections, double threshold) {
+  absl::flat_hash_map<int, bool> seen;
+  BestMatch best;
+  double runner_up = 0.0;
+  for (uint64_t key : projections.BandKeys(vector)) {
+    auto found = postings.find(key);
+    if (found == postings.end()) {
+      continue;
+    }
+    for (int other : found->second) {
+      if (!seen.emplace(other, true).second) {
+        continue;
+      }
+      const double score = CosineSimilarity(vector, *others[other].values);
+      if (score > best.score) {
+        runner_up = best.score;
+        best.score = score;
+        best.index = other;
+      } else if (score > runner_up) {
+        runner_up = score;
+      }
+    }
+  }
+  best.unique = best.index >= 0 && best.score >= threshold &&
+                best.score > runner_up;
+  return best;
+}
+
 }  // namespace
 
 MatchingStepFeature::MatchingStepFeature(std::string feature_name)
@@ -146,10 +249,25 @@ bool MatchingStepFeature::FindFixedPoints(
   }
 
   matching_steps.pop_front();
+
+  if (primary_index->HasVectors(feature_name_) &&
+      secondary_index->HasVectors(feature_name_)) {
+    if (primary_index->Dimension(feature_name_) !=
+        secondary_index->Dimension(feature_name_)) {
+      // Two different models, or two versions of one. Comparing their outputs
+      // would produce confident numbers about nothing; the feature name is
+      // what is supposed to carry the version, so this is a producer error.
+      return false;
+    }
+    return FindNearestVectorFixedPoints(flow_graphs_1, flow_graphs_2, context,
+                                        default_steps);
+  }
+
   if (!primary_index->HasKeySets(feature_name_) ||
       !secondary_index->HasKeySets(feature_name_)) {
-    // One side exact and the other a set: the two are not comparable, and
-    // guessing at a conversion would produce matches nobody could justify.
+    // The two sides are different shapes -- one exact and the other a set, or
+    // a set against an embedding. Guessing at a conversion would produce
+    // matches nobody could justify.
     return false;
   }
   return FindSimilarFixedPoints(flow_graphs_1, flow_graphs_2, context,
@@ -245,6 +363,76 @@ bool MatchingStepFeature::FindSimilarFixedPoints(
     FlowGraph* secondary = right[forward.index].flow_graph;
     // Re-check: an earlier iteration of this same pass may have matched one of
     // them, and CollectCandidates ran before any of that happened.
+    if (primary->GetFixedPoint() || secondary->GetFixedPoint()) {
+      continue;
+    }
+
+    auto [fixed_point_it, inserted] =
+        context.AddFixedPoint(primary, secondary, name());
+    if (!inserted) {
+      continue;
+    }
+    FixedPoint& fixed_point = const_cast<FixedPoint&>(*fixed_point_it);
+    FindFixedPointsBasicBlock(&fixed_point, &context, default_steps);
+    UpdateFixedPointConfidence(fixed_point);
+    fixed_points_discovered = true;
+  }
+  return fixed_points_discovered;
+}
+
+bool MatchingStepFeature::FindNearestVectorFixedPoints(
+    FlowGraphs& flow_graphs_1, FlowGraphs& flow_graphs_2,
+    MatchingContext& context, const MatchingStepsFlowGraph& default_steps) {
+  const std::vector<VectorCandidate> left = CollectVectorCandidates(
+      flow_graphs_1, *context.primary_features(), feature_name_);
+  if (left.empty()) {
+    return false;
+  }
+  const std::vector<VectorCandidate> right = CollectVectorCandidates(
+      flow_graphs_2, *context.secondary_features(), feature_name_);
+  if (right.empty()) {
+    return false;
+  }
+
+  const int dimension = context.primary_features()->Dimension(feature_name_);
+  const RandomProjections projections(dimension,
+                                      kVectorHashBands * kVectorHashBits);
+
+  absl::flat_hash_map<uint64_t, std::vector<int>> right_postings;
+  for (int i = 0; i < static_cast<int>(right.size()); ++i) {
+    for (uint64_t key : projections.BandKeys(*right[i].values)) {
+      right_postings[key].push_back(i);
+    }
+  }
+  absl::flat_hash_map<uint64_t, std::vector<int>> left_postings;
+  for (int i = 0; i < static_cast<int>(left.size()); ++i) {
+    for (uint64_t key : projections.BandKeys(*left[i].values)) {
+      left_postings[key].push_back(i);
+    }
+  }
+
+  bool fixed_points_discovered = false;
+  for (int i = 0; i < static_cast<int>(left.size()); ++i) {
+    const BestMatch forward =
+        FindBestVector(*left[i].values, right, right_postings, projections,
+                       kDefaultVectorThreshold);
+    if (!forward.unique) {
+      continue;
+    }
+    // Mutual best, for the same reason the set features require it: a
+    // one-directional nearest neighbour pairs a function with whatever is
+    // closest to it, and on a binary full of similar wrappers something always
+    // is. An embedding makes that failure more likely, not less -- it returns
+    // a number for every pair, however unrelated.
+    const BestMatch backward =
+        FindBestVector(*right[forward.index].values, left, left_postings,
+                       projections, kDefaultVectorThreshold);
+    if (!backward.unique || backward.index != i) {
+      continue;
+    }
+
+    FlowGraph* primary = left[i].flow_graph;
+    FlowGraph* secondary = right[forward.index].flow_graph;
     if (primary->GetFixedPoint() || secondary->GetFixedPoint()) {
       continue;
     }
