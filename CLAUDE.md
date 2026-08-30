@@ -140,6 +140,46 @@ The threshold is **not** comparable to the Jaccard one and was swept separately:
 
 It is not enabled by default: 5 pairs improved and 4 got worse. The split is structural, not noise — it is strong on cross-*version* pairs (151/154, 65/70, 55/59) and weak across optimisation levels, because `-O2` rewrites the instruction mix and a version bump barely touches it. Worth revisiting for a workload that is mostly version-to-version.
 
+### The learned embedding, and the baseline it did not beat
+
+`python/bindiff/asm2vec.py` is asm2vec's shape — PV-DM over instruction tokens
+from random walks on the CFG — and `tools/scripts/train_asm2vec.py` trains it.
+**PyTorch is imported lazily by the producer alone**: never in IDA's
+interpreter, never linked into the differ, which only reads floats from a file.
+
+**The model must be frozen and shared.** Trained per binary, the two sides of a
+diff land in unrelated spaces where every cosine is meaningless *while still
+landing in [0, 1]* — a trap, not an error. So it trains once over a corpus and
+inference fits only the new binary's function vectors against the fixed tokens.
+That also keeps a sidecar a property of one binary, which the content
+addressing and `executable_id` check depend on. The model file is a zip of JSON
+and a float array, not a torch checkpoint: a checkpoint is a pickle, and
+loading one runs whatever it contains.
+
+Trained on 30 binaries **held out** from the measured programs (6324 functions,
+482 tokens × 100 dimensions, 105s), measured on the nine stripped pairs:
+
+| producer | separation | best precision | correct at 0.98 |
+|---|---|---|---|
+| mnemonic histogram | **0.205** | 94.7% @ 0.98 | **306** |
+| asm2vec | 0.090 | 91.5% @ 0.98 | 172 |
+
+**The learned model loses to a TF-IDF bag of mnemonics**, which is exactly why
+the baseline was built first. Both were diagnosed, not guessed: training loss
+plateaued by epoch 2, and inference separation peaks at 60 steps and *degrades*
+at 150, so neither is under-trained. The embedding simply separates true pairs
+from random ones by 0.09 where the histogram manages 0.205.
+
+What this does *not* say is that asm2vec fails. This is a simplification of it
+(plain walks, no selective callee expansion), on a small corpus, untuned, on
+the hardest case in the set — O0 against O2 dominates the corpus. It says the
+bar is 306 correct at 94.7%, and that a learned producer has to clear it.
+
+`tools/scripts/sweep_embedding_threshold.py` is how both were measured without
+rebuilding: it applies the engine's own mutual-best rule to the vectors. Read
+the **separation** line first — a feature with a small gap cannot be rescued by
+choosing a threshold well.
+
 ### Global assignment, and why it is not a last step
 
 `match/function_neighbour_assignment.{h,cc}` scores each surviving candidate
