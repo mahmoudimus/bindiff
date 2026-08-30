@@ -497,6 +497,38 @@ The handler bounds every socket read (`socket_timeout`, 30s) and the server can 
 
 **`java/`** — Gradle multi-project: `zylib` (shared `gui`, `disassembly`, `io`, `system`, `yfileswrap`) and `ui` (the yFiles visual diff, main class `com.google.security.zynamics.bindiff.BinDiff`). Reads `.BinDiff` files via `sqlite-jdbc` and shells out to IDA to re-export IDBs.
 
+## Releasing
+
+Wheels and the plugin archive go to **GitHub Releases**, not PyPI — this is a
+fork and should not claim the name. `.github/workflows/wheels.yml` builds and
+verifies; `release.yml` calls it on a `v*` tag and publishes.
+
+**hcli installs a plugin's Python dependencies with pip**, and
+`pythonDependencies` in `ida-plugin.json` takes pip-compatible specifications
+with **no field for an index** — so `bindiff==8.0.0` would resolve nowhere.
+`tools/scripts/plugin_dependencies.py` turns the built wheels into PEP 508
+direct references carrying environment markers instead, one per wheel:
+
+    bindiff @ https://.../bindiff-8.0.0-cp313-cp313-macosx_11_0_arm64.whl ;
+        sys_platform == 'darwin' and platform_machine == 'arm64'
+        and python_version == '3.13'
+
+pip evaluates the markers and fetches the one that fits. The property the whole
+approach rests on is that **exactly one applies on any machine** — too few and
+the install fails, too many and pip silently takes whichever was listed first.
+`test_plugin_dependencies.py` asserts it across every platform in the matrix,
+and refuses a wheel set with an overlap.
+
+A PEP 503 index on GitHub Pages would read better for someone running pip by
+hand, but it needs `--extra-index-url` and `pythonDependencies` has nowhere to
+put one, so hcli could not use it.
+
+Run `wheels.yml` from a branch before tagging. **The Cython step has only ever
+run on Linux**: `setup.py` discovers its include paths from
+`compile_commands.json` and its link line by walking the CMake tree for
+archives, and neither has been exercised with MSVC. `fail-fast` is off so one
+platform failing does not hide the rest.
+
 ## Gotchas
 
 **Include convention.** Sources use Google-internal absolute paths — `#include "third_party/zynamics/bindiff/differ.h"`, `"third_party/absl/..."` — even for files sitting next to each other. These resolve through directory symlinks created at configure time into `${BINDIFF_BINARY_DIR}/src_include` and `gen_include`. Match this in new files; generated headers (`bindiff_config.pb.h`, `version.cc`, `config_defaults.h`) are reachable only this way.

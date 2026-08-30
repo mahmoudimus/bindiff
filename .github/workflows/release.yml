@@ -1,0 +1,121 @@
+name: Release
+
+# Publishes a release: the wheels, the IDA plugin archive, and an
+# ida-plugin.json whose pythonDependencies point at the wheels just uploaded.
+#
+# This fork is not on PyPI, deliberately. hcli installs a plugin's Python
+# dependencies with pip and has no field for an index, so each wheel is listed
+# as a PEP 508 direct reference guarded by an environment marker -- exactly one
+# resolves on any given machine. tools/scripts/plugin_dependencies.py builds
+# that list and is covered by python/tests/test_plugin_dependencies.py.
+#
+# Run build-wheels from a branch before tagging anything. A release should not
+# be the first execution of a build.
+
+on:
+    push:
+        tags:
+            - "v*"
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Tag to release (must already exist)"
+                required: true
+                type: string
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: false
+
+permissions:
+    contents: write
+
+jobs:
+    # Reuses the wheel build rather than restating it, so the artifacts a
+    # release ships are produced by the workflow that was tested from a branch.
+    wheels:
+        uses: ./.github/workflows/wheels.yml
+
+    publish:
+        needs: wheels
+        runs-on: ubuntu-24.04
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  persist-credentials: false
+
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.13"
+
+            - name: Collect the wheels
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: wheel-*
+                  path: staged
+                  merge-multiple: true
+
+            - name: Resolve the tag
+              id: release
+              shell: bash
+              run: |
+                  tag="${{ inputs.tag || github.ref_name }}"
+                  echo "tag=$tag" >> "$GITHUB_OUTPUT"
+                  echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+            # The version in the tag and the version the package declares must
+            # agree, or the release ships wheels whose filenames contradict the
+            # tag they hang under.
+            - name: Check the tag matches the package version
+              shell: bash
+              run: |
+                  declared=$(python -c "import re,pathlib; \
+                    print(re.search(r'__version__ = \"([^\"]+)\"', \
+                    pathlib.Path('python/bindiff/__init__.py').read_text()).group(1))")
+                  if [ "$declared" != "${{ steps.release.outputs.version }}" ]; then
+                    echo "::error::tag ${{ steps.release.outputs.tag }} declares \
+                          ${{ steps.release.outputs.version }} but the package says $declared"
+                    exit 1
+                  fi
+                  echo "version $declared matches the tag"
+
+            - name: Point ida-plugin.json at the wheels
+              shell: bash
+              run: |
+                  python -m pip install --disable-pip-version-check packaging
+                  python tools/scripts/plugin_dependencies.py \
+                    --wheels staged \
+                    --repo "${{ github.repository }}" \
+                    --tag "${{ steps.release.outputs.tag }}" \
+                    --write ida-plugin.json
+                  echo "--- pythonDependencies ---"
+                  python -c "import json; print(json.dumps( \
+                    json.load(open('ida-plugin.json'))['plugin']['pythonDependencies'], \
+                    indent=2))"
+
+            # What hcli installs: the plugin sources plus the manifest that now
+            # names the wheels. The wheels themselves are separate assets, so
+            # the archive stays small and pip fetches only the one that fits.
+            - name: Build the plugin archive
+              shell: bash
+              run: |
+                  staging=plugin/bindiff
+                  mkdir -p "$staging"
+                  cp ida-plugin.json README.md LICENSE "$staging/" 2>/dev/null || true
+                  mkdir -p "$staging/python"
+                  cp -r python/ida_plugin "$staging/python/"
+                  (cd plugin && zip -qr \
+                    "../bindiff-plugin-${{ steps.release.outputs.tag }}.zip" bindiff)
+                  ls -lh bindiff-plugin-*.zip
+
+            - name: Publish
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ steps.release.outputs.tag }}
+                  fail_on_unmatched_files: true
+                  generate_release_notes: true
+                  files: |
+                      staged/*.whl
+                      bindiff-plugin-*.zip
+                      ida-plugin.json

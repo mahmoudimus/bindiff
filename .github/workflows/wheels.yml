@@ -1,0 +1,201 @@
+name: Build wheels
+
+# Builds installable wheels for the Python bindings and the IDA plugin, on
+# every platform they are meant to run on. Publishes nothing.
+#
+# Separate from release.yml on purpose: a release should never be the first
+# time this build has executed. The Cython step has only ever run on Linux --
+# setup.py discovers its include paths from compile_commands.json and its link
+# line by walking the CMake tree for archives, and neither has been exercised
+# with MSVC. Run this from a branch first and read the artifacts.
+#
+# The wheels are self-hosted rather than published to PyPI, so
+# tools/scripts/plugin_dependencies.py turns them into PEP 508 direct
+# references for ida-plugin.json. See that file for why an index would not
+# work with hcli.
+
+on:
+    # Called by release.yml, so a release ships artifacts built by the same
+    # workflow that was exercised from a branch first.
+    workflow_call:
+    workflow_dispatch:
+        inputs:
+            platforms:
+                description: "Which platforms to build"
+                required: false
+                default: "all"
+                type: choice
+                options: ["all", "linux", "macos", "windows"]
+    pull_request:
+        types: [synchronize, opened, reopened, ready_for_review]
+        paths:
+            - "python/**"
+            - "CMakeLists.txt"
+            - ".github/workflows/wheels.yml"
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+env:
+    BUILD_TYPE: Release
+
+jobs:
+    build:
+        name: ${{ matrix.name }} py${{ matrix.python }}
+        runs-on: ${{ matrix.runs-on }}
+        strategy:
+            # One platform failing must not hide the others: the point of this
+            # workflow is to find out which ones work.
+            fail-fast: false
+            matrix:
+                python: ["3.13"]
+                include:
+                    - name: linux-x86_64
+                      runs-on: ubuntu-24.04
+                      family: linux
+                    - name: linux-aarch64
+                      runs-on: ubuntu-24.04-arm
+                      family: linux
+                    - name: macos-arm64
+                      runs-on: macos-15
+                      family: macos
+                    - name: windows-x86_64
+                      runs-on: windows-2025
+                      family: windows
+        steps:
+            - name: Skip unselected platform
+              id: gate
+              shell: bash
+              run: |
+                  want="${{ inputs.platforms || 'all' }}"
+                  if [ "$want" = "all" ] || [ "$want" = "${{ matrix.family }}" ]; then
+                    echo "run=yes" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "run=no" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - uses: actions/checkout@v4
+              if: steps.gate.outputs.run == 'yes'
+              with:
+                  persist-credentials: false
+
+            - name: Checkout BinExport
+              if: steps.gate.outputs.run == 'yes'
+              uses: actions/checkout@v4
+              with:
+                  repository: google/binexport
+                  path: build/binexport
+                  persist-credentials: false
+
+            - name: Set up MSVC
+              if: steps.gate.outputs.run == 'yes' && runner.os == 'Windows'
+              uses: ilammy/msvc-dev-cmd@v1
+              with:
+                  arch: x64
+
+            - name: Install CMake and Ninja
+              if: steps.gate.outputs.run == 'yes'
+              uses: lukka/get-cmake@latest
+              with:
+                  cmakeVersion: "~4.4.0"
+                  ninjaVersion: "~1.13.1"
+
+            - name: Set up Python ${{ matrix.python }}
+              if: steps.gate.outputs.run == 'yes'
+              uses: actions/setup-python@v5
+              with:
+                  python-version: ${{ matrix.python }}
+
+            # CMAKE_EXPORT_COMPILE_COMMANDS is what setup.py reads its include
+            # paths from, so a build without it falls back to a hardcoded list
+            # that has gone stale before. Testing is off: the wheel does not
+            # need the test binaries and they are a large part of the build.
+            - name: Configure and build the engine
+              if: steps.gate.outputs.run == 'yes'
+              working-directory: build
+              shell: bash
+              run: |
+                  cmake "${GITHUB_WORKSPACE}" -G Ninja \
+                    "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}" \
+                    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" \
+                    "-DBINDIFF_BINEXPORT_DIR=${GITHUB_WORKSPACE}/build/binexport" \
+                    "-DBINEXPORT_ENABLE_IDAPRO=OFF"
+                  cmake --build . --config "${BUILD_TYPE}"
+
+            - name: Install build tooling
+              if: steps.gate.outputs.run == 'yes'
+              shell: bash
+              run: python -m pip install --disable-pip-version-check
+                   build wheel "Cython>=3.0" setuptools protobuf
+
+            - name: Build the wheel
+              if: steps.gate.outputs.run == 'yes'
+              working-directory: python
+              shell: bash
+              env:
+                  BINDIFF_BUILD_DIR: ${{ github.workspace }}/build
+                  BINDIFF_BINEXPORT_DIR: ${{ github.workspace }}/build/binexport
+              run: python -m pip wheel . --no-deps --no-build-isolation -w ../dist
+
+            # A bare linux_* wheel refuses to install anywhere but the machine
+            # that built it; auditwheel rewrites the tag and vendors libstdc++.
+            # macOS needs the same treatment from delocate. Windows links the
+            # runtime statically and needs neither.
+            - name: Make the wheel portable (Linux)
+              if: steps.gate.outputs.run == 'yes' && runner.os == 'Linux'
+              shell: bash
+              run: |
+                  python -m pip install --disable-pip-version-check auditwheel
+                  mkdir -p wheelhouse
+                  for whl in dist/*.whl; do
+                    auditwheel repair "$whl" -w wheelhouse || {
+                      echo "::warning::auditwheel could not repair $whl; \
+                            keeping the unrepaired wheel"
+                      cp "$whl" wheelhouse/
+                    }
+                  done
+
+            - name: Make the wheel portable (macOS)
+              if: steps.gate.outputs.run == 'yes' && runner.os == 'macOS'
+              shell: bash
+              run: |
+                  python -m pip install --disable-pip-version-check delocate
+                  mkdir -p wheelhouse
+                  delocate-wheel -w wheelhouse -v dist/*.whl || cp dist/*.whl wheelhouse/
+
+            - name: Keep the wheel as built (Windows)
+              if: steps.gate.outputs.run == 'yes' && runner.os == 'Windows'
+              shell: bash
+              run: mkdir -p wheelhouse && cp dist/*.whl wheelhouse/
+
+            # Installing it and importing from somewhere else entirely is the
+            # only check that matters: a wheel that builds but ships no
+            # extension, or ships one that cannot load, looks fine until this.
+            - name: Install it and use it
+              if: steps.gate.outputs.run == 'yes'
+              shell: bash
+              run: |
+                  python -m venv /tmp/verify || python -m venv "$RUNNER_TEMP/verify"
+                  venv="/tmp/verify"; [ -d "$venv" ] || venv="$RUNNER_TEMP/verify"
+                  bin="$venv/bin"; [ -d "$bin" ] || bin="$venv/Scripts"
+                  "$bin/python" -m pip install --disable-pip-version-check wheelhouse/*.whl
+                  cd "$HOME"
+                  "$bin/python" -c "
+                  import bindiff, ida_plugin.diff_runner
+                  from bindiff._pb import binexport2_pb2
+                  print('bindiff', bindiff.__version__, 'from', bindiff.__file__)
+                  print('extension callable:', callable(bindiff.diff))
+                  print('protobuf bindings:', binexport2_pb2.BinExport2 is not None)
+                  "
+
+            - name: Upload
+              if: steps.gate.outputs.run == 'yes'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: wheel-${{ matrix.name }}-py${{ matrix.python }}
+                  path: wheelhouse/*.whl
+                  if-no-files-found: error
