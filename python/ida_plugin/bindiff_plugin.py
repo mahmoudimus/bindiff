@@ -652,73 +652,60 @@ if IDA_AVAILABLE:
 
         def _run_diff_async(self, primary: str, secondary: str,
                             output: str) -> None:
+            """Wires the real collaborators into DiffRun and starts it.
+
+            The sequence itself lives in ida_plugin.diff_runner, which has no
+            Qt and no IDA in it, so the harness can drive it. What is left here
+            is only the wiring: the panel, the marshal to the UI thread, and
+            the thread.
+            """
+            import functools
             import threading
 
             from bindiff.headless import run_headless
+            from ida_plugin.diff_runner import (DEFAULT_TIMEOUT_SECONDS,
+                                                DiffRun, panel_title,
+                                                worker_arguments)
             from ida_plugin.panels import DiffProgressForm
-            from ida_plugin.ui_logic import DiffProgress
 
             cancel = threading.Event()
-            form = DiffProgressForm(f"BinDiff - diffing {Path(primary).name}",
-                                    on_cancel=cancel.set)
+            form = DiffProgressForm(panel_title(primary), on_cancel=cancel.set)
             form.Show()
 
-            def on_progress(record: dict) -> None:
-                # Runs on the worker thread, where neither Qt nor IDA may be
-                # touched. execute_sync hands it to the UI thread and blocks
-                # until it has run, which also keeps a fast worker from
-                # queueing up more repaints than the UI can draw.
-                progress = DiffProgress.from_record(record)
-
-                def show():
-                    form.update_progress(progress)
+            def post(action, flags) -> None:
+                # Touching Qt or IDA from the worker thread is not safe.
+                # execute_sync hands the call to the UI thread and blocks until
+                # it has run. It wants an int back, which the actions do not
+                # return.
+                def wrapped() -> int:
+                    action()
                     return 1
 
-                ida_kernwin.execute_sync(show, ida_kernwin.MFF_FAST)
+                ida_kernwin.execute_sync(wrapped, flags)
 
-            def work():
-                result = run_headless(
-                    ["pipeline", primary, secondary, output], timeout=3600,
-                    on_progress=on_progress, cancel=cancel)
+            def load(path: str) -> None:
+                self.controller.open_database(path)
+                self._show_matches()
 
-                def finish():
-                    # The launcher keeps going when a progress handler throws,
-                    # rather than losing a finished diff to a drawing bug, and
-                    # leaves the reason here. Silence would make it look like
-                    # the worker simply stopped reporting.
-                    broken = result.details.get("progress_error")
-                    if broken:
-                        self._report(f"progress reporting stopped: {broken}")
-                    cancelled = bool(result.details.get("cancelled"))
-                    if not result.ok:
-                        # A cancel that arrived during an export has no result
-                        # to show, and is not a failure to warn about.
-                        form.finish("cancelled" if cancelled
-                                    else f"failed: {result.message}")
-                        if cancelled:
-                            self._report("diff cancelled")
-                        else:
-                            ida_kernwin.warning(
-                                f"Diff failed:\n{result.message}")
-                        return 1
-                    # A cancelled diff still wrote what it matched. The steps
-                    # run strongest first, so those are the matches worth
-                    # having -- it is opened like any other result, labelled
-                    # so nobody reads it as the whole picture.
-                    label = "partial" if cancelled else "complete"
-                    form.finish(f"{result.matches} matches ({label})")
-                    self.controller.open_database(output)
-                    self._report(
-                        f"diff {label}: {result.matches} matches")
-                    self._show_matches()
-                    return 1
+            run = DiffRun(
+                runner=functools.partial(run_headless,
+                                         timeout=DEFAULT_TIMEOUT_SECONDS),
+                panel=form,
+                # Progress repaints must not queue behind a database lock the
+                # user's own analysis is holding; the single final call loads a
+                # file and opens windows, so it takes the stronger flag.
+                post_progress=functools.partial(
+                    post, flags=ida_kernwin.MFF_FAST),
+                post_result=functools.partial(
+                    post, flags=ida_kernwin.MFF_WRITE),
+                report=self._report,
+                warn=ida_kernwin.warning, load=load)
 
-                # Touching IDA from a worker thread is not safe; hand the
-                # result back to the UI thread.
-                ida_kernwin.execute_sync(finish,
-                                         ida_kernwin.MFF_WRITE)
-
-            threading.Thread(target=work, daemon=True).start()
+            threading.Thread(
+                target=run.execute,
+                args=(worker_arguments(primary, secondary, output), output,
+                      cancel),
+                daemon=True).start()
 
         def _load_results(self) -> None:
             path = _ask_for_database()
