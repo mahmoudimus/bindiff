@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bindiff"
 version = "8.0.0"
-description = "Python interface for BinDiff binary diffing engine"
+description = "Python bindings to the BinDiff engine, plus an IDA plugin"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "Apache-2.0"}
@@ -35,7 +35,10 @@ classifiers = [
     "Topic :: Software Development :: Disassemblers",
 ]
 
-dependencies = []
+# protobuf is genuinely required, not optional: bindiff.binexport and
+# bindiff.metadata parse .BinExport files and metadata sidecars with it. Only
+# the compiled extension needs nothing.
+dependencies = ["protobuf>=4.25"]
 
 [project.optional-dependencies]
 dev = [
@@ -49,17 +52,28 @@ ui = [
     "PySide6>=6.0",
 ]
 
+# Only the sidecar producers learn anything; the differ never runs a model.
+# Optional so that installing the package does not pull several hundred
+# megabytes nobody asked for.
+embeddings = [
+    "torch>=2.0",
+]
+
 [project.urls]
-Homepage = "https://github.com/google/bindiff"
-Documentation = "https://github.com/google/bindiff"
-Repository = "https://github.com/google/bindiff"
-Issues = "https://github.com/google/bindiff/issues"
+Homepage = "https://github.com/mahmoudimus/bindiff"
+Repository = "https://github.com/mahmoudimus/bindiff"
+Issues = "https://github.com/mahmoudimus/bindiff/issues"
 
 [tool.setuptools]
-packages = ["bindiff"]
+# bindiff._pb holds the generated protobuf bindings, which are built rather
+# than checked in, so they are not found by package discovery. ida_plugin is
+# the IDA-side UI: the plugin imports it, and shipping one without the other
+# leaves a plugin that cannot start.
+packages = ["bindiff", "bindiff._pb", "ida_plugin"]
 
 [tool.setuptools.package-data]
 bindiff = ["*.pxd", "*.pyx"]
+"bindiff._pb" = ["*.py", "*.pyi"]
 
 [tool.black]
 line-length = 88
