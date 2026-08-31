@@ -1,6 +1,6 @@
 """Tests for the ida-plugin.json dependency generator.
 
-This fork is not on PyPI, so `bindiff==8.0.0` resolves nowhere. hcli hands
+This fork is not on PyPI, so `bindiff-ng==8.1.0` resolves nowhere. hcli hands
 `pythonDependencies` to pip and offers no way to name an index, so each wheel
 is listed as a PEP 508 direct reference guarded by an environment marker.
 
@@ -31,18 +31,19 @@ marker_for = plugin_dependencies.marker_for
 parse_wheel = plugin_dependencies.parse_wheel
 
 REPO = "mahmoudimus/bindiff-ng"
-TAG = "v8.0.0"
+TAG = "v8.1.0"
 
-# One release's worth, copied from what the workflow actually produced in run
-# 33338830380 / 33350791815 rather than from what seemed likely. Two of these
+# One release's worth. The platform tags are copied from what the workflow
+# actually produced in run 33352286800 rather than from what seemed likely;
+# the distribution is bindiff-ng, so a wheel filename spells it bindiff_ng. Two of these
 # differ from the obvious guess: macOS builds a single universal2 wheel rather
 # than one per architecture, and auditwheel tags the Linux wheels for the
 # glibc of the runner that built them.
 WHEELS = [
-    "bindiff-8.0.0-cp313-cp313-manylinux_2_39_x86_64.whl",
-    "bindiff-8.0.0-cp313-cp313-manylinux_2_39_aarch64.whl",
-    "bindiff-8.0.0-cp313-cp313-macosx_10_15_universal2.whl",
-    "bindiff-8.0.0-cp313-cp313-win_amd64.whl",
+    "bindiff_ng-8.1.0-cp313-cp313-manylinux_2_39_x86_64.whl",
+    "bindiff_ng-8.1.0-cp313-cp313-manylinux_2_39_aarch64.whl",
+    "bindiff_ng-8.1.0-cp313-cp313-macosx_10_15_universal2.whl",
+    "bindiff_ng-8.1.0-cp313-cp313-win_amd64.whl",
 ]
 
 
@@ -64,9 +65,9 @@ def environment(sys_platform, machine, python="3.13") -> dict:
 
 class TestWheelParsing:
     def test_reads_the_tags(self):
-        parsed = parse_wheel("bindiff-8.0.0-cp313-cp313-win_amd64.whl")
-        assert parsed["name"] == "bindiff"
-        assert parsed["version"] == "8.0.0"
+        parsed = parse_wheel("bindiff_ng-8.1.0-cp313-cp313-win_amd64.whl")
+        assert parsed["name"] == "bindiff_ng"
+        assert parsed["version"] == "8.1.0"
         assert parsed["python"] == "cp313"
         assert parsed["platform"] == "win_amd64"
 
@@ -82,7 +83,7 @@ class TestWheelParsing:
 
     def test_rejects_something_that_is_not_a_wheel(self):
         with pytest.raises(Unsupported):
-            parse_wheel("bindiff-8.0.0.tar.gz")
+            parse_wheel("bindiff_ng-8.1.0.tar.gz")
 
 
 class TestMarkers:
@@ -122,7 +123,7 @@ class TestDependencies:
         specs = dependencies_for(WHEELS, REPO, TAG)
         assert len(specs) == len(WHEELS)
         for spec in specs:
-            assert spec.startswith("bindiff @ https://github.com/"), spec
+            assert spec.startswith("bindiff-ng @ https://github.com/"), spec
             assert f"/releases/download/{TAG}/" in spec
 
     @pytest.mark.parametrize("platform,machine,expected", [
@@ -162,7 +163,7 @@ class TestDependencies:
         """pip would silently take the first. On a matrix that grew a
         duplicate, that is not the one anybody chose."""
         duplicated = WHEELS + [
-            "bindiff-8.0.0-cp313-cp313-manylinux_2_34_x86_64.whl"]
+            "bindiff_ng-8.1.0-cp313-cp313-manylinux_2_34_x86_64.whl"]
         with pytest.raises(Unsupported, match="same environment"):
             check_unambiguous(dependencies_for(duplicated, REPO, TAG))
 
@@ -173,7 +174,7 @@ class TestDependencies:
         Mac. An earlier version of this check compared marker strings and let
         that through."""
         overlapping = WHEELS + [
-            "bindiff-8.0.0-cp313-cp313-macosx_11_0_arm64.whl"]
+            "bindiff_ng-8.1.0-cp313-cp313-macosx_11_0_arm64.whl"]
         specs = dependencies_for(overlapping, REPO, TAG)
         markers = {str(__import__("packaging.requirements", fromlist=["x"])
                        .Requirement(s).marker) for s in specs}

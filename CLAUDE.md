@@ -505,11 +505,11 @@ verifies; `release.yml` calls it on a `v*` tag and publishes.
 
 **hcli installs a plugin's Python dependencies with pip**, and
 `pythonDependencies` in `ida-plugin.json` takes pip-compatible specifications
-with **no field for an index** — so `bindiff==8.0.0` would resolve nowhere.
+with **no field for an index** — so `bindiff-ng==8.1.0` would resolve nowhere.
 `tools/scripts/plugin_dependencies.py` turns the built wheels into PEP 508
 direct references carrying environment markers instead, one per wheel:
 
-    bindiff @ https://.../bindiff-8.0.0-cp313-cp313-macosx_11_0_arm64.whl ;
+    bindiff-ng @ https://.../bindiff_ng-8.1.0-cp313-cp313-macosx_10_15_universal2.whl ;
         sys_platform == 'darwin' and platform_machine == 'arm64'
         and python_version == '3.13'
 

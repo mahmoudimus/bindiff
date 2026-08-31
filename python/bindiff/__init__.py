@@ -24,7 +24,12 @@ Example:
     ...     print(f"  {match.primary_name} -> {match.secondary_name}")
 """
 
-__version__ = "8.0.0"
+# The fork's own line. The major tracks the upstream engine generation --
+# this is built on google/bindiff v8 -- and the minor is this fork's, so 8.1.0
+# is "the v8 engine, first release of this fork". Upstream published v8 and
+# never an 8.1, so the two cannot collide; the distribution is named
+# bindiff-ng for the same reason, while the import name stays bindiff.
+__version__ = "8.1.0"
 
 from .core import (
     diff,

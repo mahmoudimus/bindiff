@@ -3,14 +3,14 @@
 
 hcli installs a plugin's Python dependencies with pip, and the field it reads
 takes pip-compatible specifications with no way to name an index. This fork is
-not on PyPI, so `bindiff==8.0.0` would not resolve for anyone.
+not on PyPI, so `bindiff-ng==8.1.0` would not resolve for anyone.
 
 PEP 508 direct references solve it: a specification may carry a URL *and* an
 environment marker, so one entry per wheel, each guarded by the platform and
 Python version it was built for, resolves to exactly one candidate on any
 machine. pip evaluates the markers and downloads that one.
 
-    tools/scripts/plugin_dependencies.py --wheels dist/ --tag v8.0.0 \\
+    tools/scripts/plugin_dependencies.py --wheels dist/ --tag v8.1.0 \\
         --repo mahmoudimus/bindiff-ng --write ida-plugin.json
 
 Without --write it prints the list, which is what the tests use.

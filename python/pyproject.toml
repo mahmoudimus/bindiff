@@ -7,14 +7,21 @@ requires = [
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "bindiff"
-version = "8.0.0"
+name = "bindiff-ng"
+version = "8.1.0"
 description = "Python bindings to the BinDiff engine, plus an IDA plugin"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "Apache-2.0"}
+# Google wrote BinDiff and holds the copyright on the engine this builds
+# against; the fork and its bindings are maintained separately. Splitting the
+# two fields says that, where a single authors list would have claimed one or
+# misattributed the other.
 authors = [
     {name = "Google LLC"}
+]
+maintainers = [
+    {name = "Mahmoud Abdelkader", email = "mabdelkader@gmail.com"}
 ]
 keywords = ["binary", "diff", "reverse-engineering", "malware-analysis"]
 classifiers = [

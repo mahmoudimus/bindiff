@@ -117,7 +117,7 @@ ln -s /path/to/bindiff/python/bindiff ~/.idapro/python/
 1. Start IDA Pro
 2. Check the Output window for:
    ```
-   BinDiff 8.0.0 initialized
+   BinDiff-NG 8.1.0 initialized
    ```
 3. Press `Ctrl+6` or go to `Edit` → `Plugins` → `BinDiff`
 
