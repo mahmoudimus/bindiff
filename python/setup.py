@@ -283,8 +283,22 @@ link_objects = [_archives[name] for name in _priority if name in _archives]
 link_objects += [path for name, path in sorted(_archives.items())
                  if name not in _priority]
 
-# setup.py resolves these itself, so nothing is left for -l to find.
-libraries = []
+# The archives are linked by full path above, so nothing is left for -l.
+#
+# Windows is the exception. CMake passes a default set of system import
+# libraries when *it* links (CMAKE_CXX_STANDARD_LIBRARIES) and setuptools does
+# not, so binexport_shared's calls into the shell and path APIs arrive
+# unresolved: SHCreateDirectoryExA and SHGetFolderPathA from shell32,
+# PathCanonicalizeA, PathFileExistsA and PathIsRelativeA from shlwapi. That is
+# why the engine links under CMake and the extension did not.
+#
+# shlwapi is the one BinExport names for itself; the rest are CMake's own
+# defaults, listed so a future call into another of them does not send someone
+# back around this loop.
+libraries = ([
+    "shlwapi", "shell32", "kernel32", "user32", "advapi32",
+    "ole32", "oleaut32", "uuid",
+] if OSTYPE == "Windows" else [])
 
 if os.environ.get("VERBOSE_BUILD"):
     print(f"Linking {len(link_objects)} static archives:")
