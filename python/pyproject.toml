@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bindiff-ng"
-version = "8.1.3"
+version = "8.1.4"
 description = "Python bindings to the BinDiff engine, plus an IDA plugin"
 readme = "README.md"
 # The stable ABI floor: one wheel per platform covers 3.10 upward.
