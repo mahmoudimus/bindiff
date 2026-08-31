@@ -47,6 +47,9 @@ jobs:
     build:
         name: ${{ matrix.name }} py${{ matrix.python }}
         runs-on: ${{ matrix.runs-on }}
+        # Nothing here legitimately takes this long; the default is six hours,
+        # and a hang has already burned two runs' worth of Windows minutes.
+        timeout-minutes: 45
         strategy:
             # One platform failing must not hide the others: the point of this
             # workflow is to find out which ones work.
@@ -166,6 +169,32 @@ jobs:
                   "$protoc" --proto_path="${GITHUB_WORKSPACE}" \
                     --python_out=python/bindiff/_pb bindiff_metadata.proto
                   ls -l python/bindiff/_pb
+
+            # Which half is slow, measured rather than assumed. The wheel step
+            # takes under twenty seconds on Linux and macOS and hung for over
+            # an hour on Windows; the directory walk and the compile are
+            # separate suspects and this separates them.
+            - name: Time the build-tree scan
+              if: steps.gate.outputs.run == 'yes'
+              working-directory: python
+              shell: bash
+              env:
+                  BINDIFF_BUILD_DIR: ${{ github.workspace }}/build
+              run: |
+                  python - <<'SCAN'
+                  import os, time
+                  src = open("setup.py").read()
+                  start = src.index("_PRUNED_DIRS = {")
+                  end = src.index("library_dirs = [str(BUILD_DIR)]")
+                  ns = {"os": os}
+                  exec(src[start:end], ns)
+                  build = os.environ["BINDIFF_BUILD_DIR"]
+                  t0 = time.time()
+                  dirs = ns["_archive_dirs"](build)
+                  print(f"scan: {len(dirs)} archive dirs in {time.time()-t0:.1f}s")
+                  total = sum(len(f) for _, _, f in os.walk(build))
+                  print(f"tree: {total} files under {build}")
+                  SCAN
 
             - name: Build the wheel
               if: steps.gate.outputs.run == 'yes'
