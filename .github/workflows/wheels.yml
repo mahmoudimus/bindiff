@@ -33,8 +33,14 @@ on:
             - "CMakeLists.txt"
             - ".github/workflows/wheels.yml"
 
+# Prefixed rather than keyed on github.workflow alone: in a called workflow
+# that expression resolves to the *caller's* name, so on a release this would
+# compute the same group as release.yml -- the caller holding the group while
+# waiting for the callee that is queued behind it, and with the two disagreeing
+# about cancel-in-progress. Not something measured here; release.yml has never
+# run. The prefix costs nothing and removes the question.
 concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
+    group: wheels-${{ github.workflow }}-${{ github.ref }}
     cancel-in-progress: true
 
 permissions:
