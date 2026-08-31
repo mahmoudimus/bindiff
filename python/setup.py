@@ -292,10 +292,19 @@ if os.environ.get("VERBOSE_BUILD"):
         print(f"  - {obj}")
 
 
+# The C++ standard, spelled for the compiler in hand. MSVC does not accept the
+# GNU form and does not reject it either -- it warns D9002, ignores the flag,
+# and compiles at its default standard, at which point Abseil's own
+# policy_checks.h stops the build with "C++ versions less than C++17 are not
+# supported". A silently ignored flag is why this looked like an Abseil problem
+# rather than a spelling one.
+CXX_STANDARD = ["/std:c++20"] if OSTYPE == "Windows" else ["-std=c++20"]
+
+
 def compile_args(debug_mode=False):
     """Return platform-specific compilation arguments."""
     debug_flags = []
-    base_args = ["-std=c++20"]  # must match the C++ standard BinDiff builds with
+    base_args = list(CXX_STANDARD)  # must match what BinDiff itself builds with
 
     if OSTYPE == "Windows":
         if debug_mode:
