@@ -537,4 +537,15 @@ platform failing does not hide the rest.
 
 **Configure order matters.** `include(BinDiffOptions)` must stay above `add_subdirectory(binexport)` — it forces `BINEXPORT_BUILD_TESTING`, which is what makes BinExport request GoogleTest and Abseil's testing targets. `ABSL_FIND_GOOGLETEST` is forced OFF for the same reason: Abseil defaults it ON and would look for an *installed* GoogleTest instead of aliasing the one BinExport just built — which fails anywhere without a system GoogleTest, and silently links a second unrelated copy anywhere with one.
 
+**LTO makes the archives compiler-specific.** `BINDIFF_ENABLE_IPO` is on by
+default, so the `.a` files hold LLVM bitcode rather than machine code (`file`
+says "LLVM bitcode, wrapper") and only an LLVM at least as new as the producer
+can read them back. setuptools does not use CMake's compiler -- it uses the one
+the *interpreter* was built with, from `sysconfig` -- so a pyenv Python built
+against Homebrew llvm cannot link archives Apple clang produced, and says so
+once per object file. `setup.py` warns and prints the fix; the alternatives are
+matching `CC`/`CXX`/`LDSHARED`/`LDCXXSHARED` to CMake's compiler or
+`-DBINDIFF_ENABLE_IPO=OFF`. This is the same hazard as the mold+LTO duplicate
+symbols above: LTO changes what an archive *is*, and nothing else warns.
+
 C++ style is `.clang-format` (Google, `PointerAlignment: Left`), C++20.

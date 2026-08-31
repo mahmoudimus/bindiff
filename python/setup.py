@@ -26,7 +26,9 @@ import os
 import platform
 import re
 import shlex
+import shutil
 import sys
+import sysconfig
 from pathlib import Path
 from setuptools import setup, Extension
 from Cython.Build import cythonize
@@ -57,6 +59,85 @@ if not BUILD_DIR.exists():
     print("  cmake .. -DBINDIFF_BUILD_TESTING=OFF")
     print("  cmake --build .")
     sys.exit(1)
+
+def _warn_if_archives_need_another_compiler(build_dir):
+    """Link-time optimisation makes the archives readable by one compiler only.
+
+    With BINDIFF_ENABLE_IPO on -- the default -- CMake stores LLVM IR in the
+    .a files rather than machine code; `file` reports "LLVM bitcode, wrapper".
+    IR is a versioned format, so only an LLVM at least as new as the one that
+    produced it can parse it back.
+
+    setuptools does not use the compiler CMake used. It uses the one the
+    interpreter itself was built with, recorded in sysconfig -- which for a
+    pyenv Python on macOS is typically Homebrew's llvm, while CMake picks
+    Apple clang from the Command Line Tools. The link then fails with one
+    "could not parse bitcode object file" per object file, naming two LLVM
+    versions and nothing about what to do.
+
+    Warned rather than refused: comparing two compilers reliably is guesswork
+    -- a bare `g++` on PATH, an /etc/alternatives symlink, a wrapper script --
+    and a false positive that blocked a working build would be worse than the
+    trap it guards. CI matches by construction and never sees this.
+    """
+    if os.name == "nt":  # MSVC has no bitcode archives.
+        return
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.exists():
+        return
+
+    settings = {}
+    for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith(("BINDIFF_ENABLE_IPO:", "CMAKE_CXX_COMPILER:")):
+            key, _, value = line.partition("=")
+            settings[key.split(":")[0]] = value.strip()
+
+    if settings.get("BINDIFF_ENABLE_IPO", "").upper() != "ON":
+        return
+    cmake_cxx = settings.get("CMAKE_CXX_COMPILER", "")
+    # The environment wins, because distutils lets it: a caller who has
+    # already pointed CXX at the right compiler must not be warned that they
+    # have not. sysconfig is only the fallback, and is what makes this fire in
+    # the first place -- it records the compiler the interpreter was built
+    # with, which nobody chose for this purpose.
+    ours = os.environ.get("CXX") or sysconfig.get_config_var("CXX") or ""
+    # sysconfig records the compiler with its flags; the program is the first
+    # word. A bare name is resolved against PATH so the two are comparable.
+    ours = ours.split()[0] if ours else ""
+    if not cmake_cxx or not ours:
+        return
+
+    def real(program):
+        found = program if Path(program).is_absolute() else (
+            shutil.which(program) or program)
+        try:
+            return Path(found).resolve()
+        except OSError:
+            return Path(found)
+
+    if real(cmake_cxx) == real(ours):
+        return
+
+    print(
+        "\nWARNING: the CMake build has link-time optimisation on, so its\n"
+        "archives hold LLVM bitcode that only the compiler which produced\n"
+        "them can read -- but this interpreter links extensions with a\n"
+        "different one:\n"
+        f"    CMake built the archives with : {cmake_cxx}\n"
+        f"    setuptools will link with     : {ours}\n"
+        "The link will fail with 'could not parse bitcode object file', once\n"
+        "per object. Either build with the same compiler:\n"
+        f'    CC="{Path(cmake_cxx).parent / "cc"}" CXX="{cmake_cxx}" \\\n'
+        f'    LDSHARED="{Path(cmake_cxx).parent / "cc"} -bundle '
+        '-undefined dynamic_lookup" \\\n'
+        f'    LDCXXSHARED="{cmake_cxx} -bundle -undefined dynamic_lookup" \\\n'
+        "      python -m pip wheel . --no-deps --no-build-isolation\n"
+        "or reconfigure the engine with -DBINDIFF_ENABLE_IPO=OFF, which makes\n"
+        "the archives ordinary object code any compiler can link.\n",
+        file=sys.stderr)
+
+
+_warn_if_archives_need_another_compiler(BUILD_DIR)
 
 # Locate BinExport directory (sibling to BinDiff)
 BINEXPORT_DIR = Path(
