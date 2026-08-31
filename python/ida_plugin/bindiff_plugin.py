@@ -53,6 +53,7 @@ PLUGIN_HELP = "Load a .BinDiff result file and browse the matches"
 
 # Names kept identical to the C++ plugin's where the action is the same, so
 # muscle memory, saved layouts and any existing scripting keep working.
+ACTION_MAIN = "bindiff:main"
 ACTION_DIFF_DATABASE = "bindiff:diff_database"
 ACTION_LOAD = "bindiff:load_results"
 ACTION_SAVE = "bindiff:save_results"
@@ -312,14 +313,63 @@ if IDA_AVAILABLE:
             self.controller.close()
 
         def run(self, arg) -> bool:
-            self._load_results()
+            self._open_menu()
             return True
+
+        def _open_menu(self) -> None:
+            """Offers what the plugin can do, rather than assuming.
+
+            This used to call _load_results() directly, so choosing BinDiff
+            from the menu opened a file dialog and nothing else: the diff was
+            unreachable unless you already knew the action name. The C++
+            plugin puts up a small menu here and that is what anyone arriving
+            from it expects.
+            """
+            entries = [("Diff database...", self._diff_database),
+                       ("Load results...", self._load_results)]
+            if self.controller.loaded:
+                # Only worth offering once there is something to show.
+                entries.append(("Matched functions", self._show_matches))
+                entries.append(("Statistics", self._show_statistics))
+
+            chosen = self._choose_action(entries)
+            if chosen:
+                chosen()
+
+        def _choose_action(self, entries):
+            """The menu, in Qt where it is available and in IDA's own dialog
+            where it is not.
+
+            ask_buttons carries at most three, so the fallback offers the two
+            that are always present and drops the rest; it is the path for a
+            headless or Qt-less IDA, where the extra views have nothing to
+            draw on anyway.
+            """
+            try:
+                from ida_plugin.panels import ActionMenu
+            except ImportError:
+                ActionMenu = None
+
+            if ActionMenu is not None:
+                dialog = ActionMenu(f"{PLUGIN_NAME} {PLUGIN_VERSION}", entries)
+                dialog.exec_() if hasattr(dialog, "exec_") else dialog.exec()
+                return dialog.chosen
+
+            answer = ida_kernwin.ask_buttons(
+                entries[0][0], entries[1][0], "Close", 1,
+                f"{PLUGIN_NAME} {PLUGIN_VERSION}")
+            if answer == 1:
+                return entries[0][1]
+            if answer == 0:
+                return entries[1][1]
+            return None
 
         # -- actions --------------------------------------------------------
 
         def _register_actions(self) -> None:
             loaded = lambda: self.controller.loaded  # noqa: E731
             specs = (
+                (ACTION_MAIN, f"{PLUGIN_NAME}...", self._open_menu, None),
                 (ACTION_DIFF_DATABASE, "Diff database...",
                  self._diff_database, None),
                 (ACTION_LOAD, "Load results...", self._load_results, None),
@@ -363,13 +413,39 @@ if IDA_AVAILABLE:
                 (ACTION_CONFIGURE, "Matching algorithms...",
                  self._configure_algorithms, None),
             )
+            # Shift-D is the C++ plugin's, for the same action. Someone
+            # arriving from it should not have to learn a new key to open the
+            # same dialog.
+            shortcuts = {ACTION_MAIN: "Shift-D"}
+
             for name, label, callback, enabled in specs:
                 if ida_kernwin.register_action(ida_kernwin.action_desc_t(
-                        name, label, _Action(callback, enabled))):
+                        name, label, _Action(callback, enabled),
+                        shortcuts.get(name))):
                     self._registered.append(name)
                     ida_kernwin.attach_action_to_menu(
                         f"Edit/Plugins/{PLUGIN_NAME}/", name,
                         ida_kernwin.SETMENU_APP)
+
+            # Where the C++ plugin puts them, because that is where anyone
+            # who has used BinDiff will look. Everything above is also under
+            # Edit/Plugins, which is where IDA puts a plugin by default and
+            # where these were the only place to find them until now.
+            #
+            # The View entries carry the `loaded` predicate already, so they
+            # appear greyed until a result is open rather than being absent
+            # and then appearing, which is harder to notice.
+            placements = (
+                (ACTION_MAIN, "File/Produce file/"),
+                (ACTION_SHOW_MATCHES, f"View/{PLUGIN_NAME}/"),
+                (ACTION_SHOW_STATISTICS, f"View/{PLUGIN_NAME}/"),
+                (ACTION_SHOW_PRIMARY_UNMATCHED, f"View/{PLUGIN_NAME}/"),
+                (ACTION_SHOW_SECONDARY_UNMATCHED, f"View/{PLUGIN_NAME}/"),
+            )
+            for name, path in placements:
+                if name in self._registered:
+                    ida_kernwin.attach_action_to_menu(
+                        path, name, ida_kernwin.SETMENU_APP)
 
         # -- helpers --------------------------------------------------------
 

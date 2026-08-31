@@ -74,6 +74,44 @@ if IDA_AVAILABLE:
         except AttributeError:
             return view.ExtendedSelection
 
+    class ActionMenu(QtWidgets.QDialog):
+        """The plugin's front door: the actions it can start, as buttons.
+
+        The C++ plugin opens exactly this when BinDiff is chosen from the
+        menu, and it is what anyone coming from it expects. This one used to
+        call _load_results() straight from run(), so the whole plugin
+        presented as a file-open dialog and the diff was unreachable without
+        knowing the action name.
+
+        Only actions that exist get a button. The C++ menu also offers "Diff
+        Database Filtered..."; there is no filtered diff here, and a button
+        that does nothing is worse than an absent one.
+        """
+
+        def __init__(self, title, entries, parent=None):
+            super().__init__(parent)
+            self.setWindowTitle(title)
+            layout = QtWidgets.QVBoxLayout(self)
+            layout.setSpacing(8)
+            for label, callback in entries:
+                button = QtWidgets.QPushButton(label, self)
+                button.setMinimumHeight(32)
+                # Closed before the action runs: several of these open modal
+                # dialogs of their own, and stacking one on top of this would
+                # leave the menu hanging behind them for the whole diff.
+                button.clicked.connect(
+                    lambda _checked=False, fn=callback: self._chose(fn))
+                layout.addWidget(button)
+            layout.addSpacing(6)
+            close = QtWidgets.QPushButton("Close", self)
+            close.clicked.connect(self.reject)
+            layout.addWidget(close)
+            self.chosen = None
+
+        def _chose(self, callback):
+            self.chosen = callback
+            self.accept()
+
     class MatchTable(QtWidgets.QTableWidget):
         """The matched-functions table.
 
