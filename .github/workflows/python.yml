@@ -69,6 +69,7 @@ jobs:
                   tests/test_ui_logic.py
                   tests/test_diff_runner.py
                   tests/test_plugin_dependencies.py
+                  tests/test_protobuf_floor.py
                   -q --no-header
 
     hcli-lint:

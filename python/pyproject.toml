@@ -53,7 +53,7 @@ classifiers = [
 # protobuf is genuinely required, not optional: bindiff.binexport and
 # bindiff.metadata parse .BinExport files and metadata sidecars with it. Only
 # the compiled extension needs nothing.
-dependencies = ["protobuf>=4.25"]
+dependencies = ["protobuf>=7.35.1"]
 
 [project.optional-dependencies]
 dev = [

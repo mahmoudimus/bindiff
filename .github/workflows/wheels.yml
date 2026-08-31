@@ -209,6 +209,22 @@ jobs:
                     --python_out=python/bindiff/_pb bindiff_metadata.proto
                   ls -l python/bindiff/_pb
 
+            # protoc stamps the version that generated each module and the
+            # runtime refuses gencode newer than itself, so the floor in
+            # pyproject.toml has to cover whatever the CMake build's protoc
+            # just emitted. v8.1.1 shipped gencode 7.35.1 behind a declared
+            # protobuf>=4.25 and every install resolving 4, 5 or 6 died on
+            # import -- invisible here because this job installs the newest
+            # protobuf, the one case that works.
+            - name: Check the protobuf floor covers the bindings
+              if: steps.gate.outputs.run == 'yes'
+              shell: bash
+              run: |
+                  python -m pip install --disable-pip-version-check packaging
+                  python tools/scripts/check_protobuf_floor.py \
+                    --pb python/bindiff/_pb \
+                    --pyproject python/pyproject.toml
+
             # Unbuffered and flushed: a probe whose output sits in a pipe
             # buffer tells you nothing when the step is killed for taking too
             # long, which is exactly when you need it. The same reason
