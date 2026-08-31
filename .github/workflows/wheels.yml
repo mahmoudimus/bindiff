@@ -198,7 +198,7 @@ jobs:
                   [ -x "$protoc" ] || {
                     echo "::error::no protoc under build/_deps/protobuf-build"
                     find "${GITHUB_WORKSPACE}/build/_deps" -name 'protoc*' \
-                      -maxdepth 3 2>/dev/null | head
+                      -maxdepth 3 2>/dev/null | sed -n '1,10p'
                     exit 1
                   }
                   mkdir -p python/bindiff/_pb
@@ -267,7 +267,12 @@ jobs:
                   # Printed because the tag is the whole point of building in
                   # the container, and it is derived rather than declared: a
                   # base image change would move it silently otherwise.
-                  ldd --version | head -1
+                  #
+                  # sed rather than head: this shell runs with -o pipefail, and
+                  # head closes the pipe after one line, so ldd takes a SIGPIPE
+                  # and the step fails with 141. sed reads the stream to the
+                  # end. Any `... | head` in a workflow step is this bug.
+                  ldd --version | sed -n '1p'
                   for whl in dist/*.whl; do
                     auditwheel repair "$whl" -w wheelhouse || {
                       echo "::warning::auditwheel could not repair $whl; \
