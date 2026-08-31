@@ -344,36 +344,61 @@ jobs:
             # already there, so this runs where it is free. Free-threaded
             # builds are skipped -- Py_GIL_DISABLED is a different ABI and pip
             # correctly refuses an abi3 wheel on it.
+            # The property an abi3 wheel exists for, checked rather than
+            # assumed: it has to load on interpreters it was never built
+            # against. Only the manylinux image carries several, and they are
+            # already there, so this runs where it is free.
+            #
+            # Below the floor the wheel must be *refused*. That half is not
+            # ceremony -- a floor nothing enforces is how the protobuf
+            # dependency shipped wrong -- and the image conveniently ships a
+            # cp39 to prove it with. Free-threaded builds are skipped:
+            # Py_GIL_DISABLED is a different ABI and pip is right to refuse an
+            # abi3 wheel there, which would read as a floor violation.
             - name: Load the wheel on every interpreter in the image
               if: steps.gate.outputs.run == 'yes' && matrix.container != ''
               shell: bash
               run: |
-                  checked=0
+                  loaded=0
+                  refused=0
                   for prefix in /opt/python/cp3*-cp3*; do
                     case "$prefix" in *t) continue;; esac
                     py="$prefix/bin/python"
                     [ -x "$py" ] || continue
                     ver=$("$py" -c 'import sys;print("%d.%d"%sys.version_info[:2])')
+                    minor=${ver#3.}
                     rm -rf /tmp/probe
                     "$py" -m venv /tmp/probe
-                    if ! /tmp/probe/bin/python -m pip install \
-                         --disable-pip-version-check -q wheelhouse/*.whl; then
-                      echo "::error::python $ver refused the wheel"
-                      exit 1
-                    fi
-                    /tmp/probe/bin/python -c "
+                    if /tmp/probe/bin/python -m pip install \
+                         --disable-pip-version-check -q wheelhouse/*.whl \
+                         >/tmp/probe.log 2>&1; then
+                      if [ "$minor" -lt 10 ]; then
+                        echo "::error::python $ver installed a wheel whose \
+                              declared floor is 3.10"
+                        exit 1
+                      fi
+                      /tmp/probe/bin/python -c "
                   import bindiff, bindiff.core, pathlib
-                  print('  python $ver ->', pathlib.Path(bindiff.core.__file__).name,
+                  print('  python $ver loads', pathlib.Path(bindiff.core.__file__).name,
                         '| diff:', callable(bindiff.diff))
                   "
-                    checked=$((checked + 1))
+                      loaded=$((loaded + 1))
+                    else
+                      if [ "$minor" -ge 10 ]; then
+                        echo "::error::python $ver refused the wheel"
+                        tail -3 /tmp/probe.log
+                        exit 1
+                      fi
+                      echo "  python $ver correctly refused (below the floor)"
+                      refused=$((refused + 1))
+                    fi
                   done
-                  if [ "$checked" -lt 2 ]; then
-                    echo "::error::only $checked interpreters probed; the \
+                  if [ "$loaded" -lt 2 ]; then
+                    echo "::error::only $loaded interpreters loaded it; the \
                           stable-ABI claim is untested"
                     exit 1
                   fi
-                  echo "loaded on $checked interpreters"
+                  echo "loaded on $loaded interpreters, refused by $refused below the floor"
 
             # Installing it and importing from somewhere else entirely is the
             # only check that matters: a wheel that builds but ships no
