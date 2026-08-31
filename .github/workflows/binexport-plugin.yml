@@ -1,0 +1,140 @@
+name: Build BinExport plugin
+
+# Builds BinExport's IDA Pro plugin, which the Python plugin shells out to for
+# the export half of a diff. Loading an existing .BinDiff needs none of this;
+# diffing two binaries needs all of it.
+#
+# It is built here because there is nowhere to get it. Upstream's newest
+# release is v12-20240417, from months before IDA 9.0 existed: its macOS
+# archive ships x86_64-only binaries and still carries the _ida / _ida64 pair
+# that IDA 9.0 abolished when it went 64-bit-only. Neither loads in a current
+# IDA on Apple Silicon.
+#
+# No secrets. BinExport fetches the IDA SDK from the public HexRaysSA/ida-sdk
+# at v9.4.0-release, which is what makes this buildable in CI at all -- the
+# encrypted-SDK machinery this repo used to carry is gone.
+
+on:
+    workflow_call:
+    workflow_dispatch:
+        inputs:
+            binexport_ref:
+                description: "BinExport commit or ref to build"
+                required: false
+                default: "21bfa4743e3b7cf70f2f631e53719d5e5412adda"
+                type: string
+
+concurrency:
+    group: binexport-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    build:
+        name: ${{ matrix.name }}
+        runs-on: ${{ matrix.runs-on }}
+        timeout-minutes: 60
+        strategy:
+            # One platform failing must not hide the others; this workflow
+            # exists to find out which ones work.
+            fail-fast: false
+            matrix:
+                include:
+                    # glibc 2.35 rather than 24.04's 2.39: the plugin is loaded
+                    # by the user's IDA, so its floor is the user's distro, and
+                    # 2.39 would mean Ubuntu 24.04 or nothing. Same lesson the
+                    # wheels learned the expensive way.
+                    - name: linux-x86_64
+                      runs-on: ubuntu-22.04
+                      artifact: binexport12_ida.so
+                    - name: macos-arm64
+                      runs-on: macos-15
+                      artifact: binexport12_ida.dylib
+                    - name: macos-x86_64
+                      runs-on: macos-15-intel
+                      artifact: binexport12_ida.dylib
+                    - name: windows-x86_64
+                      runs-on: windows-2025
+                      artifact: binexport12_ida.dll
+        steps:
+            - name: Checkout BinExport
+              uses: actions/checkout@v4
+              with:
+                  repository: google/binexport
+                  ref: ${{ inputs.binexport_ref || '21bfa4743e3b7cf70f2f631e53719d5e5412adda' }}
+                  path: binexport
+                  persist-credentials: false
+
+            - name: Set up MSVC
+              if: runner.os == 'Windows'
+              uses: ilammy/msvc-dev-cmd@v1
+              with:
+                  arch: x64
+
+            - name: Install CMake and Ninja
+              uses: lukka/get-cmake@latest
+              with:
+                  cmakeVersion: "~4.4.0"
+                  ninjaVersion: "~1.13.1"
+
+            # BINARYNINJA off is not optional. The runner may have a Binary
+            # Ninja install for CMake to find, and enabling that plugin pulls
+            # binaryninjaapi's vendored fmt 11.0.2, which does not compile
+            # under current clang -- "call to consteval function ... is not a
+            # constant expression". The build then fails in a plugin nobody
+            # asked for.
+            - name: Configure
+              shell: bash
+              run: |
+                  cmake -S binexport -B build -G Ninja \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DBINEXPORT_ENABLE_IDAPRO=ON \
+                    -DBINEXPORT_ENABLE_BINARYNINJA=OFF \
+                    -DBINEXPORT_BUILD_TESTING=OFF
+
+            - name: Build
+              shell: bash
+              run: cmake --build build --config Release
+
+            # The plugin is worth nothing if it is the wrong architecture or
+            # wants a library the user's IDA will not provide. Upstream's
+            # published macOS build fails the first of those on this hardware,
+            # which is the whole reason this workflow exists.
+            - name: Check what was built
+              shell: bash
+              run: |
+                  plugin=$(find build -name '${{ matrix.artifact }}' | head -1)
+                  if [ -z "$plugin" ]; then
+                    echo "::error::no ${{ matrix.artifact }} was produced"
+                    find build -name 'binexport*' | head -20
+                    exit 1
+                  fi
+                  echo "built: $plugin"
+                  ls -l "$plugin"
+                  case "${{ runner.os }}" in
+                    macOS)
+                      lipo -archs "$plugin"
+                      # Anything outside the system and IDA's own libida is a
+                      # dependency the user's IDA has no reason to satisfy.
+                      otool -L "$plugin" | tail -n +2 \
+                        | grep -v '/usr/lib\|/System\|libida\|@rpath/binexport' \
+                        && { echo "::error::unexpected dynamic dependency"; exit 1; } \
+                        || echo "no unexpected dynamic dependencies"
+                      ;;
+                    Linux)
+                      file "$plugin"
+                      echo "glibc floor:"
+                      objdump -T "$plugin" 2>/dev/null \
+                        | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -1
+                      ;;
+                  esac
+                  mkdir -p out && cp "$plugin" out/
+
+            - name: Upload
+              uses: actions/upload-artifact@v4
+              with:
+                  name: binexport-${{ matrix.name }}
+                  path: out/*
+                  if-no-files-found: error

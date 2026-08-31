@@ -36,8 +36,17 @@ jobs:
     wheels:
         uses: ./.github/workflows/wheels.yml
 
+    # The plugin shells out to BinExport's IDA plugin for the export half of a
+    # diff, and there is nowhere to get one: upstream's newest release predates
+    # IDA 9.0, ships x86_64-only macOS binaries and still carries the
+    # _ida/_ida64 pair 9.0 abolished. Shipping it here is what makes an
+    # installed plugin able to diff two binaries rather than only open an
+    # existing .BinDiff.
+    binexport:
+        uses: ./.github/workflows/binexport-plugin.yml
+
     publish:
-        needs: wheels
+        needs: [wheels, binexport]
         runs-on: ubuntu-24.04
         steps:
             - uses: actions/checkout@v4
@@ -55,6 +64,29 @@ jobs:
                   pattern: wheel-*
                   path: staged
                   merge-multiple: true
+
+            # Not merge-multiple: every platform's plugin has the same
+            # basename inside its artifact, so merging would have them
+            # overwrite each other and publish whichever landed last under a
+            # name that says nothing about what it is.
+            - name: Collect the BinExport plugins
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: binexport-*
+                  path: binexport
+
+            # Zipped per platform, with the plugin keeping its real filename
+            # inside: IDA loads it by name, so a file renamed to carry its
+            # platform would have to be renamed back before it worked.
+            - name: Package the BinExport plugins
+              shell: bash
+              run: |
+                  for dir in binexport/binexport-*; do
+                    [ -d "$dir" ] || continue
+                    name=$(basename "$dir")
+                    (cd "$dir" && zip -qr "$GITHUB_WORKSPACE/${name}.zip" .)
+                  done
+                  ls -lh binexport-*.zip
 
             - name: Resolve the tag
               id: release
@@ -118,4 +150,5 @@ jobs:
                   files: |
                       staged/*.whl
                       bindiff-plugin-*.zip
+                      binexport-*.zip
                       ida-plugin.json
