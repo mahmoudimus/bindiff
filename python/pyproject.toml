@@ -1,6 +1,10 @@
 [build-system]
 requires = [
-    "setuptools>=65.0",
+    # 77 is the floor for PEP 639: a plain SPDX string for `license` and a
+    # `license-files` glob. The table form it replaces is removed in
+    # 2027-Feb, and the table form shipped no license file at all -- only a
+    # metadata field -- which Apache-2.0 section 4(a) asks for.
+    "setuptools>=77",
     "wheel",
     "Cython>=3.0.0",
 ]
@@ -12,7 +16,11 @@ version = "8.1.0"
 description = "Python bindings to the BinDiff engine, plus an IDA plugin"
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
+# A copy of python/LICENSE, which is the root LICENSE: license-files globs are
+# resolved against the project directory and cannot reach outside it, and the
+# wheel is the artefact that has to carry the text.
+license-files = ["LICENSE"]
 # Google wrote BinDiff and holds the copyright on the engine this builds
 # against; the fork and its bindings are maintained separately. Splitting the
 # two fields says that, where a single authors list would have claimed one or
@@ -28,7 +36,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
@@ -36,6 +43,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Cython",
     "Programming Language :: C++",
     "Topic :: Security",
