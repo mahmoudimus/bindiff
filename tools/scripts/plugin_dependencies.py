@@ -64,8 +64,8 @@ def parse_wheel(filename: str) -> Dict[str, str]:
     return match.groupdict()
 
 
-def _python_marker(python_tag: str) -> str:
-    """cp313 -> python_version == '3.13'.
+def _python_version(python_tag: str) -> str:
+    """cp313 -> '3.13'.
 
     Only CPython tags are handled. `py3` and the abi3 tags would need a range
     rather than an equality, and this package ships neither -- a Cython
@@ -75,7 +75,11 @@ def _python_marker(python_tag: str) -> str:
     if not match:
         raise Unsupported(
             f"only CPython version tags are supported, got {python_tag!r}")
-    return f"python_version == '{match.group(1)}.{match.group(2)}'"
+    return f"{match.group(1)}.{match.group(2)}"
+
+
+def _python_marker(python_tag: str) -> str:
+    return f"python_version == '{_python_version(python_tag)}'"
 
 
 def _machine_marker(platform_tag: str) -> Optional[str]:
@@ -125,24 +129,63 @@ def dependencies_for(wheels: List[str], repo: str, tag: str) -> List[str]:
     return specs
 
 
+# The machines a marker gets evaluated against: the ones this project ships
+# wheels for. An overlap that shows on no shipped platform is not an overlap
+# anybody can hit.
+_ENVIRONMENTS = [
+    ("linux", "x86_64"),
+    ("linux", "aarch64"),
+    ("darwin", "arm64"),
+    ("darwin", "x86_64"),
+    ("win32", "AMD64"),
+]
+
+
+def _filename(url: str) -> str:
+    """Last segment of a release URL. Not a filesystem path -- a URL always
+    uses forward slashes, so pathlib would be wrong on Windows."""
+    return url.rsplit("/", 1)[-1]
+
+
 def check_unambiguous(specs: List[str]) -> None:
     """Refuses two wheels that could both install on one machine.
 
     pip takes the first satisfied requirement, so an overlap does not fail --
     it silently installs whichever was listed first, which on a matrix that
     grew a duplicate is not the one anybody chose.
+
+    Comparing the marker text is not enough, and the wheels this actually
+    builds are why: macOS produces one universal2 wheel, whose marker names no
+    architecture because it needs none. Add a dedicated arm64 wheel beside it
+    and the two markers differ as strings while both still apply on an arm64
+    Mac -- the exact case this exists to catch. So evaluate them, against every
+    machine this ships for, and count.
     """
+    from packaging.markers import default_environment
     from packaging.requirements import Requirement
 
-    seen: Dict[str, str] = {}
-    for spec in specs:
-        requirement = Requirement(spec)
-        key = str(requirement.marker)
-        if key in seen:
-            raise Unsupported(
-                f"two wheels claim the same environment ({key}):\n"
-                f"  {seen[key]}\n  {requirement.url}")
-        seen[key] = requirement.url or ""
+    requirements = [Requirement(spec) for spec in specs]
+    pythons = sorted({
+        _python_version(parse_wheel(_filename(requirement.url))["python"])
+        for requirement in requirements if requirement.url})
+
+    for sys_platform, machine in _ENVIRONMENTS:
+        for python in pythons:
+            environment = dict(default_environment())
+            environment.update(sys_platform=sys_platform,
+                               platform_machine=machine,
+                               python_version=python)
+            applicable = [
+                requirement for requirement in requirements
+                if requirement.marker is None
+                or requirement.marker.evaluate(environment)]
+            if len(applicable) > 1:
+                listed = "\n  ".join(
+                    _filename(r.url or "") for r in applicable)
+                raise Unsupported(
+                    f"{len(applicable)} wheels claim the same environment "
+                    f"({sys_platform}/{machine}, python {python}); pip would "
+                    f"install whichever is listed first:\n  {listed}")
 
 
 def main(argv=None) -> int:

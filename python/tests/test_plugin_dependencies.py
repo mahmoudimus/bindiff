@@ -33,12 +33,15 @@ parse_wheel = plugin_dependencies.parse_wheel
 REPO = "mahmoudimus/bindiff-ng"
 TAG = "v8.0.0"
 
-# One release's worth: the platforms the workflow builds.
+# One release's worth, copied from what the workflow actually produced in run
+# 33338830380 / 33350791815 rather than from what seemed likely. Two of these
+# differ from the obvious guess: macOS builds a single universal2 wheel rather
+# than one per architecture, and auditwheel tags the Linux wheels for the
+# glibc of the runner that built them.
 WHEELS = [
-    "bindiff-8.0.0-cp313-cp313-manylinux_2_28_x86_64.whl",
-    "bindiff-8.0.0-cp313-cp313-manylinux_2_28_aarch64.whl",
-    "bindiff-8.0.0-cp313-cp313-macosx_11_0_arm64.whl",
-    "bindiff-8.0.0-cp313-cp313-macosx_10_13_x86_64.whl",
+    "bindiff-8.0.0-cp313-cp313-manylinux_2_39_x86_64.whl",
+    "bindiff-8.0.0-cp313-cp313-manylinux_2_39_aarch64.whl",
+    "bindiff-8.0.0-cp313-cp313-macosx_10_15_universal2.whl",
     "bindiff-8.0.0-cp313-cp313-win_amd64.whl",
 ]
 
@@ -123,10 +126,11 @@ class TestDependencies:
             assert f"/releases/download/{TAG}/" in spec
 
     @pytest.mark.parametrize("platform,machine,expected", [
-        ("linux", "x86_64", "manylinux_2_28_x86_64"),
-        ("linux", "aarch64", "manylinux_2_28_aarch64"),
-        ("darwin", "arm64", "macosx_11_0_arm64"),
-        ("darwin", "x86_64", "macosx_10_13_x86_64"),
+        ("linux", "x86_64", "manylinux_2_39_x86_64"),
+        ("linux", "aarch64", "manylinux_2_39_aarch64"),
+        # Both Macs take the one universal2 wheel.
+        ("darwin", "arm64", "macosx_10_15_universal2"),
+        ("darwin", "x86_64", "macosx_10_15_universal2"),
         ("win32", "AMD64", "win_amd64"),
     ])
     def test_exactly_one_applies_per_machine(self, platform, machine, expected):
@@ -161,6 +165,32 @@ class TestDependencies:
             "bindiff-8.0.0-cp313-cp313-manylinux_2_34_x86_64.whl"]
         with pytest.raises(Unsupported, match="same environment"):
             check_unambiguous(dependencies_for(duplicated, REPO, TAG))
+
+    def test_an_overlap_is_caught_even_when_the_markers_differ(self):
+        """The case that will actually happen. macOS ships one universal2
+        wheel, whose marker names no architecture; add a dedicated arm64 wheel
+        beside it and the markers differ as text while both apply on an arm64
+        Mac. An earlier version of this check compared marker strings and let
+        that through."""
+        overlapping = WHEELS + [
+            "bindiff-8.0.0-cp313-cp313-macosx_11_0_arm64.whl"]
+        specs = dependencies_for(overlapping, REPO, TAG)
+        markers = {str(__import__("packaging.requirements", fromlist=["x"])
+                       .Requirement(s).marker) for s in specs}
+        assert len(markers) == len(specs), "markers must differ as text"
+        with pytest.raises(Unsupported, match="same environment"):
+            check_unambiguous(specs)
+
+    def test_every_shipped_machine_is_covered_by_some_wheel(self):
+        """A platform the workflow builds for that no marker selects would
+        install nothing, and pip's message names the package, not the gap."""
+        specs = dependencies_for(WHEELS, REPO, TAG)
+        for platform, machine in [("linux", "x86_64"), ("linux", "aarch64"),
+                                  ("darwin", "arm64"), ("darwin", "x86_64"),
+                                  ("win32", "AMD64")]:
+            env = environment(platform, machine)
+            assert [s for s in specs if applies(s, env)], (
+                f"nothing installs on {platform}/{machine}")
 
     def test_a_clean_set_passes_the_ambiguity_check(self):
         check_unambiguous(dependencies_for(WHEELS, REPO, TAG))
