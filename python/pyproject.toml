@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bindiff-ng"
-version = "8.1.0"
+version = "8.1.1"
 description = "Python bindings to the BinDiff engine, plus an IDA plugin"
 readme = "README.md"
 requires-python = ">=3.8"
