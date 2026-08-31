@@ -166,17 +166,23 @@ else:
 _PRUNED_DIRS = {"src_include", "gen_include", ".git"}
 
 
-def _archive_dirs(build_dir):
-    """Directories holding static archives, found without falling in a loop.
+# A static archive is .a with the GNU toolchain and .lib with MSVC. Matching
+# only .a is why the Windows wheel could never have linked even once the walk
+# below stopped hanging: the archive list came back empty and setup.py exited.
+_ARCHIVE_SUFFIXES = (".a", ".lib")
 
-    os.walk with the directory list pruned in place, not Path.rglob: rglob has
-    already descended into a path by the time it yields it, so testing
-    is_symlink() on the result prevents nothing. On Windows the trees above are
-    junctions, which Path.is_symlink() does not report as links at all, so the
-    walk recursed until the job was killed -- the wheel build sat on this step
-    for over an hour where Linux and macOS each took under twenty seconds.
+
+def _walk_build_tree(build_dir):
+    """Yields (directory, filenames) under the build tree, without looping.
+
+    os.walk with the directory list pruned **in place**, which is the only form
+    that can refuse to descend. Path.rglob has already gone into a directory by
+    the time it yields it, so testing is_symlink() on the result prevents
+    nothing -- and on Windows the include trees are junctions, which
+    is_symlink() does not report as links at all. Both walks in this file used
+    that pattern; the Windows wheel build sat in one for over an hour where
+    Linux and macOS each finished in under twenty seconds.
     """
-    found = []
     for root, dirnames, filenames in os.walk(build_dir):
         dirnames[:] = [
             name for name in dirnames
@@ -185,9 +191,13 @@ def _archive_dirs(build_dir):
             and not getattr(os.path, "isjunction", lambda _p: False)(
                 os.path.join(root, name))
         ]
-        if any(name.endswith((".a", ".lib")) for name in filenames):
-            found.append(root)
-    return found
+        yield root, filenames
+
+
+def _archive_dirs(build_dir):
+    """Directories holding static archives."""
+    return [root for root, filenames in _walk_build_tree(build_dir)
+            if any(name.endswith(_ARCHIVE_SUFFIXES) for name in filenames)]
 
 
 library_dirs = [str(BUILD_DIR)]
@@ -238,16 +248,20 @@ def _static_libraries(build_dir):
     skip_path_parts = ("CMakeFiles", "_CMakeLTOTest-C", "_CMakeLTOTest-CXX")
 
     found = {}
-    for path in build_dir.rglob("*.a"):
-        if path.is_symlink() or not path.is_file():
+    for root, filenames in _walk_build_tree(build_dir):
+        if any(part in skip_path_parts for part in Path(root).parts):
             continue
-        if any(part in skip_path_parts for part in path.parts):
-            continue
-        stem = path.stem[3:] if path.stem.startswith("lib") else path.stem
-        if stem in skip_names:
-            continue
-        # Keep the first of any duplicate basename; rglob is deterministic.
-        found.setdefault(stem, str(path))
+        for name in sorted(filenames):
+            if not name.endswith(_ARCHIVE_SUFFIXES):
+                continue
+            stem = Path(name).stem
+            # libfoo.a and foo.lib are the same archive named two ways.
+            stem = stem[3:] if stem.startswith("lib") else stem
+            if stem in skip_names:
+                continue
+            # Keep the first of any duplicate basename; the walk and the inner
+            # sort are both deterministic, so two runs agree.
+            found.setdefault(stem, os.path.join(root, name))
     return found
 
 

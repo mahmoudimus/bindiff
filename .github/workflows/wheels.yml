@@ -170,10 +170,10 @@ jobs:
                     --python_out=python/bindiff/_pb bindiff_metadata.proto
                   ls -l python/bindiff/_pb
 
-            # Which half is slow, measured rather than assumed. The wheel step
-            # takes under twenty seconds on Linux and macOS and hung for over
-            # an hour on Windows; the directory walk and the compile are
-            # separate suspects and this separates them.
+            # Unbuffered and flushed: a probe whose output sits in a pipe
+            # buffer tells you nothing when the step is killed for taking too
+            # long, which is exactly when you need it. The same reason
+            # bindiff.headless.emit_progress flushes every line.
             - name: Time the build-tree scan
               if: steps.gate.outputs.run == 'yes'
               working-directory: python
@@ -181,19 +181,29 @@ jobs:
               env:
                   BINDIFF_BUILD_DIR: ${{ github.workspace }}/build
               run: |
-                  python - <<'SCAN'
-                  import os, time
+                  python -u - <<'SCAN'
+                  import os, sys, time
+                  from pathlib import Path
                   src = open("setup.py").read()
-                  start = src.index("_PRUNED_DIRS = {")
-                  end = src.index("library_dirs = [str(BUILD_DIR)]")
-                  ns = {"os": os}
-                  exec(src[start:end], ns)
-                  build = os.environ["BINDIFF_BUILD_DIR"]
+                  ns = {"os": os, "Path": Path}
+                  exec(src[src.index("_PRUNED_DIRS = {"):
+                           src.index("library_dirs = [str(BUILD_DIR)]")], ns)
+                  exec(src[src.index("def _static_libraries"):
+                           src.index("_archives = _static_libraries")], ns)
+                  build = Path(os.environ["BINDIFF_BUILD_DIR"])
                   t0 = time.time()
                   dirs = ns["_archive_dirs"](build)
-                  print(f"scan: {len(dirs)} archive dirs in {time.time()-t0:.1f}s")
-                  total = sum(len(f) for _, _, f in os.walk(build))
-                  print(f"tree: {total} files under {build}")
+                  print(f"archive dirs: {len(dirs)} in {time.time()-t0:.1f}s",
+                        flush=True)
+                  t0 = time.time()
+                  archives = ns["_static_libraries"](build)
+                  print(f"archives: {len(archives)} in {time.time()-t0:.1f}s",
+                        flush=True)
+                  for name in ("bindiff_shared", "protobuf", "sqlite"):
+                      print(f"  {name}: {archives.get(name, 'MISSING')}",
+                            flush=True)
+                  if not archives:
+                      sys.exit("no archives found; the link line would be empty")
                   SCAN
 
             - name: Build the wheel
