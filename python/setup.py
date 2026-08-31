@@ -528,9 +528,83 @@ if DEBUG_MODE:
     if sys.version_info < (3, 12):
         macros.append(("CYTHON_PROFILE", "1"))
 
-    # Add macros to extensions
-    for ext in extensions:
-        ext.define_macros = macros
+# The stable ABI, so one wheel per platform serves every Python from this
+# version up rather than one wheel per interpreter release.
+#
+# Cython supports it through the preprocessor rather than a build flag:
+# defining Py_LIMITED_API turns on CYTHON_LIMITED_API, which redefines
+# __PYX_LIMITED_VERSION_HEX from PY_VERSION_HEX to Py_LIMITED_API, and every
+# generated version check then targets 3.10 instead of whatever interpreter
+# happens to be building. Without that redefinition the module compiles
+# cleanly and then fails to load on anything older, because the guards let
+# through calls like PyDict_GetItemRef that only exist in 3.13.
+#
+# It must reach the C++ compiler, which is why this is define_macros and not
+# CFLAGS: setuptools compiles C++ sources with CXXFLAGS, so a Py_LIMITED_API
+# in CFLAGS is silently dropped and produces an ordinary version-locked
+# module that looks like proof the stable ABI does not work.
+#
+# Measured on fixtures/benchmark, three runs each, fresh process per run:
+# median 8.049s unlimited against 8.059s limited, +0.12%, against a
+# run-to-run spread of 0.37s. The engine's work is in C++ and the boundary is
+# crossed once per diff, so the per-call overhead the limited API adds has
+# almost nothing to land on here.
+LIMITED_API_MIN_VERSION = (3, 10)
+LIMITED_API_HEX = "0x030A0000"
+# Debug builds opt out: CYTHON_TRACE and the profiling hooks need the full
+# API. BINDIFF_LIMITED_API=0 opts out by hand, for bisecting a fault that
+# might be the stable ABI's.
+USE_LIMITED_API = (
+    not DEBUG_MODE
+    and os.environ.get("BINDIFF_LIMITED_API", "1") not in ("0", "false", "no")
+)
+if USE_LIMITED_API:
+    macros.append(("Py_LIMITED_API", LIMITED_API_HEX))
+
+for ext in extensions:
+    # Unconditional: this used to sit under `if DEBUG_MODE`, so a release
+    # build silently discarded every macro assembled above.
+    ext.define_macros = list(macros)
+    if USE_LIMITED_API:
+        # Names the file core.abi3.so rather than core.cpython-313-darwin.so.
+        ext.py_limited_api = True
+
+def _warn_about_stale_extensions():
+    """A version-locked .so left lying about gets packaged beside the abi3 one.
+
+    Two extensions in one wheel is not visibly broken: pip installs it, and
+    CPython prefers core.cpython-313-darwin.so over core.abi3.so, so the
+    module that loads is whichever stale artefact was left behind rather than
+    the one just built. It happened here twice -- once from the source tree
+    and once from setuptools' build/lib staging directory, which `pip wheel`
+    assembles from and which nothing clears.
+
+    A warning rather than a refusal: deleting another build's output on the
+    way past is not this script's decision, and the wheel job fails hard on a
+    wheel carrying more than one extension.
+    """
+    package = PYTHON_DIR / "bindiff"
+    stale = sorted(package.glob("core.cpython-*.so"))
+    stale += sorted(PYTHON_DIR.glob("build/lib.*/bindiff/core.cpython-*.so"))
+    stale += sorted(package.glob("core.cpython-*.pyd"))
+    if not stale or not USE_LIMITED_API:
+        return
+    print(
+        "\nWARNING: version-locked extensions are present alongside the abi3\n"
+        "build and will be packaged with it. CPython prefers them, so the\n"
+        "module that loads will not be the one just built:\n"
+        + "".join(f"    {path}\n" for path in stale)
+        + "Remove them first:\n"
+        "    rm -rf python/build python/bindiff/core.cpython-*\n",
+        file=sys.stderr)
+
+
+_warn_about_stale_extensions()
+
+setup_options = {}
+if USE_LIMITED_API:
+    major, minor = LIMITED_API_MIN_VERSION
+    setup_options["bdist_wheel"] = {"py_limited_api": f"cp{major}{minor}"}
 
 setup(
     ext_modules=cythonize(
@@ -539,4 +613,5 @@ setup(
         annotate=DEBUG_MODE,  # Generate HTML annotation files in debug mode
         gdb_debug=DEBUG_MODE,
     ),
+    options=setup_options,
 )

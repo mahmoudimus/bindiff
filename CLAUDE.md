@@ -537,6 +537,39 @@ platform failing does not hide the rest.
 
 **Configure order matters.** `include(BinDiffOptions)` must stay above `add_subdirectory(binexport)` — it forces `BINEXPORT_BUILD_TESTING`, which is what makes BinExport request GoogleTest and Abseil's testing targets. `ABSL_FIND_GOOGLETEST` is forced OFF for the same reason: Abseil defaults it ON and would look for an *installed* GoogleTest instead of aliasing the one BinExport just built — which fails anywhere without a system GoogleTest, and silently links a second unrelated copy anywhere with one.
 
+**The wheels are abi3.** `setup.py` defines `Py_LIMITED_API=0x030A0000` and
+sets `py_limited_api`, so one wheel per platform (`cp310-abi3-*`) serves every
+Python from 3.10 up instead of one per interpreter release. Cython supports
+this through the preprocessor, not a build flag: defining `Py_LIMITED_API`
+turns on `CYTHON_LIMITED_API`, which redefines `__PYX_LIMITED_VERSION_HEX` from
+`PY_VERSION_HEX` to `Py_LIMITED_API` so every generated version check targets
+3.10 rather than the building interpreter. Without it the module compiles and
+then fails to load on anything older, because guards let through calls like
+`PyDict_GetItemRef` that exist only in 3.13. The define **must reach the C++
+compiler** — `CXXFLAGS`, or `define_macros`, never `CFLAGS`, which setuptools
+does not use for C++ and which therefore produces an ordinary version-locked
+module that looks like proof the stable ABI does not work. Measured cost on
+`fixtures/benchmark`: median 8.049s unlimited against 8.059s limited, +0.12%,
+inside a 0.37s run-to-run spread — the work is in C++ and the boundary is
+crossed once per diff. `BINDIFF_LIMITED_API=0` opts out; debug builds opt out
+automatically, since `CYTHON_TRACE` needs the full API.
+
+**Two extensions in one wheel is silent.** CPython prefers
+`core.cpython-313-darwin.so` over `core.abi3.so`, so a stale version-locked
+artefact — in the source tree, or in setuptools' `build/lib.*` staging
+directory, which `pip wheel` assembles from and nothing clears — gets packaged
+and loaded in preference to the module just built. `setup.py` warns and the
+wheel job fails on any wheel carrying more than one. `rm -rf python/build
+python/bindiff/core.cpython-*` before building locally.
+
+**A stale `build/out` corrupts memory rather than failing.** The extension
+compiles against the current headers and links archives built from older
+sources, so the two disagree about type layout: absl aborts in
+`raw_hash_set` (`cap.IsValid()`), or libmalloc reports a pointer being freed
+that it never allocated. Neither names the cause. Check
+`build/out/libbindiff_shared.a` against the newest engine source before
+trusting any result from a locally built extension.
+
 **LTO makes the archives compiler-specific.** `BINDIFF_ENABLE_IPO` is on by
 default, so the `.a` files hold LLVM bitcode rather than machine code (`file`
 says "LLVM bitcode, wrapper") and only an LLVM at least as new as the producer

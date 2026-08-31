@@ -78,8 +78,19 @@ def _python_version(python_tag: str) -> str:
     return f"{match.group(1)}.{match.group(2)}"
 
 
-def _python_marker(python_tag: str) -> str:
-    return f"python_version == '{_python_version(python_tag)}'"
+def _python_marker(python_tag: str, abi_tag: str = "") -> str:
+    """An equality for a version-locked wheel, a floor for a stable-ABI one.
+
+    A cp313 wheel is built against one interpreter's ABI and loads on nothing
+    else, so its marker pins the version exactly. An abi3 wheel is built
+    against the limited API and loads on the version it names and every later
+    one -- pinning it to that version would refuse the interpreters it exists
+    to serve, which is the entire reason for building it.
+    """
+    version = _python_version(python_tag)
+    if abi_tag == "abi3":
+        return f"python_version >= '{version}'"
+    return f"python_version == '{version}'"
 
 
 def _machine_marker(platform_tag: str) -> Optional[str]:
@@ -99,10 +110,10 @@ def _machine_marker(platform_tag: str) -> Optional[str]:
     return None
 
 
-def marker_for(platform_tag: str, python_tag: str) -> str:
+def marker_for(platform_tag: str, python_tag: str, abi_tag: str = "") -> str:
     for prefix, clause in _PLATFORM_MARKERS.items():
         if platform_tag.startswith(prefix):
-            clauses = [clause, _python_marker(python_tag)]
+            clauses = [clause, _python_marker(python_tag, abi_tag)]
             machine = _machine_marker(platform_tag)
             if machine:
                 clauses.insert(1, machine)
@@ -123,7 +134,8 @@ def dependencies_for(wheels: List[str], repo: str, tag: str) -> List[str]:
     specs = []
     for filename in sorted(wheels):
         parsed = parse_wheel(filename)
-        marker = marker_for(parsed["platform"], parsed["python"])
+        marker = marker_for(parsed["platform"], parsed["python"],
+                            parsed["abi"])
         specs.append(f"{parsed['name'].replace('_', '-')} @ "
                      f"{asset_url(repo, tag, filename)} ; {marker}")
     return specs
@@ -132,6 +144,13 @@ def dependencies_for(wheels: List[str], repo: str, tag: str) -> List[str]:
 # The machines a marker gets evaluated against: the ones this project ships
 # wheels for. An overlap that shows on no shipped platform is not an overlap
 # anybody can hit.
+# Probed Python versions. An abi3 marker is a floor, so an overlap between it
+# and a version-locked wheel shows up on a version that appears in neither
+# filename -- deriving the grid from the tags alone would look past exactly the
+# case this has to catch. 3.9 is below every floor this ships and is here to
+# check that nothing claims it.
+_PROBE_PYTHONS = ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+
 _ENVIRONMENTS = [
     ("linux", "x86_64"),
     ("linux", "aarch64"),
@@ -165,9 +184,11 @@ def check_unambiguous(specs: List[str]) -> None:
     from packaging.requirements import Requirement
 
     requirements = [Requirement(spec) for spec in specs]
-    pythons = sorted({
-        _python_version(parse_wheel(_filename(requirement.url))["python"])
-        for requirement in requirements if requirement.url})
+    pythons = sorted(
+        set(_PROBE_PYTHONS) | {
+            _python_version(parse_wheel(_filename(requirement.url))["python"])
+            for requirement in requirements if requirement.url},
+        key=lambda v: tuple(int(part) for part in v.split(".")))
 
     for sys_platform, machine in _ENVIRONMENTS:
         for python in pythons:

@@ -310,6 +310,71 @@ jobs:
               shell: bash
               run: mkdir -p wheelhouse && cp dist/*.whl wheelhouse/
 
+            # A wheel with two extensions in it is not obviously broken: pip
+            # installs it, and CPython silently prefers the version-specific
+            # name over the abi3 one, so the module that loads is whichever
+            # stale artefact was lying in the source tree or in setuptools'
+            # build/lib staging directory. That shipped a wheel here whose
+            # abi3 module was correct and whose cpython-313 module crashed in
+            # absl's hashtable destructor, on 3.13 only. A count is the whole
+            # check.
+            - name: The wheel must ship exactly one extension
+              if: steps.gate.outputs.run == 'yes'
+              shell: bash
+              run: |
+                  python - wheelhouse/*.whl <<'CHECK'
+                  import sys, zipfile
+                  failed = False
+                  for path in sys.argv[1:]:
+                      found = [n for n in zipfile.ZipFile(path).namelist()
+                               if n.endswith((".so", ".pyd", ".dylib"))]
+                      print(f"{path}:")
+                      for name in found:
+                          print(f"    {name}")
+                      if len(found) != 1:
+                          print(f"::error::{path} ships {len(found)} "
+                                "extensions; exactly one is expected")
+                          failed = True
+                  sys.exit(1 if failed else 0)
+                  CHECK
+
+            # The property an abi3 wheel exists for, checked rather than
+            # assumed: it has to load on interpreters it was never built
+            # against. Only the manylinux image carries several, and they are
+            # already there, so this runs where it is free. Free-threaded
+            # builds are skipped -- Py_GIL_DISABLED is a different ABI and pip
+            # correctly refuses an abi3 wheel on it.
+            - name: Load the wheel on every interpreter in the image
+              if: steps.gate.outputs.run == 'yes' && matrix.container != ''
+              shell: bash
+              run: |
+                  checked=0
+                  for prefix in /opt/python/cp3*-cp3*; do
+                    case "$prefix" in *t) continue;; esac
+                    py="$prefix/bin/python"
+                    [ -x "$py" ] || continue
+                    ver=$("$py" -c 'import sys;print("%d.%d"%sys.version_info[:2])')
+                    rm -rf /tmp/probe
+                    "$py" -m venv /tmp/probe
+                    if ! /tmp/probe/bin/python -m pip install \
+                         --disable-pip-version-check -q wheelhouse/*.whl; then
+                      echo "::error::python $ver refused the wheel"
+                      exit 1
+                    fi
+                    /tmp/probe/bin/python -c "
+                  import bindiff, bindiff.core, pathlib
+                  print('  python $ver ->', pathlib.Path(bindiff.core.__file__).name,
+                        '| diff:', callable(bindiff.diff))
+                  "
+                    checked=$((checked + 1))
+                  done
+                  if [ "$checked" -lt 2 ]; then
+                    echo "::error::only $checked interpreters probed; the \
+                          stable-ABI claim is untested"
+                    exit 1
+                  fi
+                  echo "loaded on $checked interpreters"
+
             # Installing it and importing from somewhere else entirely is the
             # only check that matters: a wheel that builds but ships no
             # extension, or ships one that cannot load, looks fine until this.

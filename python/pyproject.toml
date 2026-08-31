@@ -15,7 +15,8 @@ name = "bindiff-ng"
 version = "8.1.1"
 description = "Python bindings to the BinDiff engine, plus an IDA plugin"
 readme = "README.md"
-requires-python = ">=3.8"
+# The stable ABI floor: one wheel per platform covers 3.10 upward.
+requires-python = ">=3.10"
 license = "Apache-2.0"
 # A copy of python/LICENSE, which is the root LICENSE: license-files globs are
 # resolved against the project directory and cannot reach outside it, and the
@@ -38,8 +39,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
