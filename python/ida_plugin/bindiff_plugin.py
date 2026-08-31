@@ -626,6 +626,108 @@ if IDA_AVAILABLE:
 
         # -- diffing --------------------------------------------------------
 
+        def _binexport_plugin_dirs(self):
+            """Every directory IDA loads native plugins from.
+
+            The user directory first: it is writable without touching the
+            installation, and it is where an install here belongs.
+            """
+            import ida_diskio
+
+            dirs = []
+            user = ida_diskio.get_user_idadir()
+            if user:
+                dirs.append(Path(user) / "plugins")
+            try:
+                dirs.append(Path(ida_diskio.idadir("plugins")))
+            except Exception:
+                # idadir is not worth failing a diff over; the user directory
+                # is the one that matters for an install.
+                pass
+            return dirs
+
+        def _ensure_binexport(self) -> bool:
+            """True if the export can go ahead. Offers to fetch BinExport.
+
+            The exporter is a native IDA plugin, not a Python package, so pip
+            cannot place it and `pythonDependencies` has nowhere to name it.
+            Fetching it is therefore the plugin's job -- but downloading a
+            binary and putting it where IDA will load it is not something to
+            do silently, so it is offered, with the URL shown, and never done
+            without an answer.
+
+            Nothing needs restarting afterwards. The export runs in a separate
+            idalib worker process which starts fresh and finds the plugin on
+            disk; only this GUI process would need a restart, and it is not the
+            one doing the exporting.
+            """
+            from bindiff import binexport_installer as installer
+            from bindiff import __version__
+
+            directories = self._binexport_plugin_dirs()
+            if installer.find_installed(directories):
+                return True
+
+            try:
+                plan = installer.plan(directories[0], __version__)
+            except installer.Unsupported as exc:
+                ida_kernwin.warning(
+                    f"BinExport is needed to export a binary, and {exc}.\n\n"
+                    "Build it from google/binexport and put "
+                    f"{installer.plugin_name_for()} in {directories[0]}.")
+                return False
+
+            answer = ida_kernwin.ask_yn(
+                ida_kernwin.ASKBTN_YES,
+                "HIDECANCEL\n"
+                "Diffing two binaries needs the BinExport plugin, which is "
+                "not installed.\n\n"
+                f"Download it from\n{plan.archive_url}\n"
+                f"and install it as\n{plan.destination}?\n\n"
+                "The archive is checked against the digest published with the "
+                "release before anything is written.")
+            if answer != ida_kernwin.ASKBTN_YES:
+                self._report("BinExport was not installed; the diff needs it "
+                             "to export a binary.")
+                return False
+
+            return self._install_binexport(plan)
+
+        def _install_binexport(self, plan) -> bool:
+            """Downloads and installs, on this thread, reporting the outcome.
+
+            Synchronous on purpose. It is roughly a megabyte, it happens once,
+            and the user has just been asked and said yes -- so a brief pause
+            is the honest thing rather than a progress panel for something
+            that is over before it could be read. A diff, which takes minutes,
+            is the case that earns the out-of-process machinery.
+            """
+            import json
+            import urllib.request
+
+            from bindiff import binexport_installer as installer
+
+            def fetch(url: str) -> bytes:
+                with urllib.request.urlopen(url, timeout=120) as response:
+                    return response.read()
+
+            try:
+                written = installer.fetch_and_install(plan, fetch, json.loads)
+            except installer.Corrupt as exc:
+                ida_kernwin.warning(
+                    f"The BinExport download did not verify:\n\n{exc}\n\n"
+                    "Nothing was installed.")
+                return False
+            except Exception as exc:  # network, permissions, a 404 on the tag
+                ida_kernwin.warning(
+                    f"Could not install BinExport:\n\n{exc}\n\n"
+                    f"Download {plan.archive_url} by hand and put "
+                    f"{plan.plugin_name} in {plan.destination.parent}.")
+                return False
+
+            self._report(f"installed BinExport at {written}")
+            return True
+
         def _diff_database(self) -> None:
             """Runs a diff against another binary, out of process.
 
@@ -633,6 +735,12 @@ if IDA_AVAILABLE:
             freezes the IDB: it exports the secondary from inside this process.
             Here a worker does both exports and the diff, so the UI stays live.
             """
+            # Checked before anything is asked for: finding out that the
+            # exporter is missing after picking two files and a destination
+            # wastes the answers.
+            if not self._ensure_binexport():
+                return
+
             secondary = ida_kernwin.ask_file(
                 False, "*.*", "Select the secondary binary or database")
             if not secondary:

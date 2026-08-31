@@ -70,6 +70,7 @@ jobs:
                   tests/test_diff_runner.py
                   tests/test_plugin_dependencies.py
                   tests/test_protobuf_floor.py
+                  tests/test_binexport_installer.py
                   -q --no-header
 
     hcli-lint:

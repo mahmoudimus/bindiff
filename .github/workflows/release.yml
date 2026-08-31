@@ -88,6 +88,25 @@ jobs:
                   done
                   ls -lh binexport-*.zip
 
+                  # The digests the plugin checks a download against before it
+                  # writes a native binary into the user's plugins directory.
+                  # Published as its own asset so the installer can fetch it
+                  # first and refuse cheaply, rather than spending megabytes on
+                  # an archive it has no way to check.
+                  python - <<'MANIFEST'
+                  import hashlib, json, pathlib
+                  assets = {}
+                  for path in sorted(pathlib.Path(".").glob("binexport-*.zip")):
+                      assets[path.name] = hashlib.sha256(
+                          path.read_bytes()).hexdigest()
+                  if not assets:
+                      raise SystemExit("no binexport archives to describe")
+                  pathlib.Path("binexport-manifest.json").write_text(
+                      json.dumps({"assets": assets}, indent=2, sort_keys=True)
+                      + "\n", encoding="utf-8")
+                  print(json.dumps(assets, indent=2, sort_keys=True))
+                  MANIFEST
+
             - name: Resolve the tag
               id: release
               shell: bash
@@ -151,4 +170,5 @@ jobs:
                       staged/*.whl
                       bindiff-plugin-*.zip
                       binexport-*.zip
+                      binexport-manifest.json
                       ida-plugin.json

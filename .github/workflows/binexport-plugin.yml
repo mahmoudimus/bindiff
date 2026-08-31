@@ -49,6 +49,14 @@ jobs:
                     - name: linux-x86_64
                       runs-on: ubuntu-22.04
                       artifact: binexport12_ida.so
+                    # Parity with the wheels, which build linux-aarch64:
+                    # bindings with no exporter would leave an arm64 Linux IDA
+                    # able to open a .BinDiff and unable to make one. The SDK
+                    # ships arm64_linux_64 link libraries, so there is nothing
+                    # to work around.
+                    - name: linux-arm64
+                      runs-on: ubuntu-22.04-arm
+                      artifact: binexport12_ida.so
                     - name: macos-arm64
                       runs-on: macos-15
                       artifact: binexport12_ida.dylib
