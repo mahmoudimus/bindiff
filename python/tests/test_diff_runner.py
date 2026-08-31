@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 
 from ida_plugin.diff_runner import (DiffRun, classify, panel_title,
-                                    worker_arguments)
+                                    worker_arguments, primary_export_source)
 
 
 class Result:
@@ -278,3 +278,31 @@ def test_the_sequence_runs_against_the_real_worker(bindiff_module, insider_pair,
     assert harness.panel.progress, "no progress reached the panel"
     assert ("load", str(output)) in harness.events
     assert output.is_file()
+
+
+class TestPrimaryExportSource:
+    """Which file the primary side is exported from.
+
+    The plugin used to hand the worker ida_nalt.get_input_file_path(), the
+    original binary, so every diff re-analysed it from scratch and compared
+    against a database nobody had worked in.
+    """
+
+    def test_the_saved_database_wins(self, tmp_path):
+        idb = tmp_path / "sample.i64"
+        idb.write_bytes(b"IDA1")
+        assert primary_export_source(idb, tmp_path / "sample.dll") == str(idb)
+
+    def test_the_binary_is_the_fallback_when_nothing_is_saved(self, tmp_path):
+        binary = tmp_path / "sample.dll"
+        assert primary_export_source("", binary) == str(binary)
+        assert primary_export_source(None, binary) == str(binary)
+
+    def test_a_database_path_that_does_not_exist_is_not_used(self, tmp_path):
+        """get_path can name an .i64 that was never written."""
+        binary = tmp_path / "sample.dll"
+        assert primary_export_source(tmp_path / "missing.i64", binary) == str(
+            binary)
+
+    def test_nothing_to_export_reads_as_none(self):
+        assert primary_export_source(None, None) is None

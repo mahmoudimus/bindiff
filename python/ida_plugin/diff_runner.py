@@ -19,6 +19,7 @@ implements with ida_kernwin.execute_sync.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 from ida_plugin.ui_logic import DiffProgress
@@ -150,6 +151,28 @@ def panel_title(primary: str) -> str:
     from pathlib import Path
 
     return f"BinDiff - diffing {Path(primary).name}"
+
+
+def primary_export_source(idb_path, input_path):
+    """Which file the worker should export for the primary side.
+
+    The saved database, whenever there is one. Handing over the input binary
+    instead makes the worker re-analyse it from scratch, which throws away
+    everything the database holds that the bytes do not: renamed functions,
+    applied types, and anything a deobfuscation pass rewrote. A diff of a
+    deobfuscated database against a fresh disassembly of the same bytes
+    compares two different programs, and does it silently -- the export
+    succeeds, the diff succeeds, and the answer is about a binary nobody was
+    looking at.
+
+    The input binary is the fallback for a database that has never been saved,
+    where there is nothing else to export.
+    """
+    if idb_path:
+        candidate = Path(idb_path)
+        if candidate.is_file():
+            return str(candidate)
+    return str(input_path) if input_path else None
 
 
 def worker_arguments(primary: str, secondary: str, output: str) -> list:

@@ -18,6 +18,8 @@ that did not match the schema.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -745,9 +747,11 @@ if IDA_AVAILABLE:
                 False, "*.*", "Select the secondary binary or database")
             if not secondary:
                 return
-            primary = ida_nalt.get_input_file_path()
+            primary = self._primary_to_export()
             if not primary:
-                ida_kernwin.warning("No input file for the open database.")
+                ida_kernwin.warning(
+                    "This database has never been saved and there is no input "
+                    "file to fall back on, so there is nothing to export.")
                 return
             output = ida_kernwin.ask_file(True, "*.BinDiff",
                                           "Save results as")
@@ -757,6 +761,70 @@ if IDA_AVAILABLE:
             self._report("diffing in a background process; the UI stays "
                          "responsive. This can take a while.")
             self._run_diff_async(primary, secondary, output)
+
+        def _primary_to_export(self):
+            """The file the worker exports for this side of the diff.
+
+            The saved database, not the input binary. Handing over the binary
+            makes the worker re-analyse it from scratch, which discards
+            everything the database holds that the bytes do not -- names,
+            types, and whatever a deobfuscation pass rewrote. The export still
+            succeeds and the diff still succeeds; the answer is simply about a
+            program nobody was looking at, which is the worst way for this to
+            be wrong.
+
+            Offers to save first, because the snapshot can only carry what has
+            been written. Declining is allowed and says what it costs.
+            """
+            import ida_loader
+
+            from ida_plugin.diff_runner import primary_export_source
+
+            if ida_kernwin.ask_yn(
+                    ida_kernwin.ASKBTN_YES,
+                    "HIDECANCEL\nSave the database first?\n\n"
+                    "The diff exports a copy of the saved database, so "
+                    "anything not written yet will be missing from it."
+            ) == ida_kernwin.ASKBTN_YES:
+                ida_loader.save_database(
+                    ida_loader.get_path(ida_loader.PATH_TYPE_IDB), 0)
+
+            return primary_export_source(
+                ida_loader.get_path(ida_loader.PATH_TYPE_IDB),
+                ida_nalt.get_input_file_path())
+
+        @staticmethod
+        @contextlib.contextmanager
+        def _snapshot(primary: str):
+            """A copy of the database for the worker to open, or the path
+            itself when it is not a database.
+
+            IDA holds the open .i64, and a second process opening it is at
+            best refused and at worst two writers on one file. Copying is
+            cheap next to what follows -- it is I/O against a re-analysis --
+            and it runs on the diff's own thread, so the UI never waits for it.
+            """
+            import shutil
+            import tempfile
+
+            source = Path(primary)
+            if source.suffix.lower() not in (".idb", ".i64"):
+                yield primary
+                return
+
+            handle, target = tempfile.mkstemp(suffix=source.suffix,
+                                              prefix="bindiff-primary-")
+            os.close(handle)
+            try:
+                shutil.copyfile(source, target)
+                yield target
+            finally:
+                # A leftover copy of someone's database is not a small
+                # mess, so it goes even if the diff raised.
+                try:
+                    os.unlink(target)
+                except OSError:
+                    pass
 
         def _run_diff_async(self, primary: str, secondary: str,
                             output: str) -> None:
@@ -795,9 +863,17 @@ if IDA_AVAILABLE:
                 self.controller.open_database(path)
                 self._show_matches()
 
+            def runner(args, **kwargs):
+                # The snapshot lives exactly as long as the worker needs it,
+                # and is made here rather than in _diff_database so the copy
+                # happens on this thread instead of the UI's.
+                with self._snapshot(args[1]) as source:
+                    return run_headless([args[0], source, *args[2:]],
+                                        timeout=DEFAULT_TIMEOUT_SECONDS,
+                                        **kwargs)
+
             run = DiffRun(
-                runner=functools.partial(run_headless,
-                                         timeout=DEFAULT_TIMEOUT_SECONDS),
+                runner=runner,
                 panel=form,
                 # Progress repaints must not queue behind a database lock the
                 # user's own analysis is holding; the single final call loads a
