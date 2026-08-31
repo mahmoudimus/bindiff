@@ -156,20 +156,44 @@ else:
             include_dirs.append(str(loc))
             break
 
-# Library directories - recursively find all CMake build output directories
-library_dirs = [str(BUILD_DIR)]
+# Directories under the build tree that must never be descended into.
+#
+# src_include and gen_include are the symlink trees the configure step creates
+# so that the Google-internal absolute includes resolve; each points back at
+# the source root, which contains the build tree. Walking into one is
+# unbounded. .git belongs to whatever was checked out inside the build
+# directory and holds no archives.
+_PRUNED_DIRS = {"src_include", "gen_include", ".git"}
 
-# Find all directories containing static libraries
-# Note: Skip symlinks to avoid infinite loops on Windows (CMake creates circular symlinks)
-for subdir in BUILD_DIR.rglob("*"):
-    # Skip symlinks to avoid circular reference issues
-    if subdir.is_symlink():
-        continue
-    if subdir.is_dir():
-        # Check if this directory contains any libraries
-        has_libs = any(subdir.glob("*.a")) or any(subdir.glob("*.lib"))
-        if has_libs and str(subdir) not in library_dirs:
-            library_dirs.append(str(subdir))
+
+def _archive_dirs(build_dir):
+    """Directories holding static archives, found without falling in a loop.
+
+    os.walk with the directory list pruned in place, not Path.rglob: rglob has
+    already descended into a path by the time it yields it, so testing
+    is_symlink() on the result prevents nothing. On Windows the trees above are
+    junctions, which Path.is_symlink() does not report as links at all, so the
+    walk recursed until the job was killed -- the wheel build sat on this step
+    for over an hour where Linux and macOS each took under twenty seconds.
+    """
+    found = []
+    for root, dirnames, filenames in os.walk(build_dir):
+        dirnames[:] = [
+            name for name in dirnames
+            if name not in _PRUNED_DIRS
+            and not os.path.islink(os.path.join(root, name))
+            and not getattr(os.path, "isjunction", lambda _p: False)(
+                os.path.join(root, name))
+        ]
+        if any(name.endswith((".a", ".lib")) for name in filenames):
+            found.append(root)
+    return found
+
+
+library_dirs = [str(BUILD_DIR)]
+for _archive_dir in _archive_dirs(BUILD_DIR):
+    if _archive_dir not in library_dirs:
+        library_dirs.append(_archive_dir)
 
 # Add common subdirectories
 for subdir_name in ["_deps", "lib", "lib64", "Release", "Debug"]:
