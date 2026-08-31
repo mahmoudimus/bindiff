@@ -44,7 +44,7 @@ if IDA_AVAILABLE:
     import ida_nalt
 
 PLUGIN_NAME = "BinDiff"
-PLUGIN_VERSION = "8.1.2"
+PLUGIN_VERSION = "8.1.3"
 PLUGIN_HOTKEY = "Ctrl-6"
 PLUGIN_COMMENT = "Structural comparison of executable objects"
 PLUGIN_HELP = "Load a .BinDiff result file and browse the matches"
