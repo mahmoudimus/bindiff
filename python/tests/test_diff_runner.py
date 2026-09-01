@@ -76,7 +76,8 @@ class Harness:
             post_result=self._post("result"),
             report=lambda text: self.events.append(("report", text)),
             warn=lambda text: self.events.append(("warn", text)),
-            load=lambda path: self.events.append(("load", path)))
+            load=lambda path, exports=(): self.events.append(
+                ("load", path, tuple(exports))))
 
     def execute(self, cancel=None):
         return self.build().execute(worker_arguments("a.exe", "b.exe", "o.BinDiff"),
@@ -123,7 +124,7 @@ class TestSequence:
         harness.execute()
 
         assert harness.panel.finished == "116 matches (complete)"
-        assert harness.events == [("load", "o.BinDiff"),
+        assert harness.events == [("load", "o.BinDiff", ()),
                                   ("report", "diff complete: 116 matches")]
 
     def test_a_failure_warns_and_loads_nothing(self):
@@ -176,7 +177,7 @@ class TestSequence:
         assert ("report", "progress reporting stopped: "
                           "RuntimeError: widget is gone") in harness.events
         # And the diff itself is still delivered.
-        assert ("load", "o.BinDiff") in harness.events
+        assert ("load", "o.BinDiff", ()) in harness.events
 
     def test_the_cancel_event_reaches_the_worker(self):
         import threading
@@ -277,7 +278,11 @@ def test_the_sequence_runs_against_the_real_worker(bindiff_module, insider_pair,
 
     assert outcome.status == "complete", outcome.panel_message
     assert harness.panel.progress, "no progress reached the panel"
-    assert ("load", str(output)) in harness.events
+    # The exports element is not asserted here: this drives the real
+    # worker with the "diff" command, which takes two .BinExport paths
+    # and records no export stage. Only "pipeline" reports them.
+    assert any(event[0] == "load" and event[1] == str(output)
+               for event in harness.events), harness.events
     assert output.is_file()
 
 
@@ -330,3 +335,29 @@ class TestDefaultOutputName:
     def test_a_name_without_a_suffix_survives(self):
         assert default_output_name("/a/primary", "/b/secondary") == (
             "primary_vs_secondary.BinDiff")
+
+
+class TestExportsReachTheLoader:
+    """A .BinDiff records matches and not where its inputs were.
+
+    Unmatched lists and every ported comment come out of the .BinExport
+    files, so losing their paths on the way back from the worker means the
+    plugin has to guess -- and it guesses by looking beside the result file,
+    which is wrong whenever the exports live somewhere else.
+    """
+
+    def test_the_worker_reported_paths_reach_load(self):
+        harness = Harness(Result(
+            ok=True, matches=116,
+            exports=["/tmp/a.BinExport", "/tmp/b.BinExport"]))
+        harness.build().execute(["pipeline", "a", "b", "o.BinDiff"],
+                                "o.BinDiff")
+        assert ("load", "o.BinDiff",
+                ("/tmp/a.BinExport", "/tmp/b.BinExport")) in harness.events
+
+    def test_no_exports_is_an_empty_tuple_not_a_crash(self):
+        """The `diff` command takes two exports and records no export stage,
+        so the loader must cope with knowing nothing."""
+        harness = Harness(Result(ok=True, matches=116))
+        harness.build().execute(["diff", "a", "b", "o.BinDiff"], "o.BinDiff")
+        assert ("load", "o.BinDiff", ()) in harness.events

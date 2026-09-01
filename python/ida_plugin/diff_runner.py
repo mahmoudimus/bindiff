@@ -89,14 +89,16 @@ class DiffRun:
                file and opens windows, so the plugin posts it with MFF_WRITE.
     `report`   writes a line to the output window.
     `warn`     shows a modal warning.
-    `load`     opens the finished .BinDiff and shows the matches.
+    `load`     opens the finished .BinDiff and shows the matches. Called
+               with the output path and the exports the worker used, so the
+               caller need not guess where they were.
     """
 
     def __init__(self, *, runner: Callable, panel, post_progress: Callable,
                  post_result: Callable,
                  report: Callable[[str], None],
                  warn: Callable[[str], None],
-                 load: Callable[[str], None]) -> None:
+                 load: Callable[..., None]) -> None:
         self._runner = runner
         self._panel = panel
         self._post_progress = post_progress
@@ -136,7 +138,13 @@ class DiffRun:
 
             self._panel.finish(outcome.panel_message)
             if outcome.open_result:
-                self._load(output)
+                # The worker knows where the exports were, and a .BinDiff does
+                # not record them. Without this the plugin has to guess from
+                # the result filename, which only works when the exports
+                # happen to sit beside it -- and when the guess fails, comment
+                # porting and the unmatched lists degrade with a message about
+                # a file the user never named.
+                self._load(output, tuple(result.details.get("exports") or ()))
             if outcome.report:
                 self._report(outcome.report)
             if outcome.warning:

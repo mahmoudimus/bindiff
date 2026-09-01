@@ -543,6 +543,34 @@ if IDA_AVAILABLE:
                 return
             handler()
 
+        def _ensure_binexport(self, side: int) -> bool:
+            """Makes sure the .BinExport for one side is known, asking if not.
+
+            A .BinDiff records matches and nothing else: the unmatched lists
+            and every comment come out of the exports. The plugin can usually
+            guess where they are from the result filename, but only when they
+            sit beside it -- diffing two exports that live elsewhere defeats
+            it, and the old behaviour was to give up with a message naming a
+            file the user had never heard of.
+
+            Asking is the honest response to not knowing. Declining leaves
+            things exactly as they were.
+            """
+            if self.controller.resolve_binexports()[side] is not None:
+                return True
+
+            label = "primary" if side == 0 else "secondary"
+            path = ida_kernwin.ask_file(
+                False, "*.BinExport",
+                f"Select the {label} .BinExport for these results")
+            if not path:
+                return False
+
+            known = list(self.controller.resolve_binexports())
+            known[side] = path
+            self.controller.set_binexports(known[0], known[1])
+            return True
+
         def _selected_match_ids(self) -> list:
             form = self.controller._matched_form
             rows = form.selected_rows() if form is not None else []
@@ -639,6 +667,13 @@ if IDA_AVAILABLE:
             message = (f"renamed {symbol_result.applied} function(s)"
                        + (f", {symbol_result.failed} failed"
                           if symbol_result.failed else ""))
+            # Comments live in the secondary export, so ask for it before
+            # reporting that they were skipped for want of a file the user
+            # could have supplied.
+            if not self._ensure_binexport(1):
+                self._report(f"{message}; comments skipped: no secondary "
+                             ".BinExport was given, and comments live there")
+                return symbols
             try:
                 comments = self.controller.plan_comment_ports(match_ids)
             except FileNotFoundError as exc:
@@ -771,6 +806,10 @@ if IDA_AVAILABLE:
             from ida_plugin.panels import UnmatchedFunctionsForm
 
             side = "secondary" if secondary else "primary"
+            # The unmatched list is derived from the export, not the result
+            # file, so there is nothing to show without one.
+            if not self._ensure_binexport(1 if secondary else 0):
+                return
             try:
                 rows = (self.controller.unmatched_secondary() if secondary
                         else self.controller.unmatched_primary())
@@ -1042,8 +1081,12 @@ if IDA_AVAILABLE:
 
                 ida_kernwin.execute_sync(wrapped, flags)
 
-            def load(path: str) -> None:
+            def load(path: str, exports: Sequence[str] = ()) -> None:
                 self.controller.open_database(path)
+                # Recorded rather than guessed. open_database clears them, so
+                # this has to come after it.
+                if len(exports) == 2:
+                    self.controller.set_binexports(exports[0], exports[1])
                 self._show_matches()
 
             def runner(args, **kwargs):
