@@ -1183,6 +1183,11 @@ if IDA_AVAILABLE:
                           if replaced else "")
                        + (f", {symbol_result.failed} failed"
                           if symbol_result.failed else ""))
+            if not symbols and not symbol_result.failed:
+                # Nothing was planned, so "renamed 0" is the outcome of there
+                # being nothing to rename, not of a rename going wrong. Said
+                # the other way round it reads as a failure.
+                message = "no names to port"
             # Whatever is still skipped is accounted for rather than silent.
             skips = explain_symbol_port_skips(
                 self.controller.matches_for(match_ids),
@@ -1311,8 +1316,11 @@ if IDA_AVAILABLE:
                 ida_kernwin.warning(str(exc))
                 return
             result = apply_comment_ports(ports)
-            self._report(f"wrote {result.applied} comment(s), "
-                         f"{result.failed} failed")
+            # The same sentence import-all prints. Two wordings for one
+            # action read as two different things having happened.
+            self.controller.mark_imported(result.applied_matches)
+            self._report(_describe_comments(ports, result) + "; not yet saved")
+            self._refresh_views()
 
         # -- clipboard ------------------------------------------------------
 
