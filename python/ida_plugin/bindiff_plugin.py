@@ -40,6 +40,30 @@ from bindiff.ida_env import qt_widgets_usable
 # 9.1. See bindiff.ida_env.
 IDA_AVAILABLE = qt_widgets_usable()
 
+def _describe_symbols(planned, result, replaced: int, skips) -> str:
+    """The names half of an import.
+
+    Leads with what happened rather than with a count, because a selection
+    that is already fully named is the common case once you have imported
+    once, and "renamed 0 function(s)" reads as a failure of the thing that
+    was in fact unnecessary.
+    """
+    if result.applied:
+        text = f"{result.applied} written"
+        if replaced:
+            text += f" ({replaced} replaced an existing name)"
+    elif planned:
+        text = "none written"
+    else:
+        text = "nothing to write"
+    if result.failed:
+        text += f", {result.failed} failed"
+    if skips:
+        text += " -- " + ", ".join(f"{count} {reason}"
+                                   for reason, count in sorted(skips.items()))
+    return text
+
+
 def _describe_comments(planned, result) -> str:
     """What happened to the comments, in enough detail to act on.
 
@@ -49,14 +73,13 @@ def _describe_comments(planned, result) -> str:
     address the database will not take a comment on -- and different fixes.
     """
     if not planned:
-        return ("no comments to port: the secondary export has none on the "
-                "matched instructions of this selection")
+        return ("nothing to write -- the secondary export has no comment on "
+                "the matched instructions of this selection")
     kinds = {}
     for port in planned:
         kinds[port.kind] = kinds.get(port.kind, 0) + 1
     detail = ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items()))
-    message = (f"wrote {result.applied} of {len(planned)} comment(s) "
-               f"({detail})")
+    message = f"{result.applied} of {len(planned)} written ({detail})"
     if result.failed:
         where = ", ".join(f"0x{a:X}" for a in result.failed_addresses[:5])
         more = ("..." if len(result.failed_addresses) > 5 else "")
@@ -1034,7 +1057,7 @@ if IDA_AVAILABLE:
                 if apply_prototype(address, declaration):
                     applied += 1
 
-            message = f"applied {applied} prototype(s) of {len(ports)}"
+            message = f"{applied} of {len(ports)} prototype(s) applied"
             if defined or failed:
                 message += f"; defined {defined} type(s)"
                 if failed:
@@ -1045,7 +1068,7 @@ if IDA_AVAILABLE:
                 # silently dropped.
                 message += (f"; {len(plan.unresolved)} type(s) could not be "
                             f"ordered: {', '.join(plan.unresolved[:3])}")
-            self._report(message + "; not yet saved")
+            self._report("types: " + message + "; not yet saved")
             return True
 
         def _import_types(self) -> None:
@@ -1178,48 +1201,41 @@ if IDA_AVAILABLE:
             self.controller.record_ported_names(symbols)
             replaced = sum(1 for port in symbols
                            if not _is_generated_name(port.old_name))
-            message = (f"renamed {symbol_result.applied} function(s)"
-                       + (f" ({replaced} replaced an existing name)"
-                          if replaced else "")
-                       + (f", {symbol_result.failed} failed"
-                          if symbol_result.failed else ""))
-            if not symbols and not symbol_result.failed:
-                # Nothing was planned, so "renamed 0" is the outcome of there
-                # being nothing to rename, not of a rename going wrong. Said
-                # the other way round it reads as a failure.
-                message = "no names to port"
             # Whatever is still skipped is accounted for rather than silent.
             skips = explain_symbol_port_skips(
                 self.controller.matches_for(match_ids),
                 overwrite_existing=True,
                 **{k: v for k, v in floors.items()})
-            if skips:
-                message += "; " + ", ".join(
-                    f"{count} skipped: {reason}"
-                    for reason, count in sorted(skips.items()))
+            # One line per kind of thing. Crammed into one sentence it read
+            # as "renamed 0 function(s); 30 skipped: already named the same,
+            # 1 skipped: below the similarity or confidence floor; wrote 37
+            # of 37 comment(s) ..." -- four clauses deep, leading with a zero,
+            # and the question it was asked to answer (did the comments go?)
+            # buried at the end.
+            self._report("names: " + _describe_symbols(
+                symbols, symbol_result, replaced, skips))
             # Comments live in the secondary export, so ask for it before
             # reporting that they were skipped for want of a file the user
             # could have supplied.
             self.controller.mark_imported(symbol_result.applied_matches)
             if not self._ensure_export_file(1):
-                self._report(f"{message}; comments skipped: no secondary "
-                             ".BinExport was given, and comments live there"
-                             "; not yet saved")
+                self._report("comments: skipped, no secondary .BinExport was "
+                             "given and comments live there")
                 self._refresh_matches()
                 return symbols
             try:
                 comments = self.controller.plan_comment_ports(
                     match_ids, **floors)
             except FileNotFoundError as exc:
-                self._report(f"{message}; comments skipped: {exc}"
-                             "; not yet saved")
+                self._report(f"comments: skipped, {exc}")
                 self._refresh_matches()
                 return symbols
             comment_result = apply_comment_ports(comments)
             self.controller.mark_imported(symbol_result.applied_matches
                                           | comment_result.applied_matches)
-            self._report(f"{message}; {_describe_comments(comments, comment_result)}"
-                         "; not yet saved")
+            self._report("comments: "
+                         + _describe_comments(comments, comment_result)
+                         + "; not yet saved")
             # The names in the table came from the result file, which has just
             # changed, so redraw rather than leave it showing what used to be
             # true.
@@ -1319,7 +1335,8 @@ if IDA_AVAILABLE:
             # The same sentence import-all prints. Two wordings for one
             # action read as two different things having happened.
             self.controller.mark_imported(result.applied_matches)
-            self._report(_describe_comments(ports, result) + "; not yet saved")
+            self._report("comments: " + _describe_comments(ports, result)
+                         + "; not yet saved")
             self._refresh_views()
 
         # -- clipboard ------------------------------------------------------
