@@ -570,6 +570,18 @@ that it never allocated. Neither names the cause. Check
 `build/out/libbindiff_shared.a` against the newest engine source before
 trusting any result from a locally built extension.
 
+**Do not symlink the repository into ~/.idapro/plugins.** The build tree
+contains `build/out/src_include/third_party/zynamics/bindiff -> <the
+repository>`, the configure-time symlink that makes the absolute includes
+resolve. Exposing the repository root to IDA's plugin scanner exposes that
+loop: IDA descends it, finds a second `ida-plugin.json` and loads a second
+copy of the plugin as a separate module. Both copies register the same action
+names, the one that answers is whichever registered last, and the symptom is
+an edit that appears not to take effect plus a traceback naming a path under
+`build/out/src_include/...`. `tools/scripts/install_dev_plugin.sh` links the
+manifest and `python/` individually and refuses to finish if more than one
+manifest is reachable.
+
 **LTO makes the archives compiler-specific.** `BINDIFF_ENABLE_IPO` is on by
 default, so the `.a` files hold LLVM bitcode rather than machine code (`file`
 says "LLVM bitcode, wrapper") and only an LLVM at least as new as the producer
