@@ -354,6 +354,7 @@ if IDA_AVAILABLE:
 
         _control_panel = None
         _cancel_event = None
+        _autosave_timer = None
 
         def init(self):
             self._register_actions()
@@ -363,6 +364,9 @@ if IDA_AVAILABLE:
             for name in self._registered:
                 ida_kernwin.unregister_action(name)
             self._registered.clear()
+            if self._autosave_timer is not None:
+                self._autosave_timer.stop()
+                self._autosave_timer = None
             self.controller.close()
 
         def run(self, arg) -> bool:
@@ -386,9 +390,51 @@ if IDA_AVAILABLE:
                     "on_save": self._save_results,
                     "on_cancel": self._cancel_running_diff,
                     "on_show": self._show_view,
+                    "on_autosave": self._set_autosave,
                 })
             self._control_panel.Show()
             self._sync_control_panel()
+
+        def _set_autosave(self, enabled: bool, seconds: int) -> None:
+            """Starts or stops the auto-save timer.
+
+            The timer lives here rather than on the panel so hiding the panel
+            does not silently stop saving. A checkbox that stops working when
+            its window is closed is worse than no checkbox.
+            """
+            from bindiff.qt_shim import QtCore
+
+            if self._autosave_timer is None:
+                self._autosave_timer = QtCore.QTimer()
+                self._autosave_timer.timeout.connect(self._autosave_tick)
+            self._autosave_timer.stop()
+            if enabled:
+                self._autosave_timer.setInterval(max(5, int(seconds)) * 1000)
+                self._autosave_timer.start()
+
+        def _autosave_tick(self) -> None:
+            """Commits, but only when there is something to commit.
+
+            Asking the connection rather than tracking a flag: sqlite knows
+            whether a write has happened since the last commit, and a flag of
+            our own would go stale the first time a new edit method forgot to
+            set it. It also keeps this quiet -- a timer that reported "saved"
+            every minute with nothing to save would train you to ignore it.
+            """
+            database = getattr(self.controller, "database", None)
+            if database is None or not database.has_unsaved_changes:
+                return
+            try:
+                self.controller.save()
+            except Exception as exc:
+                # Stop rather than fail on a timer forever: a broken save that
+                # complains once a minute is its own problem.
+                self._set_autosave(False, 0)
+                ida_kernwin.warning(
+                    f"{PLUGIN_NAME}: auto-save failed and has been turned "
+                    f"off.\n\n{exc}")
+                return
+            self._report("auto-saved")
 
         def _show_view(self, key: str) -> None:
             {"matched": self._show_matches,

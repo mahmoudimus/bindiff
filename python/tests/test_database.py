@@ -228,3 +228,38 @@ class TestRecordingPortedNames:
         with BinDiffDatabase.open(writable.path, read_only=True) as fresh:
             assert not any(m.name_primary == "staged_only"
                            for m in fresh.matches())
+
+
+class TestUnsavedChanges:
+    """What auto-save asks before committing.
+
+    sqlite already tracks it, so this reads the transaction state rather than
+    keeping a flag -- a flag would go stale the first time a new edit method
+    forgot to set it, and the failure would be silent data loss on Revert.
+    """
+
+    def test_a_fresh_connection_is_clean(self, writable):
+        assert writable.has_unsaved_changes is False
+
+    def test_an_edit_makes_it_dirty(self, writable):
+        target = next(m.id for m in writable.matches())
+        writable.confirm_matches([target])
+        assert writable.has_unsaved_changes is True
+
+    def test_commit_makes_it_clean_again(self, writable):
+        target = next(m.id for m in writable.matches())
+        writable.confirm_matches([target])
+        writable.commit()
+        assert writable.has_unsaved_changes is False
+
+    def test_rollback_makes_it_clean_again(self, writable):
+        target = next(m.id for m in writable.matches())
+        writable.confirm_matches([target])
+        writable.rollback()
+        assert writable.has_unsaved_changes is False
+
+    def test_it_notices_a_ported_name(self, writable):
+        """Every edit method must show up here, including the newest one."""
+        target = next(m.id for m in writable.matches())
+        writable.set_primary_names({target: "ported"})
+        assert writable.has_unsaved_changes is True

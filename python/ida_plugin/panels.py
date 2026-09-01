@@ -690,6 +690,9 @@ if IDA_AVAILABLE:
 
             self._progress_box.setVisible(False)
             self._refresh_enabled()
+            # The checkbox starts on, so say so rather than waiting for the
+            # first toggle to start the timer.
+            self._emit_autosave()
 
         def _diff_group(self):
             box = QtWidgets.QGroupBox("Diff against")
@@ -727,8 +730,30 @@ if IDA_AVAILABLE:
             # the thing you need when two diffs are open in two IDAs.
             self._results_dot = QtWidgets.QLabel()
             self._results_label = QtWidgets.QLabel()
+
+            self._autosave = QtWidgets.QCheckBox("Auto-save every")
+            self._autosave.setToolTip(
+                "Commit edits to the .BinDiff on a timer.\n\n"
+                "Confirmations, deletions, manual matches and ported names "
+                "are held in an open transaction until saved. With this on "
+                "they are written periodically instead.\n\n"
+                "Note that Revert undoes what has not been saved, so a "
+                "shorter interval leaves less to revert.")
+            self._autosave.setChecked(True)
+            self._autosave_seconds = QtWidgets.QSpinBox()
+            self._autosave_seconds.setRange(5, 3600)
+            self._autosave_seconds.setValue(60)
+            self._autosave_seconds.setSuffix(" s")
+            self._autosave_seconds.setToolTip(
+                "How often to save, in seconds.")
+            self._autosave.toggled.connect(self._emit_autosave)
+            self._autosave_seconds.valueChanged.connect(self._emit_autosave)
+
             row.addWidget(load)
             row.addWidget(self._save_button)
+            row.addSpacing(12)
+            row.addWidget(self._autosave)
+            row.addWidget(self._autosave_seconds)
             row.addStretch(1)
             row.addWidget(self._results_dot)
             row.addWidget(self._results_label)
@@ -790,6 +815,15 @@ if IDA_AVAILABLE:
             return box
 
         # -- state -----------------------------------------------------------
+
+        def _emit_autosave(self, *_args) -> None:
+            self._autosave_seconds.setEnabled(self._autosave.isChecked())
+            self._call("on_autosave", self._autosave.isChecked(),
+                       self._autosave_seconds.value())
+
+        def autosave_settings(self) -> tuple:
+            """(enabled, seconds), for a caller starting the timer."""
+            return (self._autosave.isChecked(), self._autosave_seconds.value())
 
         def _call(self, name, *args):
             callback = self._callbacks.get(name)

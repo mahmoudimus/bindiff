@@ -161,6 +161,17 @@ class BinDiffDatabase:
     def close(self) -> None:
         self._connection.close()
 
+    @property
+    def has_unsaved_changes(self) -> bool:
+        """True when this connection holds edits that commit() would keep.
+
+        sqlite tracks it: a transaction is open exactly when a write has
+        happened since the last commit or rollback. Asking it beats keeping a
+        flag of our own, which would be a second thing to get wrong -- and
+        would go stale the first time a new edit method forgot to set it.
+        """
+        return bool(self._connection.in_transaction)
+
     def commit(self) -> None:
         self._connection.commit()
 
