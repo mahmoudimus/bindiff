@@ -453,6 +453,32 @@ class TestPortPreview:
         assert preview.outcome(5) == OUTCOME_NOTHING
         assert preview.outcome(99) == ""
 
+    def test_outcome_is_a_lookup_not_a_scan(self):
+        from types import SimpleNamespace
+
+        from ida_plugin.porting import (OUTCOME_ALREADY_NAMED, OUTCOME_BELOW_THRESHOLD,
+                                        OUTCOME_NOTHING, OUTCOME_REPLACES_YOURS,
+                                        OUTCOME_WILL_WRITE, preview_symbol_ports)
+        # The workbench asks for one outcome per shown row on every refresh, so
+        # a scan of the buckets makes a redraw quadratic in the result size.
+        shapes = [("sub_%d", "alpha_%d", 0.9, OUTCOME_WILL_WRITE),
+                  ("mine_%d", "beta_%d", 0.9, OUTCOME_REPLACES_YOURS),
+                  ("same_%d", "same_%d", 0.9, OUTCOME_ALREADY_NAMED),
+                  ("sub_%d", "delta_%d", 0.1, OUTCOME_BELOW_THRESHOLD),
+                  ("sub_%d", "sub_%d", 0.9, OUTCOME_NOTHING)]
+        matches, expected = [], {}
+        for index in range(2000):
+            primary, secondary, similarity, outcome = shapes[index % len(shapes)]
+            matches.append(SimpleNamespace(
+                id=index, similarity=similarity, confidence=0.9,
+                address_primary=index, address_secondary=index + 0x10000,
+                name_primary=primary % index, name_secondary=secondary % index))
+            expected[index] = outcome
+
+        preview = preview_symbol_ports(matches, min_similarity=0.5)
+        assert {index: preview.outcome(index) for index in expected} == expected
+        assert preview.outcome(9999) == ""
+
     def test_ports_are_what_will_be_written(self):
         from ida_plugin.porting import preview_symbol_ports
         preview = preview_symbol_ports(self._matches(), min_similarity=0.5)

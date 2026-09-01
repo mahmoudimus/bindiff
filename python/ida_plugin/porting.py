@@ -158,22 +158,33 @@ class PortPreview:
     below_threshold: Tuple[int, ...]
     nothing_to_write: Tuple[int, ...]
 
+    def __post_init__(self) -> None:
+        # Built once, because the caller asks per row: the workbench takes one
+        # outcome for every row it shows on every refresh, so scanning the
+        # buckets would make a redraw quadratic in the size of the result --
+        # 10,000 matches against 10,000 shown rows, per keystroke. Set through
+        # object.__setattr__ since the dataclass is frozen, and derived from
+        # the fields, so it stays out of eq and repr.
+        by_id: Dict[int, str] = {}
+        for port in self.will_write:
+            by_id.setdefault(port.match_id, OUTCOME_WILL_WRITE)
+        for port in self.replaces_yours:
+            by_id.setdefault(port.match_id, OUTCOME_REPLACES_YOURS)
+        for match_id in self.already_named:
+            by_id.setdefault(match_id, OUTCOME_ALREADY_NAMED)
+        for match_id in self.below_threshold:
+            by_id.setdefault(match_id, OUTCOME_BELOW_THRESHOLD)
+        for match_id in self.nothing_to_write:
+            by_id.setdefault(match_id, OUTCOME_NOTHING)
+        object.__setattr__(self, "_by_id", by_id)
+
     @property
     def ports(self) -> List[SymbolPort]:
         return list(self.will_write) + list(self.replaces_yours)
 
     def outcome(self, match_id: int) -> str:
-        if any(p.match_id == match_id for p in self.will_write):
-            return OUTCOME_WILL_WRITE
-        if any(p.match_id == match_id for p in self.replaces_yours):
-            return OUTCOME_REPLACES_YOURS
-        if match_id in self.already_named:
-            return OUTCOME_ALREADY_NAMED
-        if match_id in self.below_threshold:
-            return OUTCOME_BELOW_THRESHOLD
-        if match_id in self.nothing_to_write:
-            return OUTCOME_NOTHING
-        return ""
+        """The bucket this match is in, or "" for an id the preview never saw."""
+        return self._by_id.get(match_id, "")
 
     def summary(self) -> str:
         """The footer, counting each outcome separately.
