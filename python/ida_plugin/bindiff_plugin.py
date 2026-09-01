@@ -281,9 +281,23 @@ if IDA_AVAILABLE:
             return 1
 
         def update(self, ctx) -> int:
-            if self._enabled is not None and not self._enabled():
-                return ida_kernwin.AST_DISABLE_ALWAYS
-            return ida_kernwin.AST_ENABLE_ALWAYS
+            """Whether the action is available right now.
+
+            The _ALWAYS variants mean what they say: IDA records the answer
+            and stops calling update(). Returning AST_DISABLE_ALWAYS for an
+            action that is merely unavailable *yet* disables it for the life
+            of the session -- which is what happened to every view action
+            here. They were greyed before a result existed, IDA never asked
+            again, and loading one changed nothing: Matched functions,
+            Statistics and both unmatched lists stayed unreachable.
+
+            AST_ENABLE and AST_DISABLE are the ones that get re-asked.
+            """
+            if self._enabled is None:
+                # Genuinely always available, so there is nothing to re-ask.
+                return ida_kernwin.AST_ENABLE_ALWAYS
+            return (ida_kernwin.AST_ENABLE if self._enabled()
+                    else ida_kernwin.AST_DISABLE)
 
     class BinDiffPlugin(ida_idaapi.plugin_t):
         flags = ida_idaapi.PLUGIN_PROC | ida_idaapi.PLUGIN_FIX
