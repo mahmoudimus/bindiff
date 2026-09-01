@@ -310,6 +310,57 @@ def apply_symbol_ports(ports: Sequence[SymbolPort],
     return result
 
 
+def plan_stack_name_ports(database, names_by_operand, match_ids=None,
+                          min_similarity: float = None,
+                          min_confidence: float = None) -> list:
+    """Which stack variables to rename, addressed by instruction.
+
+    `names_by_operand` is bindiff.stack_names.stack_names_by_operand for the
+    secondary export: {address: {operand index: StackName}}, generated names
+    already dropped.
+
+    The offset is deliberately not carried. A .BinExport records the raw
+    displacement in the instruction and the two sides do not agree about it --
+    987 of 2910 matched operands differed on the measured pair -- so the name
+    travels with the instruction and the primary's own offset is resolved
+    against the database when the rename is applied.
+    """
+    from bindiff.stack_names import names_a_whole_variable
+    from bindiff.stack_names_ida import StackNamePort
+
+    if min_similarity is None:
+        min_similarity = DEFAULT_PORT_MIN_SIMILARITY
+    if min_confidence is None:
+        min_confidence = DEFAULT_PORT_MIN_CONFIDENCE
+
+    wanted = set(match_ids) if match_ids is not None else None
+    selected = [match for match in database.matches()
+                if (wanted is None or match.id in wanted)
+                and match.similarity >= min_similarity
+                and match.confidence >= min_confidence]
+    if not selected:
+        return []
+    pairs_by_match = database.instruction_matches_for(
+        [match.id for match in selected])
+
+    ports = []
+    for match in selected:
+        for primary_address, secondary_address in pairs_by_match.get(
+                match.id, ()):
+            found = names_by_operand.get(secondary_address)
+            if not found:
+                continue
+            for operand_index, entry in sorted(found.items()):
+                if not names_a_whole_variable(entry.name):
+                    continue
+                ports.append(StackNamePort(
+                    function=match.address_primary,
+                    address=primary_address,
+                    operand_index=operand_index,
+                    name=entry.name))
+    return ports
+
+
 def apply_comment_ports(ports: Sequence[CommentPort],
                         set_comment: Optional[Callable[..., bool]] = None
                         ) -> PortResult:

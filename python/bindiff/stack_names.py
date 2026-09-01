@@ -40,12 +40,32 @@ from typing import Dict, List
 # common enough that missing them left a quarter of the "human-named"
 # operands looking meaningful when none of them were. "var_s0" is a saved
 # register slot.
+# The trailing "h" is IDA's hex suffix and appears on both halves --
+# "var_80h" and "var_240+Ch". Missing it left 519 operands looking
+# human-named on the measured pair, all of them var_*, and every one of them
+# was refused by the rename as an invalid identifier.
+_HEX = r"[0-9A-Fa-f]+h?"
 _GENERATED = re.compile(
-    r"^(var|arg|lvar|s|sp|dst|src)_[0-9A-Fa-f]+(?:[+-][0-9A-Fa-f]+)?$|"
-    r"^var_s[0-9A-Fa-f]+(?:[+-][0-9A-Fa-f]+)?$|"
-    r"^(sub|loc|off|unk|byte|word|dword|qword|xmmword|ymmword|flt|dbl|stru|"
-    r"asc|algn)_[0-9A-Fa-f]+(?:[+-][0-9A-Fa-f]+)?$",
+    rf"^(var|arg|lvar|s|sp|dst|src)_{_HEX}(?:[+-]{_HEX})?$|"
+    rf"^var_s{_HEX}(?:[+-]{_HEX})?$|"
+    rf"^(sub|loc|off|unk|byte|word|dword|qword|xmmword|ymmword|flt|dbl|stru|"
+    rf"asc|algn)_{_HEX}(?:[+-]{_HEX})?$",
     re.IGNORECASE)
+
+# A plain identifier. BinExport renders a reference into the middle of a slot
+# as "Src+8", which names no variable: the variable is Src, and the operand
+# points eight bytes into it. Renaming a frame member to "Src+8" is not what
+# the other side meant, and IDA refuses it anyway.
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def names_a_whole_variable(name: str) -> bool:
+    """True when the name can be given to a frame member as it stands.
+
+    Separate from is_generated_name: "Src+8" was written by a person, it is
+    simply not a name -- it is a reference into one.
+    """
+    return bool(_IDENTIFIER.match(name or ""))
 
 
 def _signed(value: int) -> int:

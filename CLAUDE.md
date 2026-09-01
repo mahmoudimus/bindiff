@@ -476,6 +476,31 @@ times there against 38 stripped, a 33× collapse. Anything measured against
 symbols or debug info is measuring the debug info. `--strip` is the mode that
 answers the question the default config has to answer.
 
+**Stack variable names** (`stack_names.py`, `stack_names_ida.py`) — upstream
+issue #13. BinExport2 has no locals table, which is why this looks impossible;
+the names are there anyway, because a stack operand is an `IMMEDIATE_INT`
+expression carrying its own `symbol`. Two things are *not* there: the
+primary's frame offset, and the frame itself.
+
+**The offset cannot be carried across.** The export records the raw
+displacement in the instruction, and the two sides disagree — 987 of 2910
+matched operands differed on the hexx64 pair, a third of them. So the name
+travels with the *instruction*, through the match, and
+`calc_stkvar_struc_offset` resolves the primary's own offset at apply time.
+A frame is a `tinfo_t` UDT since IDA 9.0, renamed with `rename_udm`, which
+returns `TERR_*` and really does refuse a name already used in that frame —
+unlike `set_name`.
+
+Measured on hexx64 9.3 → 9.4: 2354 planned, **14 renamed**, 2060 already
+identical, 223 not stack variables in this database, 57 refused as
+collisions. The small number is the honest one: IDA derives `Src`, `Str`,
+`Block` from its own type libraries on both sides, so most of what looks
+portable is already there. The feature earns its keep on a database somebody
+has named by hand, not on two builds of the same DLL.
+
+It does not reach the decompiler. Hex-Rays names its own locals in its own
+store, the same split as comments.
+
 **Configuration** (`config.{h,cc}`, `bindiff_config.proto`, `bindiff.json`): `bindiff.json` is embedded at build time (`file(READ)` → `config_defaults.h.in`) and also parsed into the `Config` proto. `config::Proto()` lazily loads per-user/system config and merges it over the defaults; `config::MergeInto()` special-cases the matching-step lists because order and uniqueness matter. Editing `bindiff.json` needs a rebuild to affect compiled-in defaults.
 
 **Progress and cancellation.** `Diff()` takes an optional `DiffCallback`, called before each matching step and on each round of propagating matches through the call graph — propagation is where a step spends its time, so a callback that only saw step boundaries would go quiet for exactly as long as the work takes. Returning false stops the diff; `ClassifyChanges` still runs, so a cancelled diff yields a smaller *coherent* result rather than nothing. That is worth more here than for a search: the steps run strongest first, so an interrupted diff has the matches worth having.

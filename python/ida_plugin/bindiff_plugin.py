@@ -142,6 +142,7 @@ class BinDiffController:
         self._binexports = (None, None)
         self._details = None
         self._functions = {}
+        self._stack_names = None
 
     @property
     def database(self):
@@ -162,6 +163,7 @@ class BinDiffController:
         self._binexports = (None, None)
         self._details = None
         self._functions = {}
+        self._stack_names = None
         return self._database
 
     def close(self) -> None:
@@ -260,9 +262,10 @@ class BinDiffController:
     def set_binexports(self, primary: Optional[str],
                        secondary: Optional[str]) -> None:
         self._binexports = (primary, secondary)
-        # Both caches are keyed on the old pair and neither would notice.
+        # Every cache is keyed on the old pair and none would notice.
         self._details = None
         self._functions = {}
+        self._stack_names = None
 
     def _exported_functions(self, path: str):
         """Every function in one .BinExport, parsed once and kept.
@@ -492,6 +495,28 @@ class BinDiffController:
             ports.extend(translate(stored[match.address_secondary],
                                    address_map, match.address_primary))
         return ports
+
+    def plan_stack_name_ports(self, match_ids=None, **kwargs):
+        """Stack variable names, from the secondary export.
+
+        Upstream issue #13: "Variable names are not being imported anymore".
+        BinExport2 has no locals table, which is what makes it look
+        impossible -- but a stack operand is an IMMEDIATE_INT expression
+        carrying its own name, so the names are there.
+        """
+        from bindiff.stack_names import stack_names_by_operand
+        from ida_plugin.porting import plan_stack_name_ports
+
+        database = self._require_writable()
+        secondary = self.resolve_binexports()[1]
+        if secondary is None:
+            raise FileNotFoundError(
+                "the secondary .BinExport was not found next to the result "
+                "file; stack variable names live there, not in the .BinDiff")
+        if self._stack_names is None:
+            self._stack_names = stack_names_by_operand(secondary)
+        return plan_stack_name_ports(database, self._stack_names,
+                                     match_ids=match_ids, **kwargs)
 
     def plan_comment_ports(self, match_ids=None, **kwargs):
         """Needs the secondary .BinExport: comments are not in a .BinDiff."""
@@ -1089,6 +1114,45 @@ if IDA_AVAILABLE:
 
             threading.Thread(target=work, daemon=True).start()
 
+        def _apply_stack_names(self, match_ids) -> None:
+            """Stack variable names -- upstream issue #13.
+
+            Never fails an import. The names are an extra: an export made
+            before this existed, or a frame API this build spells
+            differently, must not cost the names and comments that did go
+            across.
+            """
+            from bindiff.stack_names_ida import Unavailable, apply_stack_names
+
+            try:
+                ports = self.controller.plan_stack_name_ports(match_ids)
+            except FileNotFoundError:
+                return
+            except Exception as exc:
+                self._report(f"stack variables: skipped, {exc}")
+                return
+            if not ports:
+                return
+            try:
+                result = apply_stack_names(ports)
+            except (Unavailable, RuntimeError) as exc:
+                self._report(f"stack variables: skipped, {exc}")
+                return
+
+            message = f"stack variables: {result.applied} renamed"
+            if result.replaced:
+                message += f" ({result.replaced} replaced an existing name)"
+            if result.refused:
+                # rename_udm really does refuse, unlike set_name, and it is
+                # nearly always a name already taken in the same frame --
+                # which is information, not a mishap.
+                message += (f", {result.refused} refused: the name is "
+                            f"already used in that frame")
+            if result.unresolved:
+                message += (f", {result.unresolved} operand(s) are not stack "
+                            f"variables in this database")
+            self._report(message)
+
         def _apply_pseudocode_comments(self, match_ids) -> None:
             """The comments Hex-Rays keeps, not the ones IDA keeps.
 
@@ -1335,6 +1399,7 @@ if IDA_AVAILABLE:
                          + _describe_comments(comments, comment_result)
                          + "; not yet saved")
             self._apply_pseudocode_comments(match_ids)
+            self._apply_stack_names(match_ids)
             # The names in the table came from the result file, which has just
             # changed, so redraw rather than leave it showing what used to be
             # true.
@@ -1437,6 +1502,7 @@ if IDA_AVAILABLE:
             self._report("comments: " + _describe_comments(ports, result)
                          + "; not yet saved")
             self._apply_pseudocode_comments(ids)
+            self._apply_stack_names(ids)
             self._refresh_views()
 
         # -- clipboard ------------------------------------------------------
