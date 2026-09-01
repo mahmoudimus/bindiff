@@ -466,25 +466,31 @@ class BinDiffController:
         if not stored:
             return []
 
-        ports = []
         wanted = set(match_ids) if match_ids is not None else None
-        for match in database.matches():
-            if wanted is not None and match.id not in wanted:
-                continue
-            if (match.similarity < min_similarity
-                    or match.confidence < min_confidence):
-                continue
-            group = stored.get(match.address_secondary)
-            if not group:
-                continue
+        selected = [match for match in database.matches()
+                    if (wanted is None or match.id in wanted)
+                    and match.similarity >= min_similarity
+                    and match.confidence >= min_confidence
+                    and stored.get(match.address_secondary)]
+        if not selected:
+            return []
+        # One query, for the same reason plan_comment_ports takes one: asking
+        # per match walks an unindexed join once per match. Only the matches
+        # that have a comment are asked about, which is usually a handful.
+        pairs_by_match = database.instruction_matches_for(
+            [match.id for match in selected])
+
+        ports = []
+        for match in selected:
             # The entry pair is not always among the instruction matches --
             # a changed prologue starts the pairing a few bytes in -- so it
             # is added explicitly, the same way function comments are.
             address_map = {match.address_secondary: match.address_primary}
             address_map.update(
                 {secondary: primary for primary, secondary
-                 in database.instruction_matches(match.id)})
-            ports.extend(translate(group, address_map, match.address_primary))
+                 in pairs_by_match.get(match.id, ())})
+            ports.extend(translate(stored[match.address_secondary],
+                                   address_map, match.address_primary))
         return ports
 
     def plan_comment_ports(self, match_ids=None, **kwargs):
