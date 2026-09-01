@@ -20,6 +20,7 @@ each match and touched nothing.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
@@ -166,7 +167,7 @@ def plan_symbol_ports(
 
 
 def plan_comment_ports(
-        database, comments_by_address: Dict[int, str], *,
+        database, comments_by_address: Dict[int, object], *,
         match_ids: Optional[Sequence[int]] = None,
         min_similarity: float = DEFAULT_PORT_MIN_SIMILARITY,
         min_confidence: float = DEFAULT_PORT_MIN_CONFIDENCE
@@ -188,11 +189,42 @@ def plan_comment_ports(
             continue
         for primary_address, secondary_address in database.instruction_matches(
                 match.id):
-            text = comments_by_address.get(secondary_address)
-            if text:
-                ports.append(CommentPort(address=primary_address, text=text,
-                                         secondary_address=secondary_address,
-                                         match_id=match.id))
+            found = comments_by_address.get(secondary_address)
+            if not found:
+                continue
+            ports.extend(_ports_for(found, primary_address,
+                                    secondary_address, match.id))
+    return ports
+
+
+def _ports_for(found, primary_address, secondary_address, match_id):
+    """One or more ports from whatever the caller had at an address.
+
+    Accepts a plain string, which is what the old comment loader returned and
+    what several tests still pass, or a list of bindiff.comments
+    ExportedComment, which carries the type. A function comment and an
+    instruction comment at one address are two ports: they go to different
+    places in IDA and neither substitutes for the other.
+
+    Without this the list itself was handed to set_cmt as the comment text,
+    which fails with "argument 2 of type 'char const *'" -- a type error from
+    inside IDA rather than anywhere near the mistake.
+    """
+    if isinstance(found, str):
+        return [CommentPort(address=primary_address, text=found,
+                            secondary_address=secondary_address,
+                            match_id=match_id)]
+
+    ports = []
+    for comment in found:
+        text = getattr(comment, "text", None)
+        if not isinstance(text, str) or not text:
+            continue
+        kind = ("function" if getattr(comment, "is_function_comment", False)
+                else "instruction")
+        ports.append(CommentPort(address=primary_address, text=text,
+                                 secondary_address=secondary_address,
+                                 match_id=match_id, kind=kind))
     return ports
 
 
@@ -245,21 +277,32 @@ def apply_comment_ports(ports: Sequence[CommentPort],
     if set_comment is None:
         set_comment = _ida_set_comment
 
+    # Whether the writer takes a kind is decided once, by looking, rather
+    # than by calling it and catching TypeError. Catching it caught the wrong
+    # one: a TypeError raised *inside* IDA -- set_cmt refusing a comment that
+    # was not a string -- looked like an old two-argument stub, so it retried
+    # and failed identically, and the traceback blamed the retry.
+    takes_kind = True
+    try:
+        parameters = inspect.signature(set_comment).parameters
+        takes_kind = len(parameters) >= 3 or any(
+            p.kind is inspect.Parameter.VAR_POSITIONAL for p in
+            parameters.values())
+    except (TypeError, ValueError):
+        # A builtin or C function with no introspectable signature.
+        takes_kind = True
+
     result = PortResult()
     for port in ports:
         try:
-            if set_comment(port.address, port.text, port.kind):
-                result.applied += 1
-            else:
-                result.failed += 1
-        except TypeError:
-            # A caller's stub from before comments had kinds.
-            if set_comment(port.address, port.text):
-                result.applied += 1
-            else:
-                result.failed += 1
+            written = (set_comment(port.address, port.text, port.kind)
+                       if takes_kind
+                       else set_comment(port.address, port.text))
         except Exception:
             result.failed += 1
+            continue
+        result.applied += 1 if written else 0
+        result.failed += 0 if written else 1
     return result
 
 
