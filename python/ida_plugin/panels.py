@@ -33,6 +33,7 @@ from ida_plugin.ui_logic import (
     StatisticRow,
     describe_change_flags,
     cell_values,
+    change_legend,
     IncrementalFilter,
     filter_rows,
     format_address,
@@ -250,10 +251,14 @@ if IDA_AVAILABLE:
         def headerData(self, section, orientation, role=None):
             if role is None:
                 role = Qt.DisplayRole
-            if role != Qt.DisplayRole or orientation != Qt.Horizontal:
+            if orientation != Qt.Horizontal or not 0 <= section < len(COLUMNS):
                 return None
-            if 0 <= section < len(COLUMNS):
+            if role == Qt.DisplayRole:
                 return COLUMNS[section][1]
+            # The Change column reads "GI--EL-" and nothing on screen says
+            # what the seven positions are.
+            if role == Qt.ToolTipRole and COLUMNS[section][0] == "change":
+                return change_legend()
             return None
 
         # -- our interface ---------------------------------------------------
@@ -1125,10 +1130,14 @@ if IDA_AVAILABLE:
                 "to \"function: manual\" after confirming.")
             self._changed_only = QtWidgets.QCheckBox("Changed only")
             self._changed_only.setToolTip(
-                "Show only matches whose two functions differ.\n"
-                "Hides pairs that came out identical, so what is left is the "
-                "work. The Change column spells out how: instructions, "
-                "operands, branch inversion, loops, calls, entry point.")
+                "Show only matches whose two functions differ FROM EACH "
+                "OTHER.\n\n"
+                "Not changed since a previous diff, and not changed by you: "
+                "changed between the primary and the secondary. A match "
+                "showing \"-------\" in the Change column is a function that "
+                "came through the version bump identical, and this hides "
+                "those -- what is left is what actually moved.\n\n"
+                + change_legend())
 
             layout = QtWidgets.QHBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)

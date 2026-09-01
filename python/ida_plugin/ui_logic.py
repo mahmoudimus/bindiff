@@ -45,6 +45,19 @@ _CHANGE_CODES: Sequence[tuple[ChangeType, str, str]] = (
 )
 
 
+def change_legend() -> str:
+    """What the Change column's letters mean, as a block of text.
+
+    The column shows "GI--EL-" and nothing says what the positions are. The
+    letters are the engine's own, so they cannot be renamed to something
+    clearer -- they can only be explained where they are read.
+    """
+    lines = ["Which aspects of the two matched functions differ.",
+             "A dash means that aspect is the same on both sides.", ""]
+    lines += [f"  {code}   {name}" for _bit, code, name in _CHANGE_CODES]
+    return "\n".join(lines)
+
+
 def format_change_flags(flags: int) -> str:
     """Renders change flags the way the engine does, e.g. "G-O----"."""
     return "".join(

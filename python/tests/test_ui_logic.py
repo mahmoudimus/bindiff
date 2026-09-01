@@ -627,3 +627,26 @@ class TestIncrementalFilter:
         f(rows, MatchFilter(text="acrt"))
         current = MatchFilter(text="acrt_b")
         assert f(rows, current) == filter_rows(rows, current)
+
+
+class TestChangeLegend:
+    """The Change column shows "GI--EL-" and nothing on screen says what the
+    positions are; the letters are the engine's, so they can only be
+    explained, not renamed."""
+
+    def test_every_code_is_listed(self):
+        from ida_plugin.ui_logic import _CHANGE_CODES, change_legend
+        legend = change_legend()
+        for _bit, code, name in _CHANGE_CODES:
+            assert f"  {code}   {name}" in legend
+
+    def test_it_says_what_a_dash_means(self):
+        from ida_plugin.ui_logic import change_legend
+        assert "dash" in change_legend().lower()
+
+    def test_the_legend_covers_the_format(self):
+        """One position per code, so the legend accounts for every character
+        the column can show."""
+        from ida_plugin.ui_logic import _CHANGE_CODES, format_change_flags
+        assert len(format_change_flags(0)) == len(_CHANGE_CODES)
+        assert format_change_flags(0) == "-" * len(_CHANGE_CODES)
