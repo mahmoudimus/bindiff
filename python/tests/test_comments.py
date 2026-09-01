@@ -136,9 +136,14 @@ class TestWhatIsPortable:
         assert len(grouped[0x1000]) == 2
 
     def test_anterior_and_posterior_are_portable(self, tmp_path):
+        """Real sentences, not single words: a bare token is what IDA writes
+        at a call site, and the filter drops those. The first version of this
+        test used "above" and "below" and started failing the moment the
+        filter learned about them, which is the filter working."""
         path = build_export(
             tmp_path, [(0x1000, 4)],
-            [(0, "above", "ANTERIOR"), (0, "below", "POSTERIOR")])
+            [(0, "set up the frame before the call", "ANTERIOR"),
+             (0, "the result is in rax here", "POSTERIOR")])
         assert len(comments_mod.portable_comments(path)[0x1000]) == 2
 
 
@@ -162,3 +167,60 @@ class TestChoosingOne:
 
     def test_nothing_is_none(self):
         assert comments_mod.best_for_address([]) is None
+
+
+class TestFilteringIdasOwnComments:
+    """13,218 portable comments on a real export, of which 285 are human.
+
+    Porting the rest carries the other binary's boilerplate into someone's
+    database, where it overwrites what IDA generates natively -- with the
+    wrong addresses in it.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "Trap to Debugger",
+        "switch jump",
+        "jumptable 0000000180191217 case 82",
+        "switch 18 cases",
+        "; Section 1. (virtual address 00001000)",
+        "void (__cdecl *)()",
+        "Size",
+        "Src",
+        "void *",
+        "unsigned int",
+        "",
+        "   ",
+    ])
+    def test_idas_own_are_refused(self, text):
+        assert comments_mod.is_generated_comment(text)
+
+    @pytest.mark.parametrize("text", [
+        "Merge-chain entry test: v7->succset.n == 1",
+        "Test mblock_t.flags (+0x18) & 0x10000 -- qualifies for DCE sweep",
+        "mba_remove_empty_and_unreachable_blocks -- the CFG sweep.",
+        "this is wrong, see the other branch",
+    ])
+    def test_a_persons_note_is_kept(self, text):
+        assert not comments_mod.is_generated_comment(text)
+
+    def test_concatenated_annotations_are_refused(self):
+        """IDA joins several of its own comments at one address into one
+        multi-line string. Anchored patterns match none of it, which is why
+        jumptable annotations survived the first version of this filter."""
+        text = ("jumptable 00000001802B4A5C cases 53-57,61-85\n"
+                "jumptable 00000001802B4A5C default case")
+        assert comments_mod.is_generated_comment(text)
+
+    def test_a_real_note_beside_an_annotation_is_kept(self):
+        """All lines boilerplate is what makes the whole boilerplate; one
+        real line means somebody wrote something."""
+        text = ("jumptable 00000001802B4A5C cases 53-57\n"
+                "this dispatch is the hot path")
+        assert not comments_mod.is_generated_comment(text)
+
+    def test_include_generated_turns_it_off(self, tmp_path):
+        path = build_export(tmp_path, [(0x1000, 4)],
+                            [(0, "Trap to Debugger", "DEFAULT")])
+        assert comments_mod.portable_comments(path) == {}
+        assert comments_mod.portable_comments(
+            path, include_generated=True)[0x1000]
