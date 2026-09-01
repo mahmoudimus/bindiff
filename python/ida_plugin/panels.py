@@ -635,6 +635,233 @@ if IDA_AVAILABLE:
             if self.on_activated and index.isValid() and index.row() < len(rows):
                 self.on_activated(rows[index.row()])
 
+    class ControlPanel(ida_kernwin.PluginForm):
+        """One place to drive the plugin from.
+
+        Everything here was reachable only through menus, and three of the
+        four view entries spent the morning disabled because IDA had been
+        told once that they were permanently unavailable. Buttons whose
+        enabled state is ours sidestep that entirely.
+
+        The primary side is always the open database -- this is an assistant
+        to the IDB in front of you, not a standalone workbench -- so there is
+        one file picker and it is the secondary.
+
+        It implements the panel protocol DiffRun expects (update_progress and
+        finish), so a diff started from here reports into it rather than
+        opening a second window. The separate DiffProgressForm remains for a
+        diff started from the menus.
+        """
+
+        VIEWS = (("matched", "Matched functions"),
+                 ("statistics", "Statistics"),
+                 ("primary_unmatched", "Primary unmatched"),
+                 ("secondary_unmatched", "Secondary unmatched"))
+
+        def __init__(self, callbacks: dict) -> None:
+            super().__init__()
+            self._callbacks = callbacks
+            self.parent = None
+            self._view_buttons: dict = {}
+            self._results_open = False
+            self._started = 0.0
+            self._done = True
+
+        # -- construction ----------------------------------------------------
+
+        def OnCreate(self, form) -> None:
+            self.parent = self.FormToPyQtWidget(form)
+            layout = QtWidgets.QVBoxLayout(self.parent)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(8)
+
+            layout.addWidget(self._diff_group())
+            layout.addWidget(self._results_group())
+            self._progress_box = self._progress_group()
+            layout.addWidget(self._progress_box)
+            layout.addWidget(self._views_group())
+            layout.addStretch(1)
+
+            self._progress_box.setVisible(False)
+            self._refresh_enabled()
+
+        def _diff_group(self):
+            box = QtWidgets.QGroupBox("Diff against")
+            row = QtWidgets.QHBoxLayout(box)
+            self._secondary = QtWidgets.QLineEdit()
+            self._secondary.setPlaceholderText(
+                "Binary, .i64 database or .BinExport -- the primary is the "
+                "database you have open")
+            browse = QtWidgets.QPushButton("Browse...")
+            browse.clicked.connect(self._browse)
+            self._diff_button = QtWidgets.QPushButton("Diff")
+            self._diff_button.setToolTip(
+                "Exports your open database and diffs it against the file "
+                "above.\nA .BinExport is used as it is, so only your side is "
+                "exported.")
+            self._diff_button.clicked.connect(self._start_diff)
+            row.addWidget(self._secondary, 1)
+            row.addWidget(browse)
+            row.addWidget(self._diff_button)
+            return box
+
+        def _results_group(self):
+            box = QtWidgets.QGroupBox("Results")
+            row = QtWidgets.QHBoxLayout(box)
+            load = QtWidgets.QPushButton("Load...")
+            load.setToolTip("Open a .BinDiff produced earlier.")
+            load.clicked.connect(lambda: self._call("on_load"))
+            self._save_button = QtWidgets.QPushButton("Save")
+            self._save_button.setToolTip(
+                "Write confirmations, deletions and manual matches back to "
+                "the .BinDiff.")
+            self._save_button.clicked.connect(lambda: self._call("on_save"))
+            self._results_label = QtWidgets.QLabel("no results loaded")
+            row.addWidget(load)
+            row.addWidget(self._save_button)
+            row.addStretch(1)
+            row.addWidget(self._results_label)
+            return box
+
+        def _progress_group(self):
+            box = QtWidgets.QGroupBox("Progress")
+            column = QtWidgets.QVBoxLayout(box)
+            self._bar = QtWidgets.QProgressBar()
+            self._bar.setRange(0, 0)
+            self._detail = QtWidgets.QLabel()
+            row = QtWidgets.QHBoxLayout()
+            self._elapsed = QtWidgets.QLabel()
+            self._cancel = QtWidgets.QPushButton("Cancel")
+            self._cancel.clicked.connect(lambda: self._call("on_cancel"))
+            self._hide = QtWidgets.QPushButton("Hide")
+            self._hide.setToolTip("Put the progress away. Results stay open.")
+            self._hide.clicked.connect(
+                lambda: self._progress_box.setVisible(False))
+            self._hide.setVisible(False)
+            row.addWidget(self._elapsed)
+            row.addStretch(1)
+            row.addWidget(self._cancel)
+            row.addWidget(self._hide)
+            column.addWidget(self._bar)
+            column.addWidget(self._detail)
+            column.addLayout(row)
+
+            self._timer = QtCore.QTimer(self.parent)
+            self._timer.timeout.connect(self._tick)
+            return box
+
+        def _views_group(self):
+            box = QtWidgets.QGroupBox("Views")
+            grid = QtWidgets.QGridLayout(box)
+            for index, (key, label) in enumerate(self.VIEWS):
+                button = QtWidgets.QPushButton(label)
+                button.clicked.connect(
+                    lambda _checked=False, k=key: self._call("on_show", k))
+                grid.addWidget(button, index // 2, index % 2)
+                self._view_buttons[key] = button
+            return box
+
+        # -- state -----------------------------------------------------------
+
+        def _call(self, name, *args):
+            callback = self._callbacks.get(name)
+            if callback is not None:
+                callback(*args)
+
+        def _browse(self) -> None:
+            path = ida_kernwin.ask_file(
+                False, "*.BinExport;*.i64;*.idb;*.*",
+                "Select the secondary binary, database or export")
+            if path:
+                self._secondary.setText(path)
+
+        def _start_diff(self) -> None:
+            path = self._secondary.text().strip()
+            if not path:
+                ida_kernwin.warning("Choose a file to diff against first.")
+                return
+            self._call("on_diff", path)
+
+        def set_results_open(self, open_: bool, summary: str = "") -> None:
+            """Enables the views. Called by the plugin, not inferred here.
+
+            The views are useless without a result and IDA's own action state
+            is not to be trusted for this -- being told once that they were
+            unavailable is what left them greyed for a whole session.
+            """
+            self._results_open = open_
+            if self.parent is None:
+                return
+            self._results_label.setText(summary or (
+                "results loaded" if open_ else "no results loaded"))
+            self._refresh_enabled()
+
+        def _refresh_enabled(self) -> None:
+            if self.parent is None:
+                return
+            self._save_button.setEnabled(self._results_open)
+            for button in self._view_buttons.values():
+                button.setEnabled(self._results_open)
+
+        # -- the panel protocol DiffRun expects -------------------------------
+
+        def start(self, title: str) -> None:
+            if self.parent is None:
+                return
+            self._done = False
+            self._started = time.monotonic()
+            self._progress_box.setVisible(True)
+            self._progress_box.setTitle(title)
+            self._bar.setRange(0, 0)
+            self._detail.setText("starting...")
+            self._elapsed.setText("")
+            self._cancel.setEnabled(True)
+            self._hide.setVisible(False)
+            self._diff_button.setEnabled(False)
+            self._timer.start(1000)
+
+        def _tick(self) -> None:
+            if self.parent is None or self._done:
+                return
+            self._elapsed.setText(
+                format_elapsed(time.monotonic() - self._started))
+
+        def update_progress(self, progress: DiffProgress) -> None:
+            if self.parent is None:
+                return
+            if progress.fraction is None:
+                self._bar.setRange(0, 0)
+            else:
+                self._bar.setRange(0, 100)
+                self._bar.setValue(int(progress.fraction * 100))
+            self._detail.setText(progress.message)
+
+        def finish(self, message: str) -> None:
+            self._done = True
+            if self.parent is None:
+                return
+            self._timer.stop()
+            self._bar.setRange(0, 100)
+            self._bar.setValue(100)
+            self._cancel.setEnabled(False)
+            self._hide.setVisible(True)
+            self._diff_button.setEnabled(True)
+            self._detail.setText(message)
+            self._elapsed.setText(
+                f"Took {format_elapsed(time.monotonic() - self._started)}")
+
+        def OnClose(self, form) -> None:
+            self.parent = None
+
+        def Show(self):
+            return ida_kernwin.PluginForm.Show(
+                self, "BinDiff",
+                options=(ida_kernwin.PluginForm.WOPN_PERSIST
+                         | ida_kernwin.PluginForm.WCLS_SAVE
+                         | ida_kernwin.PluginForm.WOPN_RESTORE
+                         | ida_kernwin.PluginForm.WOPN_TAB),
+            )
+
     class DiffProgressForm(ida_kernwin.PluginForm):
         """Live status for a diff running in a worker process.
 

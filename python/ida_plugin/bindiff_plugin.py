@@ -316,6 +316,9 @@ if IDA_AVAILABLE:
 
         # -- lifecycle ------------------------------------------------------
 
+        _control_panel = None
+        _cancel_event = None
+
         def init(self):
             self._register_actions()
             return ida_idaapi.PLUGIN_KEEP
@@ -327,8 +330,53 @@ if IDA_AVAILABLE:
             self.controller.close()
 
         def run(self, arg) -> bool:
-            self._open_menu()
+            self._show_control_panel()
             return True
+
+        def _show_control_panel(self) -> None:
+            """The plugin's front door.
+
+            A panel rather than a modal chooser: the actions stay on screen
+            while you work, and their enabled state is ours rather than
+            IDA's -- which is what left three of the four views greyed for a
+            whole session.
+            """
+            from ida_plugin.panels import ControlPanel
+
+            if self._control_panel is None:
+                self._control_panel = ControlPanel({
+                    "on_diff": lambda path: self._diff_database(secondary=path),
+                    "on_load": self._load_results,
+                    "on_save": self._save_results,
+                    "on_cancel": self._cancel_running_diff,
+                    "on_show": self._show_view,
+                })
+            self._control_panel.Show()
+            self._sync_control_panel()
+
+        def _show_view(self, key: str) -> None:
+            {"matched": self._show_matches,
+             "statistics": self._show_statistics,
+             "primary_unmatched": self._show_primary_unmatched,
+             "secondary_unmatched": self._show_secondary_unmatched}[key]()
+
+        def _cancel_running_diff(self) -> None:
+            if self._cancel_event is not None:
+                self._cancel_event.set()
+
+        def _sync_control_panel(self) -> None:
+            """Tells the panel whether there are results. Pushed, not polled:
+            the panel must not reach into the controller."""
+            if self._control_panel is None:
+                return
+            loaded = self.controller.loaded
+            summary = ""
+            if loaded:
+                try:
+                    summary = f"{len(self.controller.match_rows())} matches"
+                except Exception:
+                    summary = "results loaded"
+            self._control_panel.set_results_open(loaded, summary)
 
         def _open_menu(self) -> None:
             """Offers what the plugin can do, rather than assuming.
@@ -543,8 +591,8 @@ if IDA_AVAILABLE:
                 return
             handler()
 
-        def _ensure_binexport(self, side: int) -> bool:
-            """Makes sure the .BinExport for one side is known, asking if not.
+        def _ensure_export_file(self, side: int) -> bool:
+            """Makes sure the .BinExport file for one side is known, asking if not.
 
             A .BinDiff records matches and nothing else: the unmatched lists
             and every comment come out of the exports. The plugin can usually
@@ -670,7 +718,7 @@ if IDA_AVAILABLE:
             # Comments live in the secondary export, so ask for it before
             # reporting that they were skipped for want of a file the user
             # could have supplied.
-            if not self._ensure_binexport(1):
+            if not self._ensure_export_file(1):
                 self._report(f"{message}; comments skipped: no secondary "
                              ".BinExport was given, and comments live there")
                 return symbols
@@ -808,7 +856,7 @@ if IDA_AVAILABLE:
             side = "secondary" if secondary else "primary"
             # The unmatched list is derived from the export, not the result
             # file, so there is nothing to show without one.
-            if not self._ensure_binexport(1 if secondary else 0):
+            if not self._ensure_export_file(1 if secondary else 0):
                 return
             try:
                 rows = (self.controller.unmatched_secondary() if secondary
@@ -867,7 +915,7 @@ if IDA_AVAILABLE:
                 pass
             return dirs
 
-        def _ensure_binexport(self) -> bool:
+        def _ensure_binexport_plugin(self) -> bool:
             """True if the export can go ahead. Offers to fetch BinExport.
 
             The exporter is a native IDA plugin, not a Python package, so pip
@@ -949,7 +997,7 @@ if IDA_AVAILABLE:
             self._report(f"installed BinExport at {written}")
             return True
 
-        def _diff_database(self) -> None:
+        def _diff_database(self, secondary: Optional[str] = None) -> None:
             """Runs a diff against another binary, out of process.
 
             The export is what makes this slow, and it is why the C++ plugin
@@ -959,11 +1007,12 @@ if IDA_AVAILABLE:
             # Checked before anything is asked for: finding out that the
             # exporter is missing after picking two files and a destination
             # wastes the answers.
-            if not self._ensure_binexport():
+            if not self._ensure_binexport_plugin():
                 return
 
-            secondary = ida_kernwin.ask_file(
-                False, "*.*", "Select the secondary binary or database")
+            if not secondary:
+                secondary = ida_kernwin.ask_file(
+                    False, "*.*", "Select the secondary binary or database")
             if not secondary:
                 return
             primary = self._primary_to_export()
@@ -1067,8 +1116,21 @@ if IDA_AVAILABLE:
             from ida_plugin.panels import DiffProgressForm
 
             cancel = threading.Event()
-            form = DiffProgressForm(panel_title(primary), on_cancel=cancel.set)
-            form.Show()
+            # Kept so the control panel's Cancel can reach this diff.
+            self._cancel_event = cancel
+
+            # Report into the control panel when it is open, so a diff started
+            # from it does not open a second window to watch. The standalone
+            # progress form is still the answer for a diff started from a
+            # menu, which is the case the control panel is not part of.
+            panel = self._control_panel
+            if panel is not None and panel.parent is not None:
+                panel.start(panel_title(primary))
+                form = panel
+            else:
+                form = DiffProgressForm(panel_title(primary),
+                                        on_cancel=cancel.set)
+                form.Show()
 
             def post(action, flags) -> None:
                 # Touching Qt or IDA from the worker thread is not safe.
@@ -1088,6 +1150,7 @@ if IDA_AVAILABLE:
                 if len(exports) == 2:
                     self.controller.set_binexports(exports[0], exports[1])
                 self._show_matches()
+                self._sync_control_panel()
 
             def runner(args, **kwargs):
                 # The snapshot lives exactly as long as the worker needs it,
@@ -1130,6 +1193,7 @@ if IDA_AVAILABLE:
                 f"[{PLUGIN_NAME}] loaded {path} "
                 f"({self.controller.database.num_matches()} matches)\n")
             self._show_matches()
+            self._sync_control_panel()
 
         def _show_matches(self) -> None:
             if not self._require_results():
