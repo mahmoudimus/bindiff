@@ -24,8 +24,10 @@ from __future__ import annotations
 import collections
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -209,6 +211,74 @@ def _invoke_binexport(output_path: str) -> None:
         raise RuntimeError(
             f"BinExportBinary failed: {error}. Is the BinExport plugin "
             f"installed for this IDA?")
+
+
+def dump_types(input_path: str, output_path: str) -> StageResult:
+    """Opens a database with idalib and writes its types beside it.
+
+    A .BinExport cannot carry a type -- BinExport2 has no type table and no
+    prototypes -- so porting types reads the database directly. Done here
+    rather than from a second running IDA because the worker already knows how
+    to open one headlessly, and because it then works from a file rather than
+    requiring the other side to be open.
+
+    Must run in a worker process: it imports idapro.
+    """
+    import json
+
+    import idapro
+
+    from bindiff.typeinfo import to_json
+
+    if not Path(input_path).exists():
+        return StageResult(ok=False, stage="types",
+                           message=f"could not open {input_path}: no such file")
+
+    # Opened through a copy. IDA holds a database that is open in a GUI, and
+    # the one you want types from is usually the one you have open -- that is
+    # how you know it has types worth taking. Copying is cheap next to
+    # opening, and it also means this never has the other IDA's file open for
+    # writing.
+    source = Path(input_path)
+    holder = tempfile.mkdtemp(prefix="bindiff-types-")
+    working = str(Path(holder) / source.name)
+    try:
+        shutil.copyfile(source, working)
+        # An .i64 is not self-contained for a database IDA has not packed; the
+        # companion files sit beside it under the same stem.
+        for companion in source.parent.glob(f"{source.stem}.*"):
+            if companion != source and companion.is_file():
+                shutil.copyfile(companion, str(Path(holder) / companion.name))
+    except OSError as exc:
+        shutil.rmtree(holder, ignore_errors=True)
+        return StageResult(ok=False, stage="types",
+                           message=f"could not copy {input_path}: {exc}")
+
+    if idapro.open_database(working, True) != 0:
+        shutil.rmtree(holder, ignore_errors=True)
+        return StageResult(ok=False, stage="types",
+                           message=f"could not open {input_path}")
+    try:
+        from bindiff.typeinfo_ida import read_types
+
+        declarations, functions = read_types()
+    except Exception as exc:  # an IDA API this build does not have
+        idapro.close_database(False)
+        shutil.rmtree(holder, ignore_errors=True)
+        return StageResult(ok=False, stage="types",
+                           message=f"reading types failed: {exc}")
+    idapro.close_database(False)
+    shutil.rmtree(holder, ignore_errors=True)
+
+    Path(output_path).write_text(
+        json.dumps(to_json(declarations, functions, source=input_path),
+                   indent=1),
+        encoding="utf-8")
+    return StageResult(
+        ok=True, stage="types", output=output_path,
+        message=(f"{len(declarations)} type(s), "
+                 f"{len(functions)} prototype(s)"),
+        details={"types": len(declarations), "functions": len(functions)})
 
 
 def export(input_path: str, output_path: str,
@@ -737,7 +807,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not argv:
         print(StageResult(ok=False, stage="cli",
-                          message="usage: export|diff|pipeline ...").to_json())
+                          message="usage: export|diff|types|pipeline ...").to_json())
         return 2
 
     command, rest = argv[0], argv[1:]
@@ -747,6 +817,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif command == "diff" and len(rest) == 3:
             result = diff(rest[0], rest[1], rest[2], progress=emit_progress,
                           should_continue=should_continue)
+        elif command == "types" and len(rest) == 2:
+            result = dump_types(rest[0], rest[1])
         elif command == "pipeline" and len(rest) == 3:
             result = pipeline(rest[0], rest[1], rest[2],
                               progress=emit_progress,

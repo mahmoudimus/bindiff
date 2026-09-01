@@ -91,6 +91,64 @@ class TypePlan:
                                             for d in self.declarations]
 
 
+# The sidecar's own version. Bumped when the shape changes, so a file written
+# by an older plugin is refused with a reason rather than misread.
+TYPES_FORMAT_VERSION = 1
+
+
+def types_path_for(source_path) -> str:
+    """Where the type sidecar for a database or export belongs.
+
+    Beside its source and named after it, so it travels with the thing it
+    describes and so two databases in one directory do not collide.
+    """
+    return f"{source_path}.types.json"
+
+
+def to_json(declarations: Sequence[TypeDeclaration],
+            functions: Sequence[FunctionType],
+            source: str = "") -> dict:
+    """The sidecar as plain data.
+
+    Its own file rather than a message in the protobuf sidecar: the C++ engine
+    parses that one and will never read a type, so putting types there would
+    mean a schema change and a rebuild for data only the plugin uses.
+    """
+    return {
+        "version": TYPES_FORMAT_VERSION,
+        "source": str(source),
+        "types": [{"name": d.name, "kind": d.kind, "definition": d.definition}
+                  for d in declarations],
+        "functions": [{"address": f.address, "name": f.name,
+                       "declaration": f.declaration} for f in functions],
+    }
+
+
+def from_json(data: dict) -> Tuple[List[TypeDeclaration], List[FunctionType]]:
+    """Reads a sidecar back. Raises ValueError on a version it cannot read."""
+    version = data.get("version")
+    if version != TYPES_FORMAT_VERSION:
+        raise ValueError(
+            f"type sidecar is version {version!r}, this reads "
+            f"{TYPES_FORMAT_VERSION}")
+
+    declarations = [
+        TypeDeclaration(name=entry["name"],
+                        definition=entry["definition"],
+                        kind=entry.get("kind", "struct"))
+        for entry in data.get("types", [])
+        if entry.get("name") and entry.get("definition")
+    ]
+    functions = [
+        FunctionType(address=int(entry["address"]),
+                     declaration=entry["declaration"],
+                     name=entry.get("name", ""))
+        for entry in data.get("functions", [])
+        if entry.get("declaration")
+    ]
+    return declarations, functions
+
+
 def referenced_types(text: str, known: Iterable[str]) -> Set[str]:
     """Which of `known` a piece of C text mentions.
 

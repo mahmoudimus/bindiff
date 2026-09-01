@@ -221,3 +221,42 @@ class TestPlanningOnlyWhatIsNeeded:
                             "mblock_t *blk, bool require_single_pred)")],
             already_present={"mblock_t"})
         assert plan.statements == []
+
+
+class TestTheSidecarFormat:
+    """Types travel in their own JSON file, not in the protobuf sidecar: the
+    C++ engine parses that one and will never read a type."""
+
+    def test_a_round_trip_preserves_everything(self):
+        declarations = [decl("mblock_t", "struct mblock_t { int serial; };"),
+                        decl("mopt_t", "enum mopt_t { A, B };", kind="enum")]
+        functions = [FunctionType(
+            address=0x18008D120, name="resolve_goto_target",
+            declaration="mblock_t *__fastcall resolve_goto_target("
+                        "mblock_t *blk, bool require_single_pred)")]
+        data = typeinfo.to_json(declarations, functions, source="/x/y.i64")
+        back_types, back_functions = typeinfo.from_json(data)
+        assert back_types == declarations
+        assert back_functions == functions
+
+    def test_the_kind_survives_because_forward_declaration_depends_on_it(self):
+        data = typeinfo.to_json([decl("E", "enum E { A };", kind="enum")], [])
+        back, _ = typeinfo.from_json(data)
+        assert back[0].forward_declaration == "enum E;"
+
+    def test_an_unknown_version_is_refused(self):
+        """Read as if it were the current shape, a future sidecar would be
+        misread rather than rejected."""
+        with pytest.raises(ValueError, match="version"):
+            typeinfo.from_json({"version": 99, "types": [], "functions": []})
+
+    def test_incomplete_entries_are_dropped(self):
+        data = {"version": typeinfo.TYPES_FORMAT_VERSION,
+                "types": [{"name": "X"}, {"definition": "struct Y {};"}],
+                "functions": [{"address": 1, "name": "f"}]}
+        types, functions = typeinfo.from_json(data)
+        assert types == [] and functions == []
+
+    def test_the_path_sits_beside_its_source(self):
+        assert typeinfo.types_path_for("/a/b/hexx64-9.3.i64") == \
+            "/a/b/hexx64-9.3.i64.types.json"
