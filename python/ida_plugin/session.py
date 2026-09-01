@@ -350,7 +350,17 @@ class DiffSession:
         if written:
             self._controller.mark_imported(written)
         self.ported.emit(self.ledger)
-        self._edited(len(ids), ids)
+        # Every entry is new information for the State column -- "skipped" as
+        # much as "ported" -- so the rows are rebuilt and announced either
+        # way. What counts as an *edit* is narrower: only what was written
+        # into the result file. A port that wrote nothing and left "3 unsaved
+        # edits" behind was a claim the .BinDiff did not support, and it lit
+        # up Save over a file with nothing to save.
+        self._rows = None
+        if written:
+            self._edited(len(written), ids)
+        else:
+            self.matches_changed.emit(tuple(ids))
 
     def forget_port(self, match_id: int) -> None:
         self.ledger.forget(match_id)

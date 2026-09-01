@@ -13,7 +13,7 @@ from ida_plugin.porting import LedgerEntry, PortLedger
 from ida_plugin.session import (
     CANCEL, CLOSE, COMPARE, GRAPHS, PAIR, PORT, RESTORE_NAME, SAVE, UNMATCH,
     DiffSession, ResultMeta, Signal, State)
-from ida_plugin.ui_logic import STATE_PORTED, DiffProgress
+from ida_plugin.ui_logic import STATE_PORTED, STATE_SKIPPED, DiffProgress
 
 
 class FakeMatch(SimpleNamespace):
@@ -260,6 +260,30 @@ class TestEdits:
         assert session.can(RESTORE_NAME)
         session.forget_port(1)
         assert not session.can(RESTORE_NAME)
+
+    def test_only_what_was_written_counts_as_an_edit(self, session):
+        session.open_result("/tmp/x.BinDiff")
+        delta = PortLedger()
+        delta.record(LedgerEntry(1, STATE_PORTED, 0x1000, "sub_1", "f1"))
+        delta.record(LedgerEntry(2, STATE_SKIPPED, 0, "", ""))
+        session.note_ports(delta)
+        assert session.edits == 1
+
+    def test_a_port_that_wrote_nothing_is_not_an_edit(self, session):
+        """A skipped row is news for the State column and nothing else.
+
+        The .BinDiff is untouched, so "1 unsaved edit" would be a claim the
+        file does not support -- and it lit Save up over nothing to save.
+        """
+        session.open_result("/tmp/x.BinDiff")
+        recorder = Recorder(session)
+        delta = PortLedger()
+        delta.record(LedgerEntry(3, STATE_SKIPPED, 0, "", ""))
+        session.note_ports(delta)
+        assert session.edits == 0
+        assert session.state is State.OPEN_CLEAN
+        assert ("matches_changed", ((3,),)) in recorder.events
+        assert session.row(3).state == STATE_SKIPPED
 
 
 class TestSelectionAndCan:
