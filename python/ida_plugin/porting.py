@@ -23,9 +23,11 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass, field
 from typing import (Callable, Dict, Iterable, List, Optional, Sequence,
-                    Set)
+                    Set, Tuple)
 
 from bindiff.ida_env import database_is_open
+from ida_plugin.ui_logic import (STATE_PORTED, STATE_REFUSED, STATE_REPLACED,
+                                 STATE_SKIPPED, is_generated_name)
 
 
 # How good a match has to be before its name or comments are copied.
@@ -95,8 +97,6 @@ def _is_generated_name(name: str) -> bool:
     symptom would be a filter that promises rows the porting rules then
     refuse.
     """
-    from ida_plugin.ui_logic import is_generated_name
-
     return is_generated_name(name)
 
 
@@ -132,6 +132,101 @@ def explain_symbol_port_skips(
         elif not overwrite_existing and not _is_generated_name(match.name_primary):
             note("already named here, and renaming would overwrite it")
     return reasons
+
+
+OUTCOME_WILL_WRITE = "will write"
+OUTCOME_REPLACES_YOURS = "replaces yours"
+OUTCOME_ALREADY_NAMED = "already named"
+OUTCOME_BELOW_THRESHOLD = "below threshold"
+OUTCOME_NOTHING = "nothing to write"
+
+
+@dataclass(frozen=True)
+class PortPreview:
+    """What a port at one threshold would do, before it does it.
+
+    The footer is the confirmation: it separates the three outcomes a single
+    count hides, and it is on screen before anything is written. 516 of
+    1,440 unthresholded writes were wrong on the measured corpus; the
+    threshold is therefore the first control, not an advanced setting.
+    """
+
+    threshold: float
+    will_write: Tuple[SymbolPort, ...]
+    replaces_yours: Tuple[SymbolPort, ...]
+    already_named: Tuple[int, ...]
+    below_threshold: Tuple[int, ...]
+    nothing_to_write: Tuple[int, ...]
+
+    @property
+    def ports(self) -> List[SymbolPort]:
+        return list(self.will_write) + list(self.replaces_yours)
+
+    def outcome(self, match_id: int) -> str:
+        if any(p.match_id == match_id for p in self.will_write):
+            return OUTCOME_WILL_WRITE
+        if any(p.match_id == match_id for p in self.replaces_yours):
+            return OUTCOME_REPLACES_YOURS
+        if match_id in self.already_named:
+            return OUTCOME_ALREADY_NAMED
+        if match_id in self.below_threshold:
+            return OUTCOME_BELOW_THRESHOLD
+        if match_id in self.nothing_to_write:
+            return OUTCOME_NOTHING
+        return ""
+
+    def summary(self) -> str:
+        """The footer, counting each outcome separately.
+
+        A write that overwrites a name the user chose is counted on its own
+        line rather than folded into the total: it is the one outcome the
+        reader might want to stop, and a single "N will be written" hides it.
+        """
+        parts = [f"{len(self.will_write):,} will be written"]
+        if self.already_named:
+            parts.append(f"{len(self.already_named):,} already named, skipped")
+        if self.replaces_yours:
+            parts.append(f"{len(self.replaces_yours):,} replace a name you wrote")
+        if self.below_threshold:
+            parts.append(f"{len(self.below_threshold):,} below {self.threshold:.2f}")
+        return " · ".join(parts)
+
+
+def preview_symbol_ports(matches: Iterable, *, min_similarity: float,
+                         min_confidence: float = DEFAULT_PORT_MIN_CONFIDENCE
+                         ) -> PortPreview:
+    """Sorts every match into the bucket a port at this threshold puts it in.
+
+    Same conditions as plan_symbol_ports, but nothing is dropped: every match
+    id lands somewhere, so a row can show its outcome.
+
+    "Nothing to write" is tested before the threshold, unlike in
+    plan_symbol_ports, where the order cannot be observed because both mean
+    "skip". Here it can: a match whose secondary side has only a generated
+    name has nothing to give at *any* threshold, so it must not move buckets
+    as the slider does -- a row that reads "below threshold" invites raising
+    the threshold to fix something the threshold does not control.
+    """
+    will_write: List[SymbolPort] = []
+    replaces: List[SymbolPort] = []
+    already: List[int] = []
+    below: List[int] = []
+    nothing: List[int] = []
+    for match in matches:
+        if _is_generated_name(match.name_secondary):
+            nothing.append(match.id)
+        elif match.similarity < min_similarity or match.confidence < min_confidence:
+            below.append(match.id)
+        elif match.name_primary == match.name_secondary:
+            already.append(match.id)
+        else:
+            port = SymbolPort(address=match.address_primary,
+                              new_name=match.name_secondary,
+                              old_name=match.name_primary, match_id=match.id)
+            (will_write if _is_generated_name(match.name_primary)
+             else replaces).append(port)
+    return PortPreview(min_similarity, tuple(will_write), tuple(replaces),
+                       tuple(already), tuple(below), tuple(nothing))
 
 
 def plan_symbol_ports(
@@ -283,6 +378,115 @@ class PortResult:
         else:
             self.failed += 1
             self.failed_addresses.append(port.address)
+
+
+@dataclass(frozen=True)
+class LedgerEntry:
+    """One row's worth of what a port did."""
+
+    match_id: int
+    outcome: str
+    address: int
+    old_name: str
+    new_name: str
+    comments_written: int = 0
+
+    @property
+    def reversible(self) -> bool:
+        return (self.outcome in (STATE_PORTED, STATE_REPLACED)
+                and self.old_name != self.new_name)
+
+
+class PortLedger:
+    """Per-row record of what a port did, for the State column and for undo.
+
+    "Renamed 9 function(s)" dropped the interesting case. Each row here is
+    addressable, and a ported or replaced name can be reversed one at a time
+    -- the undo that ships before real undo exists. Session-only: the
+    .BinDiff has one flag (commentsported) and the schema is not extended.
+    """
+
+    def __init__(self) -> None:
+        self._entries: Dict[int, LedgerEntry] = {}
+
+    def record(self, entry: LedgerEntry) -> None:
+        self._entries[entry.match_id] = entry
+
+    def entry(self, match_id: int) -> Optional[LedgerEntry]:
+        return self._entries.get(match_id)
+
+    def outcome(self, match_id: int) -> Optional[str]:
+        found = self._entries.get(match_id)
+        return found.outcome if found else None
+
+    def forget(self, match_id: int) -> None:
+        self._entries.pop(match_id, None)
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for entry in self._entries.values():
+            counts[entry.outcome] = counts.get(entry.outcome, 0) + 1
+        return counts
+
+    def summary(self) -> str:
+        counts = self.counts()
+        parts = [f"Ported {counts.get(STATE_PORTED, 0):,}"]
+        if counts.get(STATE_REPLACED):
+            parts.append(f"{counts[STATE_REPLACED]:,} replaced a name you wrote")
+        if counts.get(STATE_SKIPPED):
+            parts.append(f"{counts[STATE_SKIPPED]:,} skipped")
+        if counts.get(STATE_REFUSED):
+            parts.append(f"{counts[STATE_REFUSED]:,} refused by IDA")
+        return " · ".join(parts)
+
+    def reversal(self, match_id: int) -> Optional[SymbolPort]:
+        """The port that would put the old name back, or None.
+
+        Only a name this session actually wrote can be taken back, which is
+        what `reversible` decides -- offering to "undo" a row nothing was
+        written to would write a name that was never there.
+        """
+        entry = self._entries.get(match_id)
+        if entry is None or not entry.reversible:
+            return None
+        return SymbolPort(address=entry.address, new_name=entry.old_name,
+                          old_name=entry.new_name, match_id=match_id)
+
+
+def build_ledger(preview: PortPreview, symbols: PortResult,
+                 comments: Optional[PortResult], *,
+                 into: Optional[PortLedger] = None) -> PortLedger:
+    """Turns a preview plus what the writes returned into per-row outcomes.
+
+    A planned write that neither landed nor was refused is skipped, not
+    failed: IDA reports refusal by returning False, so the only evidence a
+    write was attempted at all is the address in `failed_addresses`.
+    """
+    ledger = into if into is not None else PortLedger()
+    wrote_comment = comments.applied_matches if comments is not None else set()
+
+    def note(match_id, outcome, address=0, old="", new=""):
+        ledger.record(LedgerEntry(match_id, outcome, address, old, new,
+                                  1 if match_id in wrote_comment else 0))
+
+    attempted = ([(port, STATE_PORTED) for port in preview.will_write]
+                 + [(port, STATE_REPLACED) for port in preview.replaces_yours])
+    for port, written_outcome in attempted:
+        if port.match_id in symbols.applied_matches:
+            outcome = written_outcome
+        elif port.address in symbols.failed_addresses:
+            outcome = STATE_REFUSED
+        else:
+            outcome = STATE_SKIPPED
+        note(port.match_id, outcome, port.address, port.old_name, port.new_name)
+
+    for match_id in (preview.already_named + preview.below_threshold
+                     + preview.nothing_to_write):
+        note(match_id, STATE_SKIPPED)
+    return ledger
 
 
 def apply_symbol_ports(ports: Sequence[SymbolPort],

@@ -418,3 +418,120 @@ class TestAppliedMatchesAreAttributed:
                              match_id=7, kind="instruction")]
         result = apply_comment_ports(ports, set_comment=lambda *a: True)
         assert result.applied_matches == {7}
+
+
+class TestPortPreview:
+    def _matches(self):
+        from types import SimpleNamespace
+        return [
+            SimpleNamespace(id=1, similarity=0.9, confidence=0.9, address_primary=0x1,
+                            address_secondary=0x11, name_primary="sub_1", name_secondary="alpha"),
+            SimpleNamespace(id=2, similarity=0.9, confidence=0.9, address_primary=0x2,
+                            address_secondary=0x12, name_primary="mine", name_secondary="beta"),
+            SimpleNamespace(id=3, similarity=0.9, confidence=0.9, address_primary=0x3,
+                            address_secondary=0x13, name_primary="gamma", name_secondary="gamma"),
+            SimpleNamespace(id=4, similarity=0.4, confidence=0.9, address_primary=0x4,
+                            address_secondary=0x14, name_primary="sub_4", name_secondary="delta"),
+            SimpleNamespace(id=5, similarity=0.9, confidence=0.9, address_primary=0x5,
+                            address_secondary=0x15, name_primary="sub_5", name_secondary="sub_15"),
+        ]
+
+    def test_each_match_lands_in_one_bucket(self):
+        from ida_plugin.porting import (OUTCOME_ALREADY_NAMED, OUTCOME_BELOW_THRESHOLD,
+                                        OUTCOME_NOTHING, OUTCOME_REPLACES_YOURS,
+                                        OUTCOME_WILL_WRITE, preview_symbol_ports)
+        preview = preview_symbol_ports(self._matches(), min_similarity=0.5)
+        assert [p.match_id for p in preview.will_write] == [1]
+        assert [p.match_id for p in preview.replaces_yours] == [2]
+        assert preview.already_named == (3,)
+        assert preview.below_threshold == (4,)
+        assert preview.nothing_to_write == (5,)
+        assert preview.outcome(1) == OUTCOME_WILL_WRITE
+        assert preview.outcome(2) == OUTCOME_REPLACES_YOURS
+        assert preview.outcome(3) == OUTCOME_ALREADY_NAMED
+        assert preview.outcome(4) == OUTCOME_BELOW_THRESHOLD
+        assert preview.outcome(5) == OUTCOME_NOTHING
+        assert preview.outcome(99) == ""
+
+    def test_ports_are_what_will_be_written(self):
+        from ida_plugin.porting import preview_symbol_ports
+        preview = preview_symbol_ports(self._matches(), min_similarity=0.5)
+        assert [(p.address, p.new_name, p.old_name) for p in preview.ports] == [
+            (0x1, "alpha", "sub_1"), (0x2, "beta", "mine")]
+
+    def test_the_threshold_moves_rows_between_buckets(self):
+        from ida_plugin.porting import preview_symbol_ports
+        assert preview_symbol_ports(self._matches(), min_similarity=0.0).below_threshold == ()
+        assert len(preview_symbol_ports(self._matches(), min_similarity=0.95).below_threshold) == 4
+
+    def test_summary_separates_the_three_outcomes(self):
+        from ida_plugin.porting import preview_symbol_ports
+        text = preview_symbol_ports(self._matches(), min_similarity=0.5).summary()
+        assert "1 will be written" in text
+        assert "1 already named, skipped" in text
+        assert "1 replace" in text and "name you wrote" in text
+
+
+class TestLedger:
+    def test_build_records_every_outcome(self):
+        from ida_plugin.porting import (PortResult, SymbolPort, build_ledger,
+                                        preview_symbol_ports)
+        from ida_plugin.ui_logic import (STATE_PORTED, STATE_REFUSED, STATE_REPLACED,
+                                         STATE_SKIPPED)
+        matches = TestPortPreview()._matches()
+        preview = preview_symbol_ports(matches, min_similarity=0.5)
+        symbols = PortResult()
+        symbols.record(preview.will_write[0], True)
+        symbols.record(preview.replaces_yours[0], False)
+        comments = PortResult()
+        comments.record(SymbolPort(0x1, "", "", 1), True)
+        ledger = build_ledger(preview, symbols, comments)
+        assert ledger.outcome(1) == STATE_PORTED
+        assert ledger.outcome(2) == STATE_REFUSED
+        assert ledger.outcome(3) == STATE_SKIPPED
+        assert ledger.outcome(4) == STATE_SKIPPED
+        assert ledger.outcome(5) == STATE_SKIPPED
+        assert ledger.entry(1).comments_written == 1
+        assert ledger.entry(2).comments_written == 0
+        assert len(ledger) == 5
+        assert ledger.counts() == {STATE_PORTED: 1, STATE_REFUSED: 1, STATE_SKIPPED: 3}
+
+    def test_replaced_is_its_own_outcome(self):
+        from ida_plugin.porting import PortResult, build_ledger, preview_symbol_ports
+        from ida_plugin.ui_logic import STATE_REPLACED
+        preview = preview_symbol_ports(TestPortPreview()._matches(), min_similarity=0.5)
+        symbols = PortResult()
+        symbols.record(preview.replaces_yours[0], True)
+        assert build_ledger(preview, symbols, None).outcome(2) == STATE_REPLACED
+
+    def test_summary_reads_like_the_spec(self):
+        from ida_plugin.porting import PortResult, build_ledger, preview_symbol_ports
+        preview = preview_symbol_ports(TestPortPreview()._matches(), min_similarity=0.5)
+        symbols = PortResult()
+        for port in preview.ports:
+            symbols.record(port, True)
+        text = build_ledger(preview, symbols, None).summary()
+        assert text.startswith("Ported 1")
+        assert "1 replaced a name you wrote" in text
+        assert "3 skipped" in text
+
+    def test_reversal_restores_the_old_name(self):
+        from ida_plugin.porting import PortResult, build_ledger, preview_symbol_ports
+        preview = preview_symbol_ports(TestPortPreview()._matches(), min_similarity=0.5)
+        symbols = PortResult()
+        symbols.record(preview.replaces_yours[0], True)
+        ledger = build_ledger(preview, symbols, None)
+        reverse = ledger.reversal(2)
+        assert (reverse.address, reverse.new_name, reverse.old_name) == (0x2, "mine", "beta")
+        assert ledger.reversal(3) is None
+        ledger.forget(2)
+        assert ledger.outcome(2) is None
+
+    def test_a_second_port_merges_into_the_same_ledger(self):
+        from ida_plugin.porting import PortLedger, PortResult, build_ledger, preview_symbol_ports
+        ledger = PortLedger()
+        preview = preview_symbol_ports(TestPortPreview()._matches()[:1], min_similarity=0.5)
+        build_ledger(preview, PortResult(), None, into=ledger)
+        build_ledger(preview_symbol_ports(TestPortPreview()._matches()[1:2], min_similarity=0.5),
+                     PortResult(), None, into=ledger)
+        assert len(ledger) == 2
