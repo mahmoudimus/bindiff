@@ -551,3 +551,79 @@ class TestSharedNarrowingRule:
         assert text_query_narrows("acrt", "acrt_z")
         assert (filter_unmatched(filter_unmatched(rows, "acrt"), "acrt_z")
                 == filter_unmatched(rows, "acrt_z"))
+
+
+class TestIncrementalFilter:
+    """The caching both list views share.
+
+    Written once because they each had their own copy, and the copies had
+    already drifted -- one carried an address parser the other duplicated.
+    """
+
+    def _filter(self):
+        from ida_plugin.ui_logic import IncrementalFilter, text_query_narrows
+        calls = []
+
+        def apply(rows, key):
+            calls.append(len(rows))
+            return [r for r in rows if key in r]
+
+        return IncrementalFilter(text_query_narrows, apply), calls
+
+    # Queries here avoid hex digits on purpose: "abc" is a valid address and
+    # text_query_narrows refuses to narrow such a query, so hex-looking test
+    # data would exercise the wrong branch. That is the rule working, and it
+    # caught these tests before they caught anything else.
+
+    def test_first_call_uses_everything(self):
+        f, calls = self._filter()
+        assert f(["quo", "qux", "zz"], "qu") == ["quo", "qux"]
+        assert calls == [3]
+
+    def test_a_narrowing_key_reuses_the_previous_result(self):
+        f, calls = self._filter()
+        f(["quo", "qux", "zz"], "qu")
+        assert f(["quo", "qux", "zz"], "quo") == ["quo"]
+        # Second pass saw two rows, not three.
+        assert calls == [3, 2]
+
+    def test_a_widening_key_goes_back_to_everything(self):
+        f, calls = self._filter()
+        f(["quo", "qux", "zz"], "quo")
+        f(["quo", "qux", "zz"], "qu")
+        assert calls == [3, 3]
+
+    def test_a_hex_query_is_never_narrowed(self):
+        """Not a quirk of the cache -- addresses match exactly, so a longer
+        query can select a row the shorter one did not."""
+        f, calls = self._filter()
+        f(["abc", "abd"], "ab")
+        f(["abc", "abd"], "abc")
+        assert calls == [2, 2]
+
+    def test_invalidate_forces_a_full_pass(self):
+        """The cache holds a result, so new rows must not be filtered through
+        the old one -- that hides rows the new data contains."""
+        f, calls = self._filter()
+        f(["quo"], "qu")
+        f.invalidate()
+        assert f(["quo", "quz"], "quz") == ["quz"]
+        assert calls == [1, 2]
+
+    def test_without_invalidate_new_rows_would_be_lost(self):
+        """Demonstrates why invalidate() is not optional."""
+        f, _ = self._filter()
+        f(["quo"], "qu")
+        # No invalidate: "quz" narrows "qu", so the stale one-row result is
+        # filtered and the new row never appears.
+        assert f(["quo", "quz"], "quz") == []
+
+    def test_it_matches_filtering_from_scratch_when_used_correctly(self):
+        from ida_plugin.ui_logic import (MatchFilter, IncrementalFilter,
+                                         filter_rows)
+        rows = [_match_row(match_id=i, name_primary=n)
+                for i, n in enumerate(["acrt_a", "acrt_b", "zz"])]
+        f = IncrementalFilter(lambda p, c: c.narrows(p), filter_rows)
+        f(rows, MatchFilter(text="acrt"))
+        current = MatchFilter(text="acrt_b")
+        assert f(rows, current) == filter_rows(rows, current)

@@ -32,6 +32,7 @@ from ida_plugin.ui_logic import (
     StatisticRow,
     describe_change_flags,
     cell_values,
+    IncrementalFilter,
     filter_rows,
     format_address,
     similarity_color,
@@ -55,6 +56,47 @@ if IDA_AVAILABLE:
 if IDA_AVAILABLE:
     from bindiff.qt_shim import (Qt, QtCore, QtGui, QtWidgets,
                              exec_widget)
+
+    def show_action_menu(view, actions, on_action, position) -> None:
+        """Pops up a menu of IDA action names and runs the chosen one.
+
+        Shared by both list views. They had a copy each, and a copy each is
+        how the matched menu got its dispatch fixed while the unmatched one
+        had no menu at all.
+
+        The chosen action is called directly rather than handed to
+        ida_kernwin.process_ui_action, which does not dispatch from inside a
+        Qt menu on our own widget and fails silently when it does not.
+        """
+        if not actions:
+            return
+        menu = QtWidgets.QMenu(view)
+        for name in actions:
+            if name is None:
+                menu.addSeparator()
+                continue
+            entry = menu.addAction(name.split(":", 1)[-1].replace("_", " "))
+            entry.setData(name)
+        chosen = exec_widget(menu, view.viewport().mapToGlobal(position))
+        if chosen is None:
+            return
+        if on_action is not None:
+            on_action(chosen.data())
+        else:
+            ida_kernwin.process_ui_action(chosen.data())
+
+    def debounced(parent, callback, interval: int = 150):
+        """A single-shot timer that restarts on every call.
+
+        Typing arrives faster than a filtered result can be read, so both
+        search boxes wait for a pause rather than filtering per keystroke.
+        Returns the timer; the caller connects a textChanged to its start.
+        """
+        timer = QtCore.QTimer(parent)
+        timer.setSingleShot(True)
+        timer.setInterval(interval)
+        timer.timeout.connect(callback)
+        return timer
 
     def _no_edit_triggers():
         """QAbstractItemView.NoEditTriggers, spelled for either binding."""
@@ -311,31 +353,8 @@ if IDA_AVAILABLE:
                 self.on_visibility_changed()
 
         def _show_context_menu(self, position) -> None:
-            if not self.context_actions:
-                return
-            menu = QtWidgets.QMenu(self)
-            for name in self.context_actions:
-                if name is None:
-                    menu.addSeparator()
-                    continue
-                action = menu.addAction(name.split(":", 1)[-1].replace("_", " "))
-                action.setData(name)
-            chosen = exec_widget(menu,
-                                 self.viewport().mapToGlobal(position))
-            if chosen is None:
-                return
-            # Called directly rather than through
-            # ida_kernwin.process_ui_action, which returned without running
-            # anything from here: the menu appeared, every entry was
-            # clickable, and clicking did nothing at all -- not even the
-            # "select a match first" warning. Routing a click on our own
-            # widget out to IDA's action system and back was never buying
-            # anything; the callable is right here.
-            if self.on_action is not None:
-                self.on_action(chosen.data())
-            else:
-                ida_kernwin.process_ui_action(chosen.data())
-
+            show_action_menu(self, self.context_actions, self.on_action,
+                             position)
         def set_rows(self, rows: Sequence[MatchRow]) -> None:
             self._model.set_rows(
                 sort_rows(rows, self._sort_column, self._sort_descending))
@@ -555,25 +574,8 @@ if IDA_AVAILABLE:
             self.customContextMenuRequested.connect(self._show_context_menu)
 
         def _show_context_menu(self, position) -> None:
-            if not self.context_actions:
-                return
-            menu = QtWidgets.QMenu(self)
-            for name in self.context_actions:
-                if name is None:
-                    menu.addSeparator()
-                    continue
-                action = menu.addAction(name.split(":", 1)[-1].replace("_", " "))
-                action.setData(name)
-            chosen = exec_widget(menu, self.viewport().mapToGlobal(position))
-            if chosen is None:
-                return
-            # Direct, for the reason the matched table's menu is direct:
-            # process_ui_action does not dispatch from inside a Qt menu on our
-            # own widget, and fails silently when it does not.
-            if self.on_action is not None:
-                self.on_action(chosen.data())
-            else:
-                ida_kernwin.process_ui_action(chosen.data())
+            show_action_menu(self, self.context_actions, self.on_action,
+                             position)
 
         def set_rows(self, rows: Sequence[UnmatchedRow]) -> None:
             self._model.set_rows(
@@ -734,8 +736,8 @@ if IDA_AVAILABLE:
             self._all_rows = list(rows)
             self._context_actions = tuple(context_actions)
             self._on_action = on_action
-            self._last_text: Optional[str] = None
-            self._last_visible: List[UnmatchedRow] = []
+            self._filtered = IncrementalFilter(text_query_narrows,
+                                               filter_unmatched)
             self._side = side
             self._on_jump = on_jump
             self._table: Optional[UnmatchedTable] = None
@@ -749,13 +751,7 @@ if IDA_AVAILABLE:
             self._search = QtWidgets.QLineEdit()
             self._search.setPlaceholderText("Filter by name or address...")
             self._search.setClearButtonEnabled(True)
-            # Debounced for the same reason as the matched view: a keystroke
-            # arrives faster than a result can be read, and this list is not a
-            # short one either.
-            self._debounce = QtCore.QTimer(self.parent)
-            self._debounce.setSingleShot(True)
-            self._debounce.setInterval(150)
-            self._debounce.timeout.connect(self._apply)
+            self._debounce = debounced(self.parent, self._apply)
             self._search.textChanged.connect(lambda _t: self._debounce.start())
 
             self._table = UnmatchedTable()
@@ -777,26 +773,14 @@ if IDA_AVAILABLE:
         def set_rows(self, rows: Sequence[UnmatchedRow]) -> None:
             self._all_rows = list(rows)
             # New data invalidates the base narrowing would have built on.
-            self._last_text = None
-            self._last_visible = []
+            self._filtered.invalidate()
             if self._table is not None:
                 self._apply()
 
         def _apply(self) -> None:
             if self._table is None:
                 return
-            text = self._search.text()
-            # Filter the previous result when the query only narrows -- see
-            # ui_logic.text_query_narrows for the address case that makes this
-            # unsound if taken on intuition.
-            if (self._last_text is not None
-                    and text_query_narrows(self._last_text, text)):
-                source = self._last_visible
-            else:
-                source = self._all_rows
-            visible = filter_unmatched(source, text)
-            self._last_text = text
-            self._last_visible = visible
+            visible = self._filtered(self._all_rows, self._search.text())
             self._table.set_rows(visible)
             if self._status is not None:
                 self._status.setText(
@@ -851,16 +835,9 @@ if IDA_AVAILABLE:
             layout.addWidget(self._manual_only)
             layout.addWidget(self._changed_only)
 
-            # Typing is debounced; the rest is not. A keystroke arrives every
-            # few tens of milliseconds and each one would otherwise re-filter
-            # and repaint, so "acrt" costs four passes to show a result nobody
-            # read on the way. A spinbox or a checkbox is one deliberate act
-            # and answers immediately.
-            self._debounce = QtCore.QTimer(self)
-            self._debounce.setSingleShot(True)
-            self._debounce.setInterval(150)
-            self._debounce.timeout.connect(self._emit)
-
+            # Typing is debounced; the rest is not. A spinbox or a checkbox
+            # is one deliberate act and answers immediately.
+            self._debounce = debounced(self, self._emit)
             self._text.textChanged.connect(lambda _t: self._debounce.start())
             self._min_similarity.valueChanged.connect(self._emit)
             self._min_confidence.valueChanged.connect(self._emit)
@@ -901,8 +878,9 @@ if IDA_AVAILABLE:
             self.parent = self.FormToPyQtWidget(form)
             layout = QtWidgets.QVBoxLayout(self.parent)
 
-            self._last_filter: Optional[MatchFilter] = None
-            self._last_visible: List[MatchRow] = []
+            self._filtered = IncrementalFilter(
+                lambda previous, current: current.narrows(previous),
+                filter_rows)
             self._filter_bar = FilterBar(self._apply_filter)
             self._table = MatchTable()
             self._table.on_activated = self._activate
@@ -924,36 +902,14 @@ if IDA_AVAILABLE:
             self._all_rows = list(rows)
             # New data, so the cached result narrowing would build on no
             # longer describes anything.
-            self._invalidate_filter_cache()
+            self._filtered.invalidate()
             if self._table is not None:
                 self._apply_filter(self._filter_bar.current_filter())
-
-        def _invalidate_filter_cache(self) -> None:
-            """Forgets the narrowing base.
-
-            Called whenever the underlying rows change: narrowing filters the
-            *previous result*, so a stale base would quietly hide rows that
-            the new data contains.
-            """
-            self._last_filter = None
-            self._last_visible = []
 
         def _apply_filter(self, match_filter: MatchFilter) -> None:
             if self._table is None:
                 return
-            # Filter the previous result when this filter can only accept a
-            # subset of it, which is the common case: extending a query.
-            # narrows() carries the conditions, including the one that makes
-            # it unsound -- a text that parses as an address matches exactly
-            # rather than by substring, so extending it can add a row.
-            if (self._last_filter is not None
-                    and match_filter.narrows(self._last_filter)):
-                source = self._last_visible
-            else:
-                source = self._all_rows
-            visible = filter_rows(source, match_filter)
-            self._last_filter = match_filter
-            self._last_visible = visible
+            visible = self._filtered(self._all_rows, match_filter)
             self._table.set_rows(visible)
             if self._status is not None:
                 self._status.setText(

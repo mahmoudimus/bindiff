@@ -247,6 +247,45 @@ class MatchFilter:
             row.address_primary, row.address_secondary)
 
 
+class IncrementalFilter:
+    """Applies a filter, reusing the previous result when it can only shrink.
+
+    Both list views filter the same way and had their own copy of this, which
+    is how one of them ends up fixed and the other does not -- the address
+    parser they each carried is exactly that story, so this is written once.
+
+    `narrows(previous_key, key)` decides whether the previous result is a
+    superset of what `key` will select; `apply(rows, key)` does the filtering.
+    Neither is Qt or IDA, so this is exercised headlessly.
+
+    invalidate() must be called whenever the underlying rows change: the cache
+    holds a *result*, and a stale one silently hides rows the new data has.
+    """
+
+    def __init__(self, narrows: Callable[[object, object], bool],
+                 apply: Callable[[Sequence, object], list]) -> None:
+        self._narrows = narrows
+        self._apply = apply
+        self._key: object = None
+        self._has_key = False
+        self._result: list = []
+
+    def __call__(self, all_rows: Sequence, key: object) -> list:
+        if self._has_key and self._narrows(self._key, key):
+            source: Sequence = self._result
+        else:
+            source = all_rows
+        self._result = self._apply(source, key)
+        self._key = key
+        self._has_key = True
+        return self._result
+
+    def invalidate(self) -> None:
+        self._key = None
+        self._has_key = False
+        self._result = []
+
+
 def cell_values(row: MatchRow) -> tuple:
     """One row's cells, in COLUMNS order.
 
