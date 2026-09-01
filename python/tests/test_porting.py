@@ -331,3 +331,42 @@ class TestFunctionCommentsFollowTheFunction:
         ports = plan_comment_ports(database, comments)
         assert len(ports) == 1
         assert ports[0].kind == "function"
+
+
+class TestRefusalsAreRecorded:
+    """IDA's setters return False rather than raising, so a write the
+    database refused has to be recorded or it is indistinguishable from a
+    comment that was never planned. That distinction is the whole question
+    when one comment goes missing from an import."""
+
+    def _port(self, address, kind="instruction"):
+        from ida_plugin.porting import CommentPort
+        return CommentPort(address=address, text="note",
+                           secondary_address=address, match_id=1, kind=kind)
+
+    def test_a_refused_comment_names_its_address(self):
+        from ida_plugin.porting import apply_comment_ports
+
+        result = apply_comment_ports(
+            [self._port(0x1000), self._port(0x2000)],
+            set_comment=lambda address, text, kind: address != 0x2000)
+        assert result.applied == 1
+        assert result.failed == 1
+        assert result.failed_addresses == [0x2000]
+
+    def test_a_writer_that_raises_is_recorded_too(self):
+        from ida_plugin.porting import apply_comment_ports
+
+        def explode(address, text, kind):
+            raise RuntimeError("no")
+
+        result = apply_comment_ports([self._port(0x1000)], set_comment=explode)
+        assert result.failed_addresses == [0x1000]
+
+    def test_nothing_refused_leaves_the_list_empty(self):
+        from ida_plugin.porting import apply_comment_ports
+
+        result = apply_comment_ports(
+            [self._port(0x1000)], set_comment=lambda *a: True)
+        assert result.applied == 1
+        assert result.failed_addresses == []

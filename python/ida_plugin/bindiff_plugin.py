@@ -40,6 +40,30 @@ from bindiff.ida_env import qt_widgets_usable
 # 9.1. See bindiff.ida_env.
 IDA_AVAILABLE = qt_widgets_usable()
 
+def _describe_comments(planned, result) -> str:
+    """What happened to the comments, in enough detail to act on.
+
+    "wrote 2 comment(s)" cannot answer the only question worth asking when
+    one goes missing: was it never planned, or did IDA refuse it? The two
+    have different causes -- an instruction that did not match, against an
+    address the database will not take a comment on -- and different fixes.
+    """
+    if not planned:
+        return ("no comments to port: the secondary export has none on the "
+                "matched instructions of this selection")
+    kinds = {}
+    for port in planned:
+        kinds[port.kind] = kinds.get(port.kind, 0) + 1
+    detail = ", ".join(f"{count} {kind}" for kind, count in sorted(kinds.items()))
+    message = (f"wrote {result.applied} of {len(planned)} comment(s) "
+               f"({detail})")
+    if result.failed:
+        where = ", ".join(f"0x{a:X}" for a in result.failed_addresses[:5])
+        more = ("..." if len(result.failed_addresses) > 5 else "")
+        message += f"; {result.failed} refused by IDA at {where}{more}"
+    return message
+
+
 if IDA_AVAILABLE:
     import ida_idaapi
     import ida_kernwin
@@ -1167,7 +1191,7 @@ if IDA_AVAILABLE:
                 self._refresh_matches()
                 return symbols
             comment_result = apply_comment_ports(comments)
-            self._report(f"{message}; wrote {comment_result.applied} comment(s)"
+            self._report(f"{message}; {_describe_comments(comments, comment_result)}"
                          "; not yet saved")
             # The names in the table came from the result file, which has just
             # changed, so redraw rather than leave it showing what used to be

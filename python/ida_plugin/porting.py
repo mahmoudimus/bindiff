@@ -21,7 +21,7 @@ each match and touched nothing.
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from bindiff.ida_env import database_is_open
@@ -253,10 +253,22 @@ class PortResult:
     applied: int = 0
     skipped: int = 0
     failed: int = 0
+    # Where a write was refused. IDA's setters return False rather than
+    # raising, so without these a comment the database rejected is
+    # indistinguishable from one that was never planned -- which is exactly
+    # the question asked when a single comment goes missing from an import.
+    failed_addresses: List[int] = field(default_factory=list)
 
     @property
     def attempted(self) -> int:
         return self.applied + self.skipped + self.failed
+
+    def record(self, address: int, written: bool) -> None:
+        if written:
+            self.applied += 1
+        else:
+            self.failed += 1
+            self.failed_addresses.append(address)
 
 
 def apply_symbol_ports(ports: Sequence[SymbolPort],
@@ -318,9 +330,9 @@ def apply_comment_ports(ports: Sequence[CommentPort],
                        else set_comment(port.address, port.text))
         except Exception:
             result.failed += 1
+            result.failed_addresses.append(port.address)
             continue
-        result.applied += 1 if written else 0
-        result.failed += 0 if written else 1
+        result.record(port.address, written)
     return result
 
 
