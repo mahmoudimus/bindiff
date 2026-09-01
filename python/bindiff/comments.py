@@ -23,6 +23,7 @@ is the whole of it.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -60,6 +61,68 @@ class ExportedComment:
     @property
     def is_function_comment(self) -> bool:
         return self.type == FUNCTION
+
+
+# Comment text IDA writes for itself. Porting these carries the other
+# binary's boilerplate into someone's database as though it were a
+# colleague's work, which is the same mistake porting an auto-generated name
+# would be -- and names have been filtered for that all along.
+#
+# Measured on a real export: of 12,974 DEFAULT comments, 12,885 match these
+# and 89 do not. The 89 are unmistakable --
+#
+#   "Merge-chain entry test: v7->succset.n == 1. If a handler-exit block ..."
+#   "Test mblock_t.flags (+0x18) & 0x10000 -- qualifies block for DCE sweep"
+#
+# -- and the 12,885 are "Trap to Debugger" 2,536 times, "Size" 1,081 times
+# (a callee's parameter name shown at the call site), "void *", and thousands
+# of "jumptable 0000000180191217 case 82".
+_BANNER = re.compile(r"^\s*;")
+_TYPE_ANNOTATION = re.compile(
+    r"^\s*[A-Za-z_][\w:<>,\s*&]*\(\s*__(cdecl|stdcall|fastcall|thiscall|"
+    r"usercall)\s*\*\s*\)\s*\(")
+_IDA_ANNOTATION = re.compile(
+    r"^(Trap to Debugger|switch jump|jumptable\s.*|switch\s+\d+\s+cases?.*|"
+    r"indirect table.*|jump table.*)$")
+# A bare identifier or type expression with no sentence in it: a parameter
+# name IDA shows at a call site, or the type of what is being pushed.
+_BARE_TOKEN = re.compile(
+    r"^(unsigned |signed |const |volatile |struct |enum |union )*"
+    r"[A-Za-z_][\w:<>]*\s*\**$")
+
+
+def is_generated_comment(text: str) -> bool:
+    """True for comment text IDA produced rather than a person.
+
+    Deliberately errs towards keeping things: a human comment dropped is work
+    silently lost, where boilerplate carried across is visible and can be
+    deleted. The one judgement call is _BARE_TOKEN -- a single word with no
+    sentence around it. Somebody could write "Src" as a comment; IDA writes it
+    701 times in one binary, so the balance is clear.
+
+    portable_comments(include_generated=True) turns all of this off.
+    """
+    if not text or not text.strip():
+        return True
+    stripped = text.strip()
+    # Whitespace is normalised before matching because IDA concatenates
+    # several of its own comments at one address into one multi-line string --
+    # "jumptable A cases 1-5\njumptable A default case" -- and an anchored
+    # pattern then matches none of it. Every line being boilerplate is what
+    # makes the whole boilerplate.
+    joined = " ".join(stripped.split())
+    if _BANNER.match(joined) or _TYPE_ANNOTATION.match(joined):
+        return True
+    if _BARE_TOKEN.match(joined):
+        return True
+    # Each line judged on its own, so a real note appended to an IDA
+    # annotation survives.
+    lines = [" ".join(line.split()) for line in stripped.splitlines()]
+    lines = [line for line in lines if line]
+    return bool(lines) and all(
+        _IDA_ANNOTATION.match(line) or _BARE_TOKEN.match(line)
+        or _BANNER.match(line) or _TYPE_ANNOTATION.match(line)
+        for line in lines)
 
 
 def _instruction_addresses(proto) -> Dict[int, int]:
@@ -113,7 +176,8 @@ def read_comments(binexport_path) -> List[ExportedComment]:
 
 
 def portable_comments(binexport_path,
-                      types: Optional[Iterable[str]] = None
+                      types: Optional[Iterable[str]] = None,
+                      include_generated: bool = False
                       ) -> Dict[int, List[ExportedComment]]:
     """Comments worth carrying into another database, grouped by address.
 
@@ -125,6 +189,8 @@ def portable_comments(binexport_path,
     grouped: Dict[int, List[ExportedComment]] = {}
     for comment in read_comments(binexport_path):
         if comment.type not in wanted:
+            continue
+        if not include_generated and is_generated_comment(comment.text):
             continue
         grouped.setdefault(comment.address, []).append(comment)
     return grouped

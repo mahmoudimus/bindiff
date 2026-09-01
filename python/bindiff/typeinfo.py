@@ -149,6 +149,41 @@ def from_json(data: dict) -> Tuple[List[TypeDeclaration], List[FunctionType]]:
     return declarations, functions
 
 
+# A parameter list with names in it: "(mblock_t *blk, bool x)" rather than
+# "(_QWORD, _QWORD)". An identifier following a type is the signal.
+_NAMED_PARAMETER = re.compile(r"[\w>*&\]]\s+[A-Za-z_]\w*\s*[,)]")
+
+
+def carries_information(function: "FunctionType") -> bool:
+    """True when a declaration says more than IDA would have guessed.
+
+    Applying the other side's guess over this side's guess is not porting, it
+    is swapping one default for another -- and the swap loses, because the
+    declaration carries the *other* binary's function name with it. On a real
+    pair the unfiltered set included
+
+        int sub_180001000();
+        __int64 __fastcall sub_180012650(_QWORD, _QWORD);
+
+    which say nothing at all, beside
+
+        mblock_t *__fastcall resolve_goto_target(mblock_t *blk,
+                                                 bool require_single_pred);
+
+    which is the whole point of the feature. The difference is a real name or
+    named parameters; a declaration with neither is IDA's opinion about a
+    binary the reader is not looking at.
+    """
+    from bindiff.stack_names import is_generated_name
+
+    declaration = function.declaration or ""
+    if not declaration:
+        return False
+    if function.name and not is_generated_name(function.name):
+        return True
+    return bool(_NAMED_PARAMETER.search(declaration))
+
+
 def referenced_types(text: str, known: Iterable[str]) -> Set[str]:
     """Which of `known` a piece of C text mentions.
 

@@ -407,23 +407,36 @@ def try_import(primary_database: str, result_path: str,
     shutil.rmtree(holder, ignore_errors=True)
     return StageResult(
         ok=True, stage="import",
-        message=(f"{details['renamed']}/{details['renames_planned']} renamed, "
-                 f"{details['comments']} comment(s), "
-                 f"{details['prototypes']} prototype(s)"),
+        message=(f"{details['names']['applied']}/"
+                 f"{details['names']['planned']} renamed, "
+                 f"{details['comments']['applied']}/"
+                 f"{details['comments']['planned']} comment(s), "
+                 f"{details['prototypes']['applied']}/"
+                 f"{details['prototypes']['planned']} prototype(s), "
+                 f"{details['types']['defined']} type(s) defined of "
+                 f"{details['types']['referenced']} referenced"),
         details=details)
 
 
 def _run_import(result_path: str, limit: Optional[int]) -> dict:
-    """The import itself, with a database already open."""
+    """The import itself, with a database already open.
+
+    Reports what was done and what was not, in enough detail to act on. A
+    bare "0 renamed" is indistinguishable from "nothing to rename", and a
+    bare "types_defined: 0" is indistinguishable from "types were not
+    attempted" -- both happened, and both cost a round of guessing.
+    """
     import json
 
     from bindiff.comments import portable_comments
     from bindiff.database import BinDiffDatabase
     from bindiff.binexport import find_binexports_for
-    from bindiff.typeinfo import from_json, plan_types, types_path_for
+    from bindiff.typeinfo import (carries_information, from_json,
+                                  needed_by, plan_types, types_path_for)
     from bindiff.typeinfo_ida import (apply_prototype, existing_type_names,
                                       parse_declarations)
     from ida_plugin.porting import (apply_comment_ports, apply_symbol_ports,
+                                    explain_symbol_port_skips,
                                     plan_comment_ports, plan_symbol_ports)
 
     database = BinDiffDatabase.open(result_path, read_only=True)
@@ -433,47 +446,104 @@ def _run_import(result_path: str, limit: Optional[int]) -> dict:
             matches = matches[:limit]
         ids = [m.id for m in matches]
 
+        # -- names ---------------------------------------------------------
         symbols = plan_symbol_ports(matches, overwrite_existing=True)
         symbol_result = apply_symbol_ports(symbols)
-        renamed, rename_failures = symbol_result.applied, symbol_result.failed
+        names = {
+            "planned": len(symbols),
+            "applied": symbol_result.applied,
+            "failed": symbol_result.failed,
+            "skipped": explain_symbol_port_skips(matches,
+                                                 overwrite_existing=True),
+            "examples": [f"{p.old_name} -> {p.new_name}" for p in symbols[:5]],
+        }
 
         _primary, secondary = find_binexports_for(result_path)
-        comments = 0
+        comments = {"planned": 0, "applied": 0, "failed": 0,
+                    "function": 0, "instruction": 0, "examples": []}
         if secondary:
             ports = plan_comment_ports(database, portable_comments(secondary),
                                        match_ids=ids)
-            comments = apply_comment_ports(ports).applied
+            result = apply_comment_ports(ports)
+            comments = {
+                "planned": len(ports),
+                "applied": result.applied,
+                "failed": result.failed,
+                "function": sum(1 for p in ports if p.kind == "function"),
+                "instruction": sum(1 for p in ports
+                                   if p.kind != "function"),
+                "examples": [f"{p.address:#x} [{p.kind}] "
+                             f"{' '.join(p.text.split())[:60]}"
+                             for p in ports[:3]],
+            }
 
-        prototypes = defined = 0
+        # -- types and prototypes -------------------------------------------
+        types = {"sidecar": "", "in_sidecar": 0, "referenced": 0,
+                 "already_present": 0, "to_define": 0, "defined": 0,
+                 "failed": 0, "unresolved": [], "present_examples": [],
+                 "missing_examples": []}
+        prototypes = {"planned": 0, "applied": 0, "examples": []}
+
         sidecar = types_path_for(secondary) if secondary else None
         if sidecar and Path(sidecar).is_file():
             declarations, functions = from_json(
                 json.loads(Path(sidecar).read_text(encoding="utf-8")))
             by_address = {f.address: f for f in functions}
-            needed, ports = [], []
+            needed, ports, uninformative = [], [], 0
             for match in matches:
                 source = by_address.get(match.address_secondary)
                 if source is None:
                     continue
+                # Skip the other side's guess. It would overwrite this side's
+                # guess with no gain, and it carries the other binary's
+                # function name into the declaration.
+                if not carries_information(source):
+                    uninformative += 1
+                    continue
                 needed.append(source)
-                ports.append((match.address_primary, source.declaration))
-            plan = plan_types(declarations, needed,
-                              already_present=existing_type_names())
-            if plan.statements:
-                defined, _failed = parse_declarations(plan.statements)
-            prototypes = sum(1 for address, declaration in ports
-                             if apply_prototype(address, declaration))
+                ports.append((match.address_primary, source.declaration,
+                              source.name))
 
-        # Planned against applied, because they disagreed and nothing said
-        # so: 3 renames planned, 0 applied, reported as "0 renamed".
-        return {"matches": len(matches),
-                "renames_planned": len(symbols), "renamed": renamed,
-                "renames_failed": rename_failures,
-                "comments": comments, "prototypes": prototypes,
-                "types_defined": defined,
-                "secondary_export": secondary or "",
-                "types_sidecar": sidecar if sidecar and
-                Path(sidecar).is_file() else ""}
+            present = set(existing_type_names())
+            referenced = needed_by(needed, declarations)
+            plan = plan_types(declarations, needed, already_present=present)
+            if plan.statements:
+                defined, failed = parse_declarations(plan.statements)
+            else:
+                defined = failed = 0
+
+            applied, rejected = [], []
+            for address, declaration, name in ports:
+                if apply_prototype(address, declaration):
+                    applied.append(f"{address:#x} {declaration[:70]}")
+                else:
+                    # SetType returning False is not an exception, so a
+                    # rejected declaration would otherwise vanish into the
+                    # gap between planned and applied.
+                    rejected.append(f"{address:#x} {declaration[:70]}")
+
+            types = {
+                "sidecar": sidecar,
+                "in_sidecar": len(declarations),
+                "referenced": len(referenced),
+                "already_present": len(referenced & present),
+                "to_define": len(plan.declarations),
+                "defined": defined,
+                "failed": failed,
+                "unresolved": plan.unresolved[:10],
+                "present_examples": sorted(referenced & present)[:8],
+                "missing_examples": sorted(referenced - present)[:8],
+            }
+            prototypes = {"planned": len(ports), "applied": len(applied),
+                          "skipped_uninformative": uninformative,
+                          "rejected": len(rejected),
+                          "examples": applied[:3],
+                          "rejected_examples": rejected[:3]}
+
+        return {"matches": len(matches), "names": names,
+                "comments": comments, "types": types,
+                "prototypes": prototypes,
+                "secondary_export": secondary or ""}
     finally:
         database.close()
 
