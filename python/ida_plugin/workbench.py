@@ -24,7 +24,7 @@ from ida_plugin.porting import (DEFAULT_PORT_MIN_CONFIDENCE,
                                 DEFAULT_PORT_MIN_SIMILARITY,
                                 preview_symbol_ports)
 from ida_plugin.query import Query, parse_query
-from ida_plugin.session import DiffSession
+from ida_plugin.session import DiffSession, State
 from ida_plugin.ui_logic import (DiffProgress, IncrementalFilter,
                                  filter_unmatched, format_elapsed,
                                  text_query_narrows)
@@ -90,6 +90,7 @@ if IDA_AVAILABLE:
             self._handlers = handlers
             self._started = 0.0
             self._message = ""
+            self._reported = False
 
             self._secondary = QtWidgets.QLineEdit()
             self._secondary.setPlaceholderText(
@@ -227,8 +228,13 @@ if IDA_AVAILABLE:
 
         # -- the panel protocol DiffRun expects ------------------------------
 
-        def start(self, title: str) -> None:
-            self._started = time.monotonic()
+        def start(self, title: str, started_at: Optional[float] = None) -> None:
+            # `started_at` is for a strip that is picking up a comparison
+            # already running -- the dock closed and was reopened. Without it
+            # the clock would restart at zero and report a five-minute diff as
+            # having just begun.
+            self._started = time.monotonic() if started_at is None else started_at
+            self._reported = False
             self._message = title
             self._bar.setRange(0, 0)
             self._bar.setFormat(title)
@@ -251,11 +257,25 @@ if IDA_AVAILABLE:
 
         def finish(self, message: str) -> None:
             self._timer.stop()
+            self._reported = True
             self._stack.setCurrentIndex(0)
             self._result_line.setToolTip(
                 f"{message} · took "
                 f"{format_elapsed(time.monotonic() - self._started)}")
             self.refresh_enabled()
+
+        def is_running(self) -> bool:
+            return self._stack.currentIndex() == 1
+
+        def has_reported(self) -> bool:
+            """Whether this strip has already announced the end of a run.
+
+            The session is still COMPARING while the result it produced is
+            being opened -- finish_compare comes after open_result -- so
+            "the session says a diff is running" is not on its own a reason
+            to put the bar back on screen.
+            """
+            return self._reported
 
         def _tick(self) -> None:
             self._bar.setFormat(
@@ -760,6 +780,7 @@ if IDA_AVAILABLE:
             if self.parent is None:
                 return
             self._refresh_enabled()
+            self._resume_progress()
             self._refresh_result_line()
             self._refresh_tabs()
             self._filter.invalidate()
@@ -767,17 +788,45 @@ if IDA_AVAILABLE:
             self._refresh_unmatched()
             self._refresh_overview()
 
+        def _resume_progress(self) -> None:
+            """Puts the strip back on the running page for a diff already
+            under way.
+
+            The dock can be closed and reopened mid-comparison, and a fresh
+            strip starts on the Compare button -- which reads as "nothing is
+            happening" while a worker is running, and offers a second diff.
+            The elapsed clock is taken from the session rather than from now,
+            so reopening does not reset it.
+            """
+            session = self._session
+            if (session.state is not State.COMPARING
+                    or self.run_strip.is_running()
+                    or self.run_strip.has_reported()):
+                return
+            progress = session.last_progress
+            self.run_strip.start(
+                progress.describe() if progress else "comparing…",
+                started_at=session.compare_started)
+            if progress is not None:
+                self.run_strip.update_progress(progress)
+
         def _on_matches_changed(self) -> None:
-            """An edit moves the counts and the unmatched lists too.
+            """An edit moves the counts, the unmatched lists and the
+            overview too.
 
             Separate from _refresh_rows because that also runs on every
             keystroke in the search field, and rebuilding an unmatched list
             walks every match on both sides -- per keystroke, on a result
-            with thousands of them.
+            with thousands of them. The overview belongs here for the
+            opposite reason: it is two small reads, and its matched and
+            unmatched counts are derived from the live match count, so
+            leaving it out of an edit is how Statistics came to disagree
+            with the table it sits beside.
             """
             self._refresh_tabs()
             self._refresh_rows()
             self._refresh_unmatched()
+            self._refresh_overview()
 
         def _refresh_enabled(self) -> None:
             if self.parent is None:
