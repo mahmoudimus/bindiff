@@ -124,6 +124,46 @@ def to_json(declarations: Sequence[TypeDeclaration],
     }
 
 
+def with_pseudocode(sidecar: dict, comments) -> dict:
+    """Adds the decompiler comments to a sidecar being written.
+
+    They share this file rather than getting one of their own: both are
+    "what BinExport2 cannot carry, read from the source database while it is
+    open", both are written in the same moment by the same export, and a
+    second file would mean a second thing to lose and a second prompt when it
+    is missing. A reader that predates this finds no such key.
+    """
+    from bindiff.pseudocode import PSEUDOCODE_FORMAT_VERSION
+    from bindiff.pseudocode import to_json as pseudocode_to_json
+
+    if not comments:
+        return sidecar
+    sidecar = dict(sidecar)
+    sidecar["pseudocode_version"] = PSEUDOCODE_FORMAT_VERSION
+    sidecar["pseudocode_comments"] = pseudocode_to_json(comments)
+    return sidecar
+
+
+def pseudocode_from_json(data: dict):
+    """The decompiler comments in a sidecar, or none.
+
+    Separate from from_json so that adding this did not change what every
+    existing caller unpacks, and so an older sidecar reads as "no comments"
+    rather than as a version error -- the types in it are still good.
+    """
+    from bindiff.pseudocode import PSEUDOCODE_FORMAT_VERSION
+    from bindiff.pseudocode import from_json as pseudocode_from
+
+    version = data.get("pseudocode_version")
+    if version is None:
+        return []
+    if version != PSEUDOCODE_FORMAT_VERSION:
+        raise ValueError(
+            f"pseudocode comments are version {version!r}, this reads "
+            f"{PSEUDOCODE_FORMAT_VERSION}")
+    return pseudocode_from(data.get("pseudocode_comments", []))
+
+
 def from_json(data: dict) -> Tuple[List[TypeDeclaration], List[FunctionType]]:
     """Reads a sidecar back. Raises ValueError on a version it cannot read."""
     version = data.get("version")

@@ -103,6 +103,14 @@ class _FakeDatabase:
     def matches(self):
         return self._matches
 
+    def instruction_matches_for(self, match_ids=None):
+        wanted = None if match_ids is None else set(match_ids)
+        grouped = {}
+        for match in self.matches():
+            if wanted is None or match.id in wanted:
+                grouped[match.id] = self.instruction_matches(match.id)
+        return grouped
+
     def instruction_matches(self, match_id=None):
         return self._pairs.get(match_id, [])
 
@@ -298,6 +306,9 @@ class TestFunctionCommentsFollowTheFunction:
                 id=1, similarity=1.0, confidence=1.0,
                 address_primary=0x1000, name_primary="sub_1000",
                 address_secondary=0x2000, name_secondary="real")]
+
+        def instruction_matches_for(self, match_ids=None):
+            return {1: self._pairs}
 
         def instruction_matches(self, _match_id):
             return self._pairs

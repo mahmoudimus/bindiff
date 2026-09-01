@@ -428,6 +428,65 @@ class BinDiffController:
                           already_present=existing_type_names())
         return plan, ports
 
+    def plan_pseudocode_ports(self, match_ids=None, *,
+                              min_similarity: float = None,
+                              min_confidence: float = None):
+        """Decompiler comments, moved onto this database's addresses.
+
+        Lives in the type sidecar rather than the .BinExport, for the same
+        reason types do: BinExport2's comment table is the disassembly's, and
+        a comment written in the pseudocode window is not in it.
+
+        Every address is translated through the match's own instruction
+        pairs. One that did not match is dropped: Hex-Rays takes any treeloc
+        without complaint and then discards it as an orphan at the next
+        decompilation, so a guess here would read as a comment that ported
+        and then vanished.
+        """
+        import json
+
+        from bindiff.pseudocode import by_function, translate
+        from bindiff.typeinfo import pseudocode_from_json
+        from ida_plugin.porting import (DEFAULT_PORT_MIN_CONFIDENCE,
+                                        DEFAULT_PORT_MIN_SIMILARITY)
+
+        if min_similarity is None:
+            min_similarity = DEFAULT_PORT_MIN_SIMILARITY
+        if min_confidence is None:
+            min_confidence = DEFAULT_PORT_MIN_CONFIDENCE
+
+        database = self._require_writable()
+        sidecar = self.types_sidecar()
+        if sidecar is None:
+            raise FileNotFoundError(
+                "no sidecar for the secondary; decompiler comments are not "
+                "in a .BinExport and have to be read out of its database")
+        stored = by_function(pseudocode_from_json(
+            json.loads(Path(sidecar).read_text(encoding="utf-8"))))
+        if not stored:
+            return []
+
+        ports = []
+        wanted = set(match_ids) if match_ids is not None else None
+        for match in database.matches():
+            if wanted is not None and match.id not in wanted:
+                continue
+            if (match.similarity < min_similarity
+                    or match.confidence < min_confidence):
+                continue
+            group = stored.get(match.address_secondary)
+            if not group:
+                continue
+            # The entry pair is not always among the instruction matches --
+            # a changed prologue starts the pairing a few bytes in -- so it
+            # is added explicitly, the same way function comments are.
+            address_map = {match.address_secondary: match.address_primary}
+            address_map.update(
+                {secondary: primary for primary, secondary
+                 in database.instruction_matches(match.id)})
+            ports.extend(translate(group, address_map, match.address_primary))
+        return ports
+
     def plan_comment_ports(self, match_ids=None, **kwargs):
         """Needs the secondary .BinExport: comments are not in a .BinDiff."""
         from bindiff.comments import portable_comments
@@ -1024,6 +1083,39 @@ if IDA_AVAILABLE:
 
             threading.Thread(target=work, daemon=True).start()
 
+        def _apply_pseudocode_comments(self, match_ids) -> None:
+            """The comments Hex-Rays keeps, not the ones IDA keeps.
+
+            Reported only when there is something to report. On a real
+            database these are rare -- 4 across 10,435 functions on the pair
+            this was built for -- and a line saying so after every import
+            would be noise on the one number that is almost always zero.
+
+            Never fails an import: the decompiler is licensed separately, the
+            sidecar may predate this, and neither is a reason to lose the
+            comments and names that did go across.
+            """
+            from bindiff.pseudocode_ida import apply_pseudocode_comments
+
+            try:
+                ports = self.controller.plan_pseudocode_ports(match_ids)
+            except FileNotFoundError:
+                return
+            except Exception as exc:
+                self._report(f"pseudocode comments: skipped, {exc}")
+                return
+            if not ports:
+                return
+            written, refused = apply_pseudocode_comments(ports)
+            message = f"pseudocode comments: {written} of {len(ports)} written"
+            if refused:
+                # Hex-Rays takes any treeloc and drops the ones that do not
+                # land on a ctree item, so this is counted after decompiling
+                # rather than from what the write returned.
+                message += (f", {refused} did not attach to a line in this "
+                            f"database")
+            self._report(message)
+
         def _apply_types(self, match_ids) -> bool:
             """Defines the missing types, then applies the prototypes.
 
@@ -1236,6 +1328,7 @@ if IDA_AVAILABLE:
             self._report("comments: "
                          + _describe_comments(comments, comment_result)
                          + "; not yet saved")
+            self._apply_pseudocode_comments(match_ids)
             # The names in the table came from the result file, which has just
             # changed, so redraw rather than leave it showing what used to be
             # true.
@@ -1337,6 +1430,7 @@ if IDA_AVAILABLE:
             self.controller.mark_imported(result.applied_matches)
             self._report("comments: " + _describe_comments(ports, result)
                          + "; not yet saved")
+            self._apply_pseudocode_comments(ids)
             self._refresh_views()
 
         # -- clipboard ------------------------------------------------------

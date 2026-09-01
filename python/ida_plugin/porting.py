@@ -183,11 +183,17 @@ def plan_comment_ports(
     wanted = set(match_ids) if match_ids is not None else None
     ports: List[CommentPort] = []
 
-    for match in database.matches():
-        if wanted is not None and match.id not in wanted:
-            continue
-        if match.similarity < min_similarity or match.confidence < min_confidence:
-            continue
+    selected = [match for match in database.matches()
+                if (wanted is None or match.id in wanted)
+                and match.similarity >= min_similarity
+                and match.confidence >= min_confidence]
+    # One query for the whole selection. Asking per match walks an unindexed
+    # join once per match: 110 seconds for 1237 of them, with the UI frozen
+    # throughout, to produce seven comments.
+    pairs_by_match = database.instruction_matches_for(
+        [match.id for match in selected])
+
+    for match in selected:
         # A function comment belongs to the function, so it is looked up at
         # the match's own addresses rather than through an instruction pair.
         # Going through instruction pairs loses it whenever the entry
@@ -202,8 +208,8 @@ def plan_comment_ports(
                                             match.address_secondary, match.id)
                 if port.kind == "function")
 
-        for primary_address, secondary_address in database.instruction_matches(
-                match.id):
+        for primary_address, secondary_address in pairs_by_match.get(
+                match.id, ()):
             found = comments_by_address.get(secondary_address)
             if not found:
                 continue

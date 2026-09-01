@@ -34,7 +34,7 @@ Two conventions worth knowing:
 
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Iterator, List, Optional, Sequence
+from typing import Dict, Iterator, List, Optional, Sequence
 
 MANUAL_ALGORITHM = "function: manual"
 
@@ -285,6 +285,11 @@ class BinDiffDatabase:
             confidence=row["confidence"] or 0.0,
         )
 
+    # SQLite takes far more bound variables than this, but a longer IN list
+    # stops helping: the join is unindexed, so past a few hundred ids the
+    # planner scans regardless and the parameters are pure overhead.
+    _IN_CLAUSE_LIMIT = 400
+
     def instruction_matches(self, match_id: Optional[int] = None
                             ) -> List[tuple]:
         """Matched instruction address pairs, as (primary, secondary).
@@ -305,6 +310,42 @@ class BinDiffDatabase:
             params = (match_id,)
         return [(_to_unsigned(row[0]), _to_unsigned(row[1]))
                 for row in self._connection.execute(query, params)]
+
+    def instruction_matches_for(self, match_ids: Optional[Sequence[int]] = None
+                                ) -> Dict[int, List[tuple]]:
+        """The same pairs, for many matches at once, grouped by match.
+
+        One scan instead of one per match. `instruction` joins to the function
+        match through `basicblock`, and upstream's schema indexes neither side
+        of that join, so every call is a scan of a table with millions of rows
+        in it. Called in a loop over a selection it is quadratic in disguise:
+        planning comment ports for 1237 matches took **110 seconds** and
+        froze the UI for all of it, to produce seven comments.
+
+        Above a few hundred ids the IN clause stops paying for itself -- the
+        scan happens either way -- so the filter is dropped and the grouping
+        does the work.
+        """
+        wanted = None if match_ids is None else set(match_ids)
+        query = """
+            SELECT b.functionid, i.address1, i.address2
+            FROM instruction AS i
+            INNER JOIN basicblock AS b ON i.basicblockid = b.id
+        """
+        params: tuple = ()
+        if wanted is not None and len(wanted) <= self._IN_CLAUSE_LIMIT:
+            ids = sorted(wanted)
+            query += f" WHERE b.functionid IN ({','.join('?' * len(ids))})"
+            params = tuple(ids)
+
+        grouped: Dict[int, List[tuple]] = {}
+        for function_id, primary, secondary in self._connection.execute(
+                query, params):
+            if wanted is not None and function_id not in wanted:
+                continue
+            grouped.setdefault(function_id, []).append(
+                (_to_unsigned(primary), _to_unsigned(secondary)))
+        return grouped
 
     def basic_block_matches(self, match_id: int) -> List[tuple]:
         """Matched basic block pairs for one function match.

@@ -263,3 +263,39 @@ class TestUnsavedChanges:
         target = next(m.id for m in writable.matches())
         writable.set_primary_names({target: "ported"})
         assert writable.has_unsaved_changes is True
+
+
+def test_instruction_matches_for_groups_by_match(writable):
+    """One query for a whole selection. Asked per match it walks an
+    unindexed join once per match -- 110 seconds for 1237 matches, with the
+    UI frozen throughout, to produce seven comments."""
+    ids = [m.id for m in writable.matches()]
+    grouped = writable.instruction_matches_for(ids)
+    for match_id in ids:
+        assert grouped.get(match_id, []) == writable.instruction_matches(
+            match_id)
+
+
+def test_instruction_matches_for_takes_everything_when_unfiltered(writable):
+    grouped = writable.instruction_matches_for()
+    assert sum(len(v) for v in grouped.values()) == len(
+        writable.instruction_matches())
+
+
+def test_instruction_matches_for_ignores_ids_that_are_not_there(writable):
+    assert writable.instruction_matches_for([10 ** 9]) == {}
+
+
+def test_instruction_matches_for_agrees_past_the_in_clause_limit(writable):
+    """Above the limit the WHERE is dropped and the grouping filters
+    instead. The two paths must return the same thing, or a large selection
+    silently ports different comments from a small one."""
+    ids = [m.id for m in writable.matches()]
+    small = writable.instruction_matches_for(ids)
+    limit = type(writable)._IN_CLAUSE_LIMIT
+    try:
+        type(writable)._IN_CLAUSE_LIMIT = 0
+        large = writable.instruction_matches_for(ids)
+    finally:
+        type(writable)._IN_CLAUSE_LIMIT = limit
+    assert small == large

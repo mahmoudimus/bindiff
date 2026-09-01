@@ -358,16 +358,22 @@ def _write_types_beside(export_path) -> int:
     import json
 
     try:
-        from bindiff.typeinfo import to_json, types_path_for
+        from bindiff.pseudocode_ida import read_pseudocode_comments
+        from bindiff.typeinfo import to_json, types_path_for, with_pseudocode
         from bindiff.typeinfo_ida import read_types
 
         declarations, functions = read_types()
-        if not declarations and not functions:
+        # A netnode read per function, no decompilation: 10,435 functions in
+        # well under a second, against 0.9s for the open that has already
+        # been paid for.
+        comments = read_pseudocode_comments()
+        if not declarations and not functions and not comments:
             return 0
+        sidecar = with_pseudocode(
+            to_json(declarations, functions, source=str(export_path)),
+            comments)
         Path(types_path_for(export_path)).write_text(
-            json.dumps(to_json(declarations, functions,
-                               source=str(export_path)), indent=1),
-            encoding="utf-8")
+            json.dumps(sidecar, indent=1), encoding="utf-8")
         return len(declarations)
     except Exception:
         return 0
