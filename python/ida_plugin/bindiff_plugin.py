@@ -922,6 +922,15 @@ if IDA_AVAILABLE:
 
             try:
                 plan, ports = self.controller.plan_type_ports(match_ids)
+                if not ports:
+                    from ida_plugin.porting import explain_symbol_port_skips
+                    blocked = explain_symbol_port_skips(
+                        self.controller.matches_for(match_ids),
+                        overwrite_existing=True)
+                    if self._ask_to_ignore_floors(blocked,
+                                                  len(list(match_ids))):
+                        plan, ports = self.controller.plan_type_ports(
+                            match_ids, min_similarity=0.0, min_confidence=0.0)
             except FileNotFoundError as exc:
                 self._report(f"types skipped: {exc}")
                 return False
@@ -1015,12 +1024,40 @@ if IDA_AVAILABLE:
                 return
             self._apply_ports(match_ids=None)
 
+        def _ask_to_ignore_floors(self, skips: dict, total: int) -> bool:
+            """Offers to import a selection the thresholds refused.
+
+            The floors exist because porting everything at 0.0 wrote 516 wrong
+            names out of 1,440 on the measured corpus. That is an argument
+            about *bulk* porting: nobody read those matches. Hand-picking a
+            handful of rows and choosing Import is the judgement the floor is
+            standing in for, so being told "0 renamed" and left to work out
+            why is the wrong answer.
+
+            Only asked when the floor is the sole reason nothing happened.
+            A selection skipped because there was no name to give has nothing
+            to reconsider.
+            """
+            from ida_plugin.porting import DEFAULT_PORT_MIN_SIMILARITY
+
+            blocked = skips.get("below the similarity or confidence floor", 0)
+            if not blocked or blocked != total:
+                return False
+            return ida_kernwin.ask_yn(
+                ida_kernwin.ASKBTN_NO,
+                "HIDECANCEL\n"
+                f"All {total} selected match(es) are below the porting "
+                f"thresholds (similarity and confidence both "
+                f"{DEFAULT_PORT_MIN_SIMILARITY}).\n\n"
+                "Those defaults exist for importing in bulk, where nobody has "
+                "read the matches. You have selected these by hand.\n\n"
+                "Import them anyway?") == ida_kernwin.ASKBTN_YES
+
         def _apply_ports(self, match_ids):
             """Shared by the three import variants. Returns the symbol ports."""
-            from ida_plugin.porting import apply_comment_ports, apply_symbol_ports
-
-            from ida_plugin.porting import (_is_generated_name,
-                                            explain_symbol_port_skips)
+            from ida_plugin.porting import (
+                _is_generated_name, apply_comment_ports, apply_symbol_ports,
+                explain_symbol_port_skips)
 
             # Overwrites an existing name, which is what upstream does --
             # its only guard is "already has the same name" -- and what
@@ -1032,8 +1069,17 @@ if IDA_AVAILABLE:
             # different and measured problem: porting at 0.0 wrote 516 wrong
             # names out of 1440 on the corpus. That is about trusting a match,
             # not about respecting a name.
+            floors = {}
             symbols = self.controller.plan_symbol_ports(
                 match_ids, overwrite_existing=True)
+            if not symbols:
+                blocked = explain_symbol_port_skips(
+                    self.controller.matches_for(match_ids),
+                    overwrite_existing=True)
+                if self._ask_to_ignore_floors(blocked, len(list(match_ids))):
+                    floors = {"min_similarity": 0.0, "min_confidence": 0.0}
+                    symbols = self.controller.plan_symbol_ports(
+                        match_ids, overwrite_existing=True, **floors)
             symbol_result = apply_symbol_ports(symbols)
             # The result file records the names the differ saw. Leaving it
             # alone means the table keeps showing the old name for a function
@@ -1050,7 +1096,8 @@ if IDA_AVAILABLE:
             # Whatever is still skipped is accounted for rather than silent.
             skips = explain_symbol_port_skips(
                 self.controller.matches_for(match_ids),
-                overwrite_existing=True)
+                overwrite_existing=True,
+                **{k: v for k, v in floors.items()})
             if skips:
                 message += "; " + ", ".join(
                     f"{count} skipped: {reason}"
@@ -1065,7 +1112,8 @@ if IDA_AVAILABLE:
                 self._refresh_matches()
                 return symbols
             try:
-                comments = self.controller.plan_comment_ports(match_ids)
+                comments = self.controller.plan_comment_ports(
+                    match_ids, **floors)
             except FileNotFoundError as exc:
                 self._report(f"{message}; comments skipped: {exc}"
                              "; not yet saved")
