@@ -66,9 +66,17 @@ NO_BUILD=""
 WITH_BINEXPORT="${BINDIFF_WITH_BINEXPORT:-}"
 EXTRA=()
 
-# Container-side paths. The build tree lives under /work so it survives between
-# invocations (the repo is bind-mounted read-write).
+# Container-side paths. The C++ build tree lives under /work so it survives
+# between invocations (the repo is bind-mounted read-write) and is platform-
+# tagged by service, so two images do not share one tree.
 CONTAINER_BUILD_DIR="/work/build/docker-${SERVICE}"
+# The Python extension does NOT: it has the same filename on every platform,
+# so building it into the mount replaced whatever the host had built and left
+# the plugin unable to import in a real IDA. These live in the container, and
+# die with it -- the object files are the only slow part and the container is
+# reused, so nothing is paid twice.
+CONTAINER_EXT_DIR="/opt/bindiff-ext"
+CONTAINER_OBJ_DIR="/opt/bindiff-obj"
 IDA_PYTHON="/app/ida/.venv/bin/python3"
 
 CMD="${1:-}"
@@ -99,6 +107,8 @@ while [ $# -gt 0 ]; do
 done
 
 CONTAINER_BUILD_DIR="/work/build/docker-${SERVICE}"
+CONTAINER_EXT_DIR="/opt/bindiff-ext"
+CONTAINER_OBJ_DIR="/opt/bindiff-obj"
 
 # BinExport is a source dependency: BinDiff add_subdirectory()s it and takes
 # Abseil, Protobuf, GoogleTest and the IDA SDK handling from it.
@@ -132,6 +142,7 @@ quote_args() {
 read -r -d '' SETUP_CMD <<EOF || true
 set -e
 export BINDIFF_BUILD_DIR="$CONTAINER_BUILD_DIR"
+export BINDIFF_PACKAGE_DIR="$CONTAINER_EXT_DIR"
 export BINDIFF_BINEXPORT_DIR=/binexport
 if [ ! -f /tmp/.bindiff-deps-installed ]; then
   echo "[setup] installing build dependencies"
@@ -148,6 +159,7 @@ EOF
 
 read -r -d '' BUILD_CMD <<EOF || true
 set -e
+export BINDIFF_PACKAGE_DIR="$CONTAINER_EXT_DIR"
 JOBS="\${JOBS:-\$(nproc)}"
 if [ -n "$REBUILD" ]; then rm -rf "$CONTAINER_BUILD_DIR"; fi
 echo "[build] configuring"
@@ -173,7 +185,34 @@ touch /work/python/bindiff/_pb/__init__.py
   bindiff_metadata.proto
 
 echo "[build] building the Cython extension against IDA's interpreter"
-cd /work/python && $IDA_PYTHON setup.py build_ext --inplace
+# Built outside the checkout. /work is a bind mount, so an in-place build
+# left this container's Linux .so at python/bindiff/core.abi3.so, where it
+# replaced the host's and stopped the plugin importing in a real IDA -- and
+# nothing said so, because the file has the same name on both platforms.
+# --build-temp keeps the object files out too, and keeps them between runs.
+rm -rf "$CONTAINER_EXT_DIR"
+cd /work/python && $IDA_PYTHON setup.py build_ext \
+  --build-lib "$CONTAINER_EXT_DIR" --build-temp "$CONTAINER_OBJ_DIR"
+
+# build_ext writes only the extension, so the package is completed with links
+# to the live sources: an edit needs no rebuild, and a file added since the
+# last run is picked up by this one.
+for entry in /work/python/bindiff/*; do
+  name=\$(basename "\$entry")
+  [ -e "$CONTAINER_EXT_DIR/bindiff/\$name" ] || \
+    ln -s "\$entry" "$CONTAINER_EXT_DIR/bindiff/\$name"
+done
+ln -sfn /work/python/ida_plugin "$CONTAINER_EXT_DIR/ida_plugin"
+
+# A leftover from when this did build in place. Removed only when it is this
+# platform's: a Mach-O file here belongs to the host and is none of our
+# business.
+leftover=/work/python/bindiff/core.abi3.so
+if [ -f "\$leftover" ] && head -c 4 "\$leftover" | grep -qa ELF; then
+  echo "[build] removing a stale in-tree extension from an earlier run"
+  rm -f "\$leftover"
+fi
+rm -rf /work/python/build
 EOF
 
 # BinExport's IDA plugin, in its own tree because it needs

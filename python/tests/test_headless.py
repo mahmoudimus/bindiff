@@ -9,6 +9,7 @@ itself is not covered here -- see test_export_opens_and_closes_a_database.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -793,3 +794,33 @@ class TestExportRefusesOurOwnOutput:
 def _touch(path):
     path.write_bytes(b"SQLite format 3\x00")
     return path
+
+
+class TestWorkerEnvironmentFindsTheExtension:
+    """The worker is a subprocess of IDA's interpreter and inherits the
+    environment, not sys.path. Where the harness has built the extension
+    outside the checkout, the directory this module resolves to is the
+    sources -- which have no extension beside them."""
+
+    def test_it_prefers_the_harness_location(self):
+        from bindiff.headless import worker_environment
+
+        env = worker_environment({"BINDIFF_PACKAGE_DIR": "/opt/bindiff-ext"})
+        assert env["PYTHONPATH"].split(os.pathsep)[0] == "/opt/bindiff-ext"
+
+    def test_without_it_the_package_directory_is_used(self):
+        from pathlib import Path
+
+        from bindiff.headless import worker_environment
+
+        env = worker_environment({})
+        expected = str(Path(__import__("bindiff").__file__).resolve().parent.parent)
+        assert env["PYTHONPATH"].split(os.pathsep)[0] == expected
+
+    def test_an_existing_pythonpath_is_kept_behind_it(self):
+        """A caller who set one meant it."""
+        from bindiff.headless import worker_environment
+
+        env = worker_environment({"BINDIFF_PACKAGE_DIR": "/opt/x",
+                                  "PYTHONPATH": "/somewhere"})
+        assert env["PYTHONPATH"].split(os.pathsep) == ["/opt/x", "/somewhere"]

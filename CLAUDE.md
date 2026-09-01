@@ -101,6 +101,17 @@ The leg is narrow on purpose: anything importing `bindiff.*` pulls in the Cython
 
 9.4 is the primary leg (BinExport pins the IDA SDK to 9.4); 9.1 is a compatibility leg. Images come from `docker-compose.yml`, overridable via `BINDIFF_TEST_IMAGE_94` / `BINDIFF_TEST_IMAGE_91`. Container deps live in `.github/docker-apt-deps.txt` (cmake, ninja — the images ship gcc but no generator) and `.github/docker-deps.txt` (Cython, pytest); CI hashes both for its image cache key.
 
+**The container does not build into the checkout.** `/work` is a bind mount and
+a Python extension has the same filename on every platform, so
+`build_ext --inplace` there left a Linux `core.abi3.so` in `python/bindiff/`,
+replacing whatever the host had built and leaving the plugin unable to import
+in a real IDA -- with nothing to say so, because the name is identical. The
+harness builds it to `/opt/bindiff-ext` (objects to `/opt/bindiff-obj`, kept
+between runs) and completes the package there with links to the live sources,
+so an edit still needs no rebuild. `BINDIFF_PACKAGE_DIR` tells `conftest.py`
+to put that directory ahead of `python/`; without it the source directory
+answers with a package that has no extension in it.
+
 `python/setup.py` derives its include paths from `compile_commands.json` and its link line by discovering the archives CMake built. Don't reintroduce hand-maintained lists of Abseil libraries — the previous one went stale on every dependency bump and failed one missing `-l` at a time.
 
 ## Architecture

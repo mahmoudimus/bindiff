@@ -26,6 +26,19 @@ IDA_PLUGIN_DIR = "/root/.idapro/plugins"
 if os.path.isdir(IDA_PLUGIN_DIR) and IDA_PLUGIN_DIR not in sys.path:
     sys.path.insert(0, IDA_PLUGIN_DIR)
 
+# Last, so it ends up first. The harness builds the extension outside the
+# checkout: /work is a bind mount, a Python extension has the same filename on
+# every platform, and an in-place build there replaced whatever the host had
+# built -- leaving the plugin unable to import in a real IDA, with nothing to
+# say so. BINDIFF_PACKAGE_DIR holds the extension plus links to these same
+# sources. It has to beat both of the entries above, which are two views of
+# the checkout and so carry the host's extension, not this platform's.
+PACKAGE_DIR = os.environ.get("BINDIFF_PACKAGE_DIR")
+if PACKAGE_DIR and os.path.isdir(PACKAGE_DIR):
+    if PACKAGE_DIR in sys.path:
+        sys.path.remove(PACKAGE_DIR)
+    sys.path.insert(0, PACKAGE_DIR)
+
 
 def pytest_configure(config):
     config.addinivalue_line(

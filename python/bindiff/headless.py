@@ -894,7 +894,12 @@ def worker_environment(base=None) -> dict:
     for a wheel install -- the path is simply already satisfied.
     """
     environment = dict(os.environ if base is None else base)
-    package_root = str(Path(__file__).resolve().parents[1])
+    # BINDIFF_PACKAGE_DIR wins where it is set, which is the test harness:
+    # there the extension is built outside the checkout and the package is
+    # completed with links to the sources, so resolve() below would follow
+    # those links back to a directory with no extension beside them.
+    package_root = (environment.get("BINDIFF_PACKAGE_DIR")
+                    or str(Path(__file__).resolve().parents[1]))
     existing = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = (
         package_root + os.pathsep + existing if existing else package_root)

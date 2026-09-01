@@ -54,11 +54,18 @@ class TestStableKey:
 
 
 def _package_root() -> str:
+    """The directory a child process should put on sys.path to import
+    bindiff -- the one this process imported it from.
+
+    Not resolve()d. Where the harness has built the extension outside the
+    checkout, the package is completed with links to the sources, and
+    resolving follows those links back to a directory that has no extension
+    beside them."""
     from pathlib import Path
 
     import bindiff
 
-    return str(Path(bindiff.__file__).resolve().parent.parent)
+    return str(Path(bindiff.__file__).absolute().parent.parent)
 
 
 class TestTypeCanonicalisation:
