@@ -153,6 +153,37 @@ def sort_rows(rows: Iterable[MatchRow], column: str,
     return sorted(rows, key=_sort_key(column), reverse=descending)
 
 
+def parse_address_query(text: str) -> Optional[int]:
+    """The address a filter query names, or None when it names no address.
+
+    "401000" and "0x401000" both parse; a name does not. Bare digits are read
+    as hex because that is how addresses are written in a disassembler.
+    """
+    query = text.strip()
+    if not query:
+        return None
+    try:
+        return int(query, 16 if not query.lower().startswith("0x") else 0)
+    except ValueError:
+        return None
+
+
+def text_query_narrows(previous: str, current: str) -> bool:
+    """True when `current` can only match a subset of what `previous` matched.
+
+    Shared by the matched and unmatched views because both have the same trap.
+    A query matches names by substring, which narrows as it grows, but matches
+    addresses *exactly*, which does not: a function at 0x401 is not matched by
+    "40" and is matched by "401", so extending the query adds it. Whenever
+    either query names an address this returns False and the caller filters
+    everything again.
+    """
+    if not current.startswith(previous):
+        return False
+    return (parse_address_query(previous) is None
+            and parse_address_query(current) is None)
+
+
 @dataclass(frozen=True)
 class MatchFilter:
     """The filter the matched-functions view applies.
@@ -169,13 +200,7 @@ class MatchFilter:
     changed_only: bool = False
 
     def _address_query(self) -> Optional[int]:
-        query = self.text.strip()
-        if not query:
-            return None
-        try:
-            return int(query, 16 if not query.lower().startswith("0x") else 0)
-        except ValueError:
-            return None
+        return parse_address_query(self.text)
 
     def narrows(self, previous: "MatchFilter") -> bool:
         """True when this filter can only accept a subset of `previous`.
@@ -200,10 +225,7 @@ class MatchFilter:
             return False
         if previous.changed_only and not self.changed_only:
             return False
-        if not self.text.startswith(previous.text):
-            return False
-        return (self._address_query() is None
-                and previous._address_query() is None)
+        return text_query_narrows(previous.text, self.text)
 
     def matches(self, row: MatchRow) -> bool:
         if row.similarity < self.min_similarity:
@@ -475,6 +497,17 @@ def unmatched_functions(functions: Iterable, matched_addresses: Iterable[int],
     return sorted(rows, key=lambda row: row.address)
 
 
+def unmatched_cell_values(row: "UnmatchedRow") -> tuple:
+    """One unmatched row's cells, in UNMATCHED_COLUMNS order.
+
+    Here rather than in the table for the same reason as cell_values: the
+    model stays an adapter and the formatting is testable without a GUI.
+    """
+    kind = "library" if row.is_library else (
+        "named" if row.has_real_name else "unnamed")
+    return (row.address_text, row.name, kind)
+
+
 def sort_unmatched(rows: Iterable[UnmatchedRow], column: str,
                    descending: bool = False) -> List[UnmatchedRow]:
     known = {name for name, _ in UNMATCHED_COLUMNS}
@@ -495,11 +528,7 @@ def filter_unmatched(rows: Iterable[UnmatchedRow], text: str) -> List[UnmatchedR
     if not needle:
         return list(rows)
 
-    address_query = None
-    try:
-        address_query = int(needle, 16 if not needle.startswith("0x") else 0)
-    except ValueError:
-        pass
+    address_query = parse_address_query(needle)
 
     return [row for row in rows
             if needle in row.name.lower() or row.address == address_query]

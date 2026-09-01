@@ -769,8 +769,18 @@ if IDA_AVAILABLE:
             if form is None:
                 # Only the primary side can be navigated to: the secondary's
                 # addresses belong to a different database.
+                # The side decides which actions apply: "add match" and
+                # "copy address" mean different things on each, and the
+                # registered actions are already per-side.
+                if secondary:
+                    actions = (ACTION_UNMATCHED_ADD_MATCH_SECONDARY,
+                               ACTION_UNMATCHED_COPY_SECONDARY)
+                else:
+                    actions = (ACTION_UNMATCHED_ADD_MATCH_PRIMARY,
+                               ACTION_UNMATCHED_COPY_PRIMARY)
                 form = UnmatchedFunctionsForm(
-                    rows, side, on_jump=None if secondary else _jump_to)
+                    rows, side, on_jump=None if secondary else _jump_to,
+                    context_actions=actions, on_action=self._invoke_action)
                 self.controller._unmatched_forms[side] = form
             else:
                 form.set_rows(rows)

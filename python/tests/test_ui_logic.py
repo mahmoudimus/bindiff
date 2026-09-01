@@ -509,3 +509,45 @@ def _match_row(**overrides):
                   instructions=1)
     fields.update(overrides)
     return MatchRow(**fields)
+
+
+class TestUnmatchedCellValues:
+    def test_one_value_per_column(self):
+        from ida_plugin.ui_logic import UNMATCHED_COLUMNS, UnmatchedRow, \
+            unmatched_cell_values
+        row = UnmatchedRow(address=0x401000, name="sub_401000",
+                           is_library=False, has_real_name=False)
+        assert len(unmatched_cell_values(row)) == len(UNMATCHED_COLUMNS)
+
+    @pytest.mark.parametrize("is_library,has_real_name,expected", [
+        (True, True, "library"),
+        (False, True, "named"),
+        (False, False, "unnamed"),
+    ])
+    def test_kind(self, is_library, has_real_name, expected):
+        from ida_plugin.ui_logic import UnmatchedRow, unmatched_cell_values
+        row = UnmatchedRow(address=0x401000, name="x", is_library=is_library,
+                           has_real_name=has_real_name)
+        assert unmatched_cell_values(row)[2] == expected
+
+
+class TestSharedNarrowingRule:
+    """Both views filter the same way, so they share the rule and its trap."""
+
+    def test_extending_a_name_narrows(self):
+        from ida_plugin.ui_logic import text_query_narrows
+        assert text_query_narrows("acrt", "acrt_zz")
+
+    def test_a_hex_query_never_narrows(self):
+        from ida_plugin.ui_logic import text_query_narrows
+        assert not text_query_narrows("40", "401")
+
+    def test_unmatched_filtering_agrees_when_it_says_yes(self):
+        from ida_plugin.ui_logic import (UnmatchedRow, filter_unmatched,
+                                         text_query_narrows)
+        rows = [UnmatchedRow(address=0x400000 + i, name=n, is_library=False,
+                             has_real_name=True)
+                for i, n in enumerate(["acrt_one", "acrt_two", "zz", "acrt_z"])]
+        assert text_query_narrows("acrt", "acrt_z")
+        assert (filter_unmatched(filter_unmatched(rows, "acrt"), "acrt_z")
+                == filter_unmatched(rows, "acrt_z"))

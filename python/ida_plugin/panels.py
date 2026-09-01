@@ -25,6 +25,8 @@ from ida_plugin.ui_logic import (
     filter_unmatched,
     format_elapsed,
     sort_unmatched,
+    text_query_narrows,
+    unmatched_cell_values,
     MatchFilter,
     MatchRow,
     StatisticRow,
@@ -456,18 +458,79 @@ if IDA_AVAILABLE:
             ida_kernwin.msg(f"[BinDiff] {diff.summary}\n")
             return viewer
 
-    class UnmatchedTable(QtWidgets.QTableWidget):
+    class UnmatchedTableModel(QtCore.QAbstractTableModel):
+        """Serves UnmatchedRow objects to a view on demand.
+
+        Same reasoning as MatchTableModel: on a real binary the unmatched
+        list is not a short one -- a diff that matches 5956 functions can
+        leave thousands unaccounted for on either side -- and a widget per
+        cell makes the panel slow to open and slow to filter.
+        """
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+            self._rows: List[UnmatchedRow] = []
+            self._cached_index = -1
+            self._cached_values: tuple = ()
+
+        def rowCount(self, parent=None) -> int:
+            if parent is not None and parent.isValid():
+                return 0
+            return len(self._rows)
+
+        def columnCount(self, parent=None) -> int:
+            if parent is not None and parent.isValid():
+                return 0
+            return len(UNMATCHED_COLUMNS)
+
+        def data(self, index, role=None):
+            if not index.isValid():
+                return None
+            if role is None:
+                role = Qt.DisplayRole
+            if role != Qt.DisplayRole or index.row() >= len(self._rows):
+                return None
+            if index.row() != self._cached_index:
+                self._cached_index = index.row()
+                self._cached_values = unmatched_cell_values(
+                    self._rows[index.row()])
+            return self._cached_values[index.column()]
+
+        def headerData(self, section, orientation, role=None):
+            if role is None:
+                role = Qt.DisplayRole
+            if role != Qt.DisplayRole or orientation != Qt.Horizontal:
+                return None
+            if 0 <= section < len(UNMATCHED_COLUMNS):
+                return UNMATCHED_COLUMNS[section][1]
+            return None
+
+        def set_rows(self, rows: Sequence[UnmatchedRow]) -> None:
+            self.beginResetModel()
+            self._rows = list(rows)
+            self._cached_index = -1
+            self.endResetModel()
+
+        @property
+        def rows(self) -> List[UnmatchedRow]:
+            return self._rows
+
+    class UnmatchedTable(QtWidgets.QTableView):
         """Functions on one side that no match refers to."""
 
         def __init__(self, parent=None) -> None:
-            super().__init__(0, len(UNMATCHED_COLUMNS), parent)
-            self.setHorizontalHeaderLabels(
-                [label for _, label in UNMATCHED_COLUMNS])
+            super().__init__(parent)
+            self._model = UnmatchedTableModel(self)
+            self.setModel(self._model)
             self.setEditTriggers(_no_edit_triggers())
             self.setSelectionBehavior(_select_rows())
             self.setSelectionMode(_extended_selection())
             self.setAlternatingRowColors(True)
             self.verticalHeader().setVisible(False)
+
+            metrics = self.fontMetrics()
+            self.verticalHeader().setDefaultSectionSize(metrics.height() + 4)
+            self.setWordWrap(False)
 
             header = self.horizontalHeader()
             try:
@@ -478,26 +541,52 @@ if IDA_AVAILABLE:
             header.setSectionsClickable(True)
             header.sectionClicked.connect(self._on_header_clicked)
 
-            self._rows: List[UnmatchedRow] = []
             self._sort_column = "address"
             self._sort_descending = False
             self.on_activated: Optional[Callable[[UnmatchedRow], None]] = None
-            self.cellDoubleClicked.connect(self._on_double_clicked)
+            self.doubleClicked.connect(self._on_double_clicked)
+
+            # This panel had no context menu at all, so the actions the plugin
+            # registers for it -- add a match, copy an address -- were
+            # registered and unreachable.
+            self.context_actions: Sequence[str] = ()
+            self.on_action: Optional[Callable[[str], None]] = None
+            self.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.customContextMenuRequested.connect(self._show_context_menu)
+
+        def _show_context_menu(self, position) -> None:
+            if not self.context_actions:
+                return
+            menu = QtWidgets.QMenu(self)
+            for name in self.context_actions:
+                if name is None:
+                    menu.addSeparator()
+                    continue
+                action = menu.addAction(name.split(":", 1)[-1].replace("_", " "))
+                action.setData(name)
+            chosen = exec_widget(menu, self.viewport().mapToGlobal(position))
+            if chosen is None:
+                return
+            # Direct, for the reason the matched table's menu is direct:
+            # process_ui_action does not dispatch from inside a Qt menu on our
+            # own widget, and fails silently when it does not.
+            if self.on_action is not None:
+                self.on_action(chosen.data())
+            else:
+                ida_kernwin.process_ui_action(chosen.data())
 
         def set_rows(self, rows: Sequence[UnmatchedRow]) -> None:
-            self._rows = sort_unmatched(rows, self._sort_column,
-                                        self._sort_descending)
-            self.setRowCount(len(self._rows))
-            for index, row in enumerate(self._rows):
-                kind = "library" if row.is_library else (
-                    "named" if row.has_real_name else "unnamed")
-                for column, value in enumerate((row.address_text, row.name, kind)):
-                    self.setItem(index, column,
-                                 QtWidgets.QTableWidgetItem(value))
+            self._model.set_rows(
+                sort_unmatched(rows, self._sort_column, self._sort_descending))
+
+        @property
+        def _rows(self) -> List[UnmatchedRow]:
+            return self._model.rows
 
         def selected_rows(self) -> List[UnmatchedRow]:
+            rows = self._model.rows
             indexes = {index.row() for index in self.selectedIndexes()}
-            return [self._rows[i] for i in sorted(indexes) if i < len(self._rows)]
+            return [rows[i] for i in sorted(indexes) if i < len(rows)]
 
         def _on_header_clicked(self, section: int) -> None:
             column = UNMATCHED_COLUMNS[section][0]
@@ -505,11 +594,12 @@ if IDA_AVAILABLE:
                 self._sort_descending = not self._sort_descending
             else:
                 self._sort_column, self._sort_descending = column, False
-            self.set_rows(self._rows)
+            self.set_rows(self._model.rows)
 
-        def _on_double_clicked(self, row: int, _column: int) -> None:
-            if self.on_activated and 0 <= row < len(self._rows):
-                self.on_activated(self._rows[row])
+        def _on_double_clicked(self, index) -> None:
+            rows = self._model.rows
+            if self.on_activated and index.isValid() and index.row() < len(rows):
+                self.on_activated(rows[index.row()])
 
     class DiffProgressForm(ida_kernwin.PluginForm):
         """Live status for a diff running in a worker process.
@@ -637,9 +727,15 @@ if IDA_AVAILABLE:
         """Dockable list of unmatched functions for one side."""
 
         def __init__(self, rows: Sequence[UnmatchedRow], side: str,
-                     on_jump: Optional[Callable[[int], None]] = None) -> None:
+                     on_jump: Optional[Callable[[int], None]] = None,
+                     context_actions: Sequence = (),
+                     on_action: Optional[Callable[[str], None]] = None) -> None:
             super().__init__()
             self._all_rows = list(rows)
+            self._context_actions = tuple(context_actions)
+            self._on_action = on_action
+            self._last_text: Optional[str] = None
+            self._last_visible: List[UnmatchedRow] = []
             self._side = side
             self._on_jump = on_jump
             self._table: Optional[UnmatchedTable] = None
@@ -653,9 +749,18 @@ if IDA_AVAILABLE:
             self._search = QtWidgets.QLineEdit()
             self._search.setPlaceholderText("Filter by name or address...")
             self._search.setClearButtonEnabled(True)
-            self._search.textChanged.connect(lambda _t: self._apply())
+            # Debounced for the same reason as the matched view: a keystroke
+            # arrives faster than a result can be read, and this list is not a
+            # short one either.
+            self._debounce = QtCore.QTimer(self.parent)
+            self._debounce.setSingleShot(True)
+            self._debounce.setInterval(150)
+            self._debounce.timeout.connect(self._apply)
+            self._search.textChanged.connect(lambda _t: self._debounce.start())
 
             self._table = UnmatchedTable()
+            self._table.context_actions = self._context_actions
+            self._table.on_action = self._on_action
             if self._on_jump is not None:
                 self._table.on_activated = lambda row: self._on_jump(row.address)
             self._status = QtWidgets.QLabel()
@@ -671,13 +776,27 @@ if IDA_AVAILABLE:
 
         def set_rows(self, rows: Sequence[UnmatchedRow]) -> None:
             self._all_rows = list(rows)
+            # New data invalidates the base narrowing would have built on.
+            self._last_text = None
+            self._last_visible = []
             if self._table is not None:
                 self._apply()
 
         def _apply(self) -> None:
             if self._table is None:
                 return
-            visible = filter_unmatched(self._all_rows, self._search.text())
+            text = self._search.text()
+            # Filter the previous result when the query only narrows -- see
+            # ui_logic.text_query_narrows for the address case that makes this
+            # unsound if taken on intuition.
+            if (self._last_text is not None
+                    and text_query_narrows(self._last_text, text)):
+                source = self._last_visible
+            else:
+                source = self._all_rows
+            visible = filter_unmatched(source, text)
+            self._last_text = text
+            self._last_visible = visible
             self._table.set_rows(visible)
             if self._status is not None:
                 self._status.setText(
