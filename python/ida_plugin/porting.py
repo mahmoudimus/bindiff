@@ -340,7 +340,11 @@ def _ida_rename(address: int, name: str) -> bool:
         raise RuntimeError("renaming requires a running IDA database")
     import ida_name
 
-    # SN_NOCHECK, not the default. A .BinDiff stores demangled C++ names --
+    # SN_NOCHECK and SN_FORCE, not the defaults. Measured over all 1,347
+    # planned renames on the real pair: the defaults applied 0, adding
+    # SN_NOCHECK applied 509, adding SN_FORCE applied 1,347.
+    #
+    # SN_NOCHECK is about characters. A .BinDiff stores demangled C++ names --
     # "CPaneFrameWnd::OnSizing(uint,tagRECT *)" -- and IDA refuses those as
     # identifiers: backticks, spaces, asterisks and colons are not legal in a
     # name. Measured on the real pair, the default flags renamed 0 of 3
@@ -349,9 +353,21 @@ def _ida_rename(address: int, name: str) -> bool:
     #
     # SN_NOCHECK accepts the name and replaces what it cannot keep, giving
     # CPaneFrameWnd::OnSizing(uint,tagRECT__). Imperfect, and much better than
-    # leaving sub_13000E870. It is what diaphora does for the same reason.
-    return bool(ida_name.set_name(address, name,
-                                  ida_name.SN_NOWARN | ida_name.SN_NOCHECK))
+    # leaving sub_13000E870.
+    #
+    # SN_FORCE is about collisions, which are the larger half: 719 of the 838
+    # names SN_NOCHECK alone could not place were duplicates. C++ thunks and
+    # template instances demangle identically --
+    # "COleControl::FireEvent(long,uchar *,...)" occurs at four addresses --
+    # and IDA refuses a name already in use. SN_FORCE appends a numeric
+    # suffix, which is what IDA does for its own duplicates and what diaphora
+    # hand-rolls with a "_{i}" loop.
+    #
+    # So some functions end up as name_0 and name_1. That is honest about
+    # there being several, and better than leaving them all sub_.
+    return bool(ida_name.set_name(
+        address, name,
+        ida_name.SN_NOWARN | ida_name.SN_NOCHECK | ida_name.SN_FORCE))
 
 
 def _ida_set_comment(address: int, text: str,

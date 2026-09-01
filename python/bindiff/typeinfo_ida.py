@@ -239,4 +239,38 @@ def apply_prototype(address: int, declaration: str) -> bool:
         return False
     if not text.endswith(";"):
         text += ";"
-    return bool(idc.SetType(address, text))
+    if idc.SetType(address, text):
+        return True
+
+    # The declaration carries the other database's name for the function, and
+    # a mangled symbol is not a C identifier: SetType cannot parse
+    #
+    #   __int64 __fastcall ??1?$_CIP@UIBindCtx@@$1?IID_IBindCtx@@...();
+    #
+    # The types in it are still what we came for, so retry with a name the
+    # parser will accept. The name is not being applied here -- renaming is
+    # the symbol port's job -- so substituting one loses nothing.
+    replaced = _rename_in_declaration(text, "bindiff_ported_prototype")
+    return bool(replaced and idc.SetType(address, replaced))
+
+
+def _rename_in_declaration(declaration: str, placeholder: str):
+    """The same declaration with its function name replaced.
+
+    The name is whatever sits immediately before the argument list, at the
+    outermost level. Found by scanning back from the first parenthesis rather
+    than by parsing C, which is enough for a declaration IDA printed and not
+    enough for C in general -- and this only ever sees the former.
+    """
+    opening = declaration.find("(")
+    if opening <= 0:
+        return None
+    head = declaration[:opening].rstrip()
+    # Walk back over the name: everything up to the last separator that
+    # cannot be part of one.
+    cut = len(head)
+    while cut > 0 and head[cut - 1] not in " \t*&":
+        cut -= 1
+    if cut == 0:
+        return None
+    return f"{head[:cut]}{placeholder}{declaration[opening:]}"
