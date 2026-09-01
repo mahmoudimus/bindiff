@@ -64,6 +64,8 @@ ACTION_SHOW_SECONDARY_UNMATCHED = "bindiff:show_secondary_unmatched"
 ACTION_DELETE_MATCHES = "bindiff:match_delete"
 ACTION_CONFIRM_MATCHES = "bindiff:confirm_matches"
 ACTION_IMPORT_SYMBOLS_COMMENTS = "bindiff:import_symbols_comments"
+ACTION_IMPORT_TYPES = "bindiff:import_types"
+ACTION_IMPORT_ALL = "bindiff:import_all"
 ACTION_IMPORT_SYMBOLS_COMMENTS_EXTERNAL = "bindiff:import_symbols_comments_external"
 ACTION_IMPORT_SYMBOLS_COMMENTS_GLOBAL = "bindiff:import_symbols_comments_global"
 ACTION_UNMATCHED_ADD_MATCH_PRIMARY = "bindiff:primary_unmatched_add_match"
@@ -273,6 +275,75 @@ class BinDiffController:
             wanted = set(match_ids)
             matches = [m for m in matches if m.id in wanted]
         return plan_symbol_ports(matches, **kwargs)
+
+    def types_sidecar(self) -> Optional[str]:
+        """The secondary's type sidecar, if one has been produced.
+
+        Beside the secondary .BinExport, or beside the database it came from.
+        Types cannot travel in a .BinExport -- BinExport2 has no type table --
+        so this is a separate file and its absence is the normal state until
+        somebody asks for types.
+        """
+        from bindiff.typeinfo import types_path_for
+
+        secondary = self.resolve_binexports()[1]
+        if secondary is None:
+            return None
+        for candidate in (types_path_for(secondary),
+                          types_path_for(str(Path(secondary).with_suffix("")))):
+            if Path(candidate).is_file():
+                return candidate
+        return None
+
+    def plan_type_ports(self, match_ids=None, *,
+                        min_similarity: float = None,
+                        min_confidence: float = None):
+        """Which prototypes to apply, and which types to define first.
+
+        Returns (plan, ports) where ports is a list of (address, declaration).
+        The plan covers only what this database is missing: it asks IDA what
+        it already has, so a type both sides define is not redefined.
+        """
+        import json
+
+        from ida_plugin.porting import (DEFAULT_PORT_MIN_CONFIDENCE,
+                                        DEFAULT_PORT_MIN_SIMILARITY)
+        from bindiff.typeinfo import FunctionType, from_json, plan_types
+        from bindiff.typeinfo_ida import existing_type_names
+
+        if min_similarity is None:
+            min_similarity = DEFAULT_PORT_MIN_SIMILARITY
+        if min_confidence is None:
+            min_confidence = DEFAULT_PORT_MIN_CONFIDENCE
+
+        database = self._require_writable()
+        sidecar = self.types_sidecar()
+        if sidecar is None:
+            raise FileNotFoundError(
+                "no type sidecar for the secondary; types are not in a "
+                ".BinExport and have to be read out of its database")
+
+        declarations, functions = from_json(
+            json.loads(Path(sidecar).read_text(encoding="utf-8")))
+        by_address = {f.address: f for f in functions}
+
+        wanted = set(match_ids) if match_ids is not None else None
+        needed, ports = [], []
+        for match in database.matches():
+            if wanted is not None and match.id not in wanted:
+                continue
+            if (match.similarity < min_similarity
+                    or match.confidence < min_confidence):
+                continue
+            source = by_address.get(match.address_secondary)
+            if source is None:
+                continue
+            needed.append(source)
+            ports.append((match.address_primary, source.declaration))
+
+        plan = plan_types(declarations, needed,
+                          already_present=existing_type_names())
+        return plan, ports
 
     def plan_comment_ports(self, match_ids=None, **kwargs):
         """Needs the secondary .BinExport: comments are not in a .BinDiff."""
@@ -539,6 +610,10 @@ if IDA_AVAILABLE:
                  self._delete_matches, loaded),
                 (ACTION_CONFIRM_MATCHES, "Confirm match(es)",
                  self._confirm_matches, loaded),
+                (ACTION_IMPORT_ALL, "Import all",
+                 self._import_all, loaded),
+                (ACTION_IMPORT_TYPES, "Import types",
+                 self._import_types, loaded),
                 (ACTION_IMPORT_SYMBOLS_COMMENTS, "Import symbols/comments",
                  self._import_symbols_comments, loaded),
                 (ACTION_IMPORT_SYMBOLS_COMMENTS_EXTERNAL,
@@ -769,6 +844,140 @@ if IDA_AVAILABLE:
             self._report("saved")
 
         # -- porting --------------------------------------------------------
+
+        def _ensure_types_sidecar(self) -> bool:
+            """Makes sure the secondary's types have been read out.
+
+            An export written by this plugin already has them: the worker
+            writes the sidecar while the database is open, where reading 227
+            types and 1,240 prototypes costs 0.0s against 0.9s for the open
+            itself. This path is for a .BinExport produced some other way --
+            BinExport's own menu, or an earlier version of this plugin -- and
+            it pays for an idalib open that the export did not.
+            """
+            if self.controller.types_sidecar() is not None:
+                return True
+
+            from bindiff.typeinfo import types_path_for
+
+            secondary = self.controller.resolve_binexports()[1]
+            hint = Path(secondary).name if secondary else "the secondary"
+            if ida_kernwin.ask_yn(
+                    ida_kernwin.ASKBTN_YES,
+                    "HIDECANCEL\n"
+                    f"{PLUGIN_NAME} has no types for {hint}.\n\n"
+                    "A .BinExport cannot carry a type -- BinExport2 has no "
+                    "type table -- so they have to be read out of the "
+                    "database the export came from. It takes a few seconds "
+                    "and is done once.\n\n"
+                    "Exports written by this plugin already carry them; this "
+                    "one was made some other way.\n\n"
+                    "Read them now?") != ida_kernwin.ASKBTN_YES:
+                return False
+
+            database = ida_kernwin.ask_file(
+                False, "*.i64;*.idb",
+                "Select the secondary IDA database to read types from")
+            if not database:
+                return False
+
+            output = types_path_for(secondary) if secondary else \
+                types_path_for(database)
+            self._report(f"reading types from {Path(database).name}")
+            self._run_types_worker(database, output)
+            return False  # the worker reports; the caller retries
+
+        def _run_types_worker(self, database: str, output: str) -> None:
+            """Runs the type dump off the UI thread and reports when it lands."""
+            import threading
+
+            from bindiff.headless import run_headless
+
+            def work() -> None:
+                result = run_headless(["types", database, output],
+                                      timeout=1800.0)
+
+                def announce() -> int:
+                    if result.ok:
+                        self._report(f"types read: {result.message}. "
+                                     "Import types again to apply them.")
+                    else:
+                        ida_kernwin.warning(
+                            f"{PLUGIN_NAME}: could not read types.\n\n"
+                            f"{result.message}")
+                    return 1
+
+                ida_kernwin.execute_sync(announce, ida_kernwin.MFF_FAST)
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def _apply_types(self, match_ids) -> bool:
+            """Defines the missing types, then applies the prototypes.
+
+            Types first: a prototype naming a type the database does not have
+            cannot be applied, which is the whole reason the plan is ordered.
+            """
+            from bindiff.typeinfo_ida import (apply_prototype,
+                                              parse_declarations)
+
+            try:
+                plan, ports = self.controller.plan_type_ports(match_ids)
+            except FileNotFoundError as exc:
+                self._report(f"types skipped: {exc}")
+                return False
+
+            defined = failed = 0
+            if plan.statements:
+                defined, failed = parse_declarations(plan.statements)
+
+            applied = 0
+            for address, declaration in ports:
+                if apply_prototype(address, declaration):
+                    applied += 1
+
+            message = f"applied {applied} prototype(s) of {len(ports)}"
+            if defined or failed:
+                message += f"; defined {defined} type(s)"
+                if failed:
+                    message += f", {failed} failed to parse"
+            if plan.unresolved:
+                # A cycle through a by-value member. No ordering fixes it and
+                # no retry count will either, so it is named rather than
+                # silently dropped.
+                message += (f"; {len(plan.unresolved)} type(s) could not be "
+                            f"ordered: {', '.join(plan.unresolved[:3])}")
+            self._report(message + "; not yet saved")
+            return True
+
+        def _import_types(self) -> None:
+            """Prototypes and the types they need, and nothing else."""
+            ids = self._selected_match_ids()
+            if not ids:
+                return
+            if not self._ensure_types_sidecar():
+                return
+            self._apply_types(ids)
+            self._refresh_matches()
+
+        def _import_all(self) -> None:
+            """Everything the other side knows about these functions.
+
+            Names and comments first, then prototypes. The order matters for
+            reading the log more than for correctness: a rename that fails is
+            worth seeing before a prototype that depended on it.
+            """
+            ids = self._selected_match_ids()
+            if not ids:
+                return
+
+            self._apply_ports(ids)
+            if self.controller.types_sidecar() is None:
+                # Ask once, and let the symbols and comments stand on their
+                # own if the answer is no.
+                if not self._ensure_types_sidecar():
+                    return
+            self._apply_types(ids)
+            self._refresh_matches()
 
         def _import_symbols_comments(self) -> None:
             """Ports names, and comments too when the .BinExport is available.
@@ -1349,7 +1558,9 @@ if IDA_AVAILABLE:
                     context_actions=(
                         ACTION_VIEW_FLOW_GRAPHS,
                         None,
+                        ACTION_IMPORT_ALL,
                         ACTION_IMPORT_SYMBOLS_COMMENTS,
+                        ACTION_IMPORT_TYPES,
                         ACTION_PORT_COMMENTS,
                         None,
                         ACTION_CONFIRM_MATCHES,

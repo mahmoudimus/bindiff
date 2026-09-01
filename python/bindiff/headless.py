@@ -309,8 +309,15 @@ def export(input_path: str, output_path: str,
     if idapro.open_database(str(input_path), True) != 0:
         return StageResult(ok=False, stage="export",
                            message=f"could not open {input_path}")
+    types_written = 0
     try:
         exporter(str(output_path))
+        # Written here because the database is already open. Reading types
+        # costs an idalib open, and that open has just been paid for -- doing
+        # it later, on demand, pays it a second time for nothing. A
+        # .BinExport cannot carry a type, so this is the only moment it is
+        # free.
+        types_written = _write_types_beside(output_path)
     except Exception as exc:
         return StageResult(ok=False, stage="export", message=str(exc))
     finally:
@@ -320,7 +327,34 @@ def export(input_path: str, output_path: str,
     if not Path(output_path).is_file():
         return StageResult(ok=False, stage="export",
                            message=f"exporter wrote nothing to {output_path}")
-    return StageResult(ok=True, stage="export", output=str(output_path))
+    return StageResult(ok=True, stage="export", output=str(output_path),
+                       details={"types": types_written})
+
+
+def _write_types_beside(export_path) -> int:
+    """Writes the type sidecar next to a .BinExport just written.
+
+    Best effort. An export that succeeded is worth keeping even if the type
+    API on this build is not what this expects -- types are an extra, and
+    failing the export over them would trade the thing the caller asked for
+    against the thing they did not.
+    """
+    import json
+
+    try:
+        from bindiff.typeinfo import to_json, types_path_for
+        from bindiff.typeinfo_ida import read_types
+
+        declarations, functions = read_types()
+        if not declarations and not functions:
+            return 0
+        Path(types_path_for(export_path)).write_text(
+            json.dumps(to_json(declarations, functions,
+                               source=str(export_path)), indent=1),
+            encoding="utf-8")
+        return len(declarations)
+    except Exception:
+        return 0
 
 
 def diff(primary: str, secondary: str, output: str,
