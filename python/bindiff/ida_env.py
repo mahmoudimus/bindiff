@@ -103,6 +103,31 @@ def is_interactive() -> bool:
     return IDA_IS_INTERACTIVE or _detect_interactive()
 
 
+def database_is_open() -> bool:
+    """True when a database is loaded, GUI or not.
+
+    The question the writers actually need to ask. set_cmt, set_name and
+    SetType want a database, not a window -- they work perfectly well under
+    idalib, which is how the import path can be exercised headlessly against
+    real databases instead of only by clicking.
+
+    Guarding those with is_interactive() conflated the two and made every
+    writer unreachable outside the GUI, which is exactly where they are worth
+    testing.
+    """
+    try:
+        import ida_ida
+        import idaapi
+    except ImportError:
+        return False
+    try:
+        # BADADDR for min_ea means nothing is loaded. Asked of ida_ida rather
+        # than a plugin-only API so this holds under idalib too.
+        return ida_ida.inf_get_min_ea() != idaapi.BADADDR
+    except Exception:
+        return False
+
+
 def ida_kernwin_if_loaded():
     """Returns the ``ida_kernwin`` module if IDA already loaded it, else None.
 

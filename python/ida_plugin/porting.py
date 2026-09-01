@@ -24,7 +24,7 @@ import inspect
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
-from bindiff.ida_env import is_interactive
+from bindiff.ida_env import database_is_open
 
 
 # How good a match has to be before its name or comments are copied.
@@ -314,7 +314,7 @@ def mark_as_library(addresses: Sequence[int]) -> PortResult:
     out of the analyst's view the same way IDA's own library detection would
     make them.
     """
-    if not is_interactive():
+    if not database_is_open():
         raise RuntimeError("marking functions requires a running IDA database")
     import ida_funcs
 
@@ -336,17 +336,28 @@ def mark_as_library(addresses: Sequence[int]) -> PortResult:
 
 
 def _ida_rename(address: int, name: str) -> bool:
-    if not is_interactive():
+    if not database_is_open():
         raise RuntimeError("renaming requires a running IDA database")
     import ida_name
 
-    return bool(ida_name.set_name(address, name, ida_name.SN_NOWARN))
+    # SN_NOCHECK, not the default. A .BinDiff stores demangled C++ names --
+    # "CPaneFrameWnd::OnSizing(uint,tagRECT *)" -- and IDA refuses those as
+    # identifiers: backticks, spaces, asterisks and colons are not legal in a
+    # name. Measured on the real pair, the default flags renamed 0 of 3
+    # planned and reported nothing, because a refusal is a False return and
+    # not an exception.
+    #
+    # SN_NOCHECK accepts the name and replaces what it cannot keep, giving
+    # CPaneFrameWnd::OnSizing(uint,tagRECT__). Imperfect, and much better than
+    # leaving sub_13000E870. It is what diaphora does for the same reason.
+    return bool(ida_name.set_name(address, name,
+                                  ida_name.SN_NOWARN | ida_name.SN_NOCHECK))
 
 
 def _ida_set_comment(address: int, text: str,
                      kind: str = "instruction") -> bool:
-    if not is_interactive():
-        raise RuntimeError("commenting requires a running IDA database")
+    if not database_is_open():
+        raise RuntimeError("commenting requires an open IDA database")
     import ida_bytes
     import ida_funcs
 

@@ -357,6 +357,127 @@ def _write_types_beside(export_path) -> int:
         return 0
 
 
+def try_import(primary_database: str, result_path: str,
+               limit: Optional[int] = None,
+               save: bool = False) -> StageResult:
+    """Runs the importers against a real database, headlessly.
+
+    Opens the primary with idalib and applies names, comments and prototypes
+    for the first `limit` matches, then reports what happened. Nothing is
+    saved unless asked: the database is opened from a copy and closed without
+    writing, so this can be run against a database somebody has open.
+
+    This exists because the import path could only be exercised by clicking.
+    Every bug in it so far -- a list handed to set_cmt, a comment that was the
+    function's own name, an action that dispatched nothing -- was found by a
+    person using it, and each would have shown up here in seconds.
+    """
+    import idapro
+
+    source = Path(primary_database)
+    if not source.exists():
+        return StageResult(ok=False, stage="import",
+                           message=f"no such database: {primary_database}")
+
+    holder = tempfile.mkdtemp(prefix="bindiff-import-")
+    working = str(Path(holder) / source.name)
+    try:
+        shutil.copyfile(source, working)
+        for companion in source.parent.glob(f"{source.stem}.*"):
+            if companion != source and companion.is_file():
+                shutil.copyfile(companion, str(Path(holder) / companion.name))
+    except OSError as exc:
+        shutil.rmtree(holder, ignore_errors=True)
+        return StageResult(ok=False, stage="import",
+                           message=f"could not copy the database: {exc}")
+
+    if idapro.open_database(working, True) != 0:
+        shutil.rmtree(holder, ignore_errors=True)
+        return StageResult(ok=False, stage="import",
+                           message=f"could not open {primary_database}")
+
+    try:
+        details = _run_import(result_path, limit)
+    except Exception as exc:
+        idapro.close_database(False)
+        shutil.rmtree(holder, ignore_errors=True)
+        return StageResult(ok=False, stage="import", message=str(exc))
+
+    idapro.close_database(bool(save))
+    shutil.rmtree(holder, ignore_errors=True)
+    return StageResult(
+        ok=True, stage="import",
+        message=(f"{details['renamed']}/{details['renames_planned']} renamed, "
+                 f"{details['comments']} comment(s), "
+                 f"{details['prototypes']} prototype(s)"),
+        details=details)
+
+
+def _run_import(result_path: str, limit: Optional[int]) -> dict:
+    """The import itself, with a database already open."""
+    import json
+
+    from bindiff.comments import portable_comments
+    from bindiff.database import BinDiffDatabase
+    from bindiff.binexport import find_binexports_for
+    from bindiff.typeinfo import from_json, plan_types, types_path_for
+    from bindiff.typeinfo_ida import (apply_prototype, existing_type_names,
+                                      parse_declarations)
+    from ida_plugin.porting import (apply_comment_ports, apply_symbol_ports,
+                                    plan_comment_ports, plan_symbol_ports)
+
+    database = BinDiffDatabase.open(result_path, read_only=True)
+    try:
+        matches = database.matches()
+        if limit:
+            matches = matches[:limit]
+        ids = [m.id for m in matches]
+
+        symbols = plan_symbol_ports(matches, overwrite_existing=True)
+        symbol_result = apply_symbol_ports(symbols)
+        renamed, rename_failures = symbol_result.applied, symbol_result.failed
+
+        _primary, secondary = find_binexports_for(result_path)
+        comments = 0
+        if secondary:
+            ports = plan_comment_ports(database, portable_comments(secondary),
+                                       match_ids=ids)
+            comments = apply_comment_ports(ports).applied
+
+        prototypes = defined = 0
+        sidecar = types_path_for(secondary) if secondary else None
+        if sidecar and Path(sidecar).is_file():
+            declarations, functions = from_json(
+                json.loads(Path(sidecar).read_text(encoding="utf-8")))
+            by_address = {f.address: f for f in functions}
+            needed, ports = [], []
+            for match in matches:
+                source = by_address.get(match.address_secondary)
+                if source is None:
+                    continue
+                needed.append(source)
+                ports.append((match.address_primary, source.declaration))
+            plan = plan_types(declarations, needed,
+                              already_present=existing_type_names())
+            if plan.statements:
+                defined, _failed = parse_declarations(plan.statements)
+            prototypes = sum(1 for address, declaration in ports
+                             if apply_prototype(address, declaration))
+
+        # Planned against applied, because they disagreed and nothing said
+        # so: 3 renames planned, 0 applied, reported as "0 renamed".
+        return {"matches": len(matches),
+                "renames_planned": len(symbols), "renamed": renamed,
+                "renames_failed": rename_failures,
+                "comments": comments, "prototypes": prototypes,
+                "types_defined": defined,
+                "secondary_export": secondary or "",
+                "types_sidecar": sidecar if sidecar and
+                Path(sidecar).is_file() else ""}
+    finally:
+        database.close()
+
+
 def diff(primary: str, secondary: str, output: str,
          progress: Optional[Callable[[dict], None]] = None,
          should_continue: Optional[Callable[[], bool]] = None) -> StageResult:
@@ -841,7 +962,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if not argv:
         print(StageResult(ok=False, stage="cli",
-                          message="usage: export|diff|types|pipeline ...").to_json())
+                          message="usage: export|diff|types|import|pipeline ...").to_json())
         return 2
 
     command, rest = argv[0], argv[1:]
@@ -851,6 +972,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif command == "diff" and len(rest) == 3:
             result = diff(rest[0], rest[1], rest[2], progress=emit_progress,
                           should_continue=should_continue)
+        elif command == "import" and len(rest) >= 2:
+            result = try_import(rest[0], rest[1],
+                                limit=int(rest[2]) if len(rest) > 2 else None)
         elif command == "types" and len(rest) == 2:
             result = dump_types(rest[0], rest[1])
         elif command == "pipeline" and len(rest) == 3:
