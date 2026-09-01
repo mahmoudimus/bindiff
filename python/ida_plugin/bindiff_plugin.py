@@ -946,9 +946,11 @@ if IDA_AVAILABLE:
                     "Read them now?") != ida_kernwin.ASKBTN_YES:
                 return False
 
+            # One mask or none: a list is read as a literal filename and
+            # greys the dialog out. See ControlPanel._browse.
             database = ida_kernwin.ask_file(
-                False, "*.i64;*.idb",
-                "Select the secondary IDA database to read types from")
+                False, "*",
+                "Select the secondary IDA database (.i64) to read types from")
             if not database:
                 return False
 
@@ -1478,8 +1480,10 @@ if IDA_AVAILABLE:
                 return
 
             if not secondary:
+                # "*" and not "*.*": the latter requires a dot in the name,
+                # so a stripped ELF with no extension is not selectable.
                 secondary = ida_kernwin.ask_file(
-                    False, "*.*", "Select the secondary binary or database")
+                    False, "*", "Select the secondary binary or database")
             if not secondary:
                 return
 

@@ -831,8 +831,21 @@ if IDA_AVAILABLE:
                 callback(*args)
 
         def _browse(self) -> None:
+            """Opens on the file already in the field, or on everything.
+
+            ask_file's second argument is IDA's default *filename*, not a
+            filter list. A semicolon-separated set of masks is taken as one
+            literal glob, matches nothing, and the dialog opens with every
+            file greyed out -- which is what it did.
+
+            "*" rather than a mask because there is nothing honest to filter
+            on: the secondary may be a .BinExport, an .i64, an .idb, or a
+            bare binary with any extension or none. "*.*" is not the same
+            thing and would hide exactly the last of those.
+            """
+            current = self._secondary.text().strip()
             path = ida_kernwin.ask_file(
-                False, "*.BinExport;*.i64;*.idb;*.*",
+                False, current or "*",
                 "Select the secondary binary, database or export")
             if path:
                 self._secondary.setText(path)
