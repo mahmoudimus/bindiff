@@ -410,6 +410,32 @@ class BinDiffDatabase:
             f"WHERE id IN ({placeholders})", [algorithm_id] + ids)
         return cursor.rowcount
 
+    def set_primary_names(self, names) -> int:
+        """Records ported names on the primary side of each match.
+
+        A .BinDiff stores the names the differ saw. Porting renames the
+        function in IDA and, without this, leaves the result file describing a
+        function that no longer answers to that name: the matched-functions
+        table goes on showing sub_1300B17C0 after it has become
+        mba_remove_insn, and a result reopened later disagrees with the
+        database it came from.
+
+        Upstream does the same thing -- ida/results.cc updates its call graph's
+        name for the vertex right after set_name -- so a saved result reflects
+        the porting either way.
+
+        `names` maps match id to the new primary name. Staged like every other
+        edit; commit() keeps it.
+        """
+        self._require_writable()
+        updates = [(name, match_id) for match_id, name in dict(names).items()
+                   if name]
+        if not updates:
+            return 0
+        self._connection.executemany(
+            "UPDATE function SET name1 = ? WHERE id = ?", updates)
+        return len(updates)
+
     def set_comments_ported(self, ids: Sequence[int],
                             ported: bool = True) -> int:
         """Records whether comments have been ported for these matches.

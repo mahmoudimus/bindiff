@@ -250,6 +250,12 @@ class BinDiffController:
         return self._require_writable().add_manual_match(primary_address,
                                                          secondary_address)
 
+    def record_ported_names(self, ports) -> int:
+        """Writes ported names into the result file, so it agrees with IDA."""
+        database = self._require_writable()
+        return database.set_primary_names(
+            {port.match_id: port.new_name for port in ports})
+
     def save(self) -> None:
         self._require_writable().commit()
 
@@ -769,6 +775,11 @@ if IDA_AVAILABLE:
             symbols = self.controller.plan_symbol_ports(
                 match_ids, overwrite_existing=True)
             symbol_result = apply_symbol_ports(symbols)
+            # The result file records the names the differ saw. Leaving it
+            # alone means the table keeps showing the old name for a function
+            # that has just been renamed, and a result reopened later
+            # contradicts the database it came from.
+            self.controller.record_ported_names(symbols)
             replaced = sum(1 for port in symbols
                            if not _is_generated_name(port.old_name))
             message = (f"renamed {symbol_result.applied} function(s)"
@@ -789,15 +800,24 @@ if IDA_AVAILABLE:
             # could have supplied.
             if not self._ensure_export_file(1):
                 self._report(f"{message}; comments skipped: no secondary "
-                             ".BinExport was given, and comments live there")
+                             ".BinExport was given, and comments live there"
+                             "; not yet saved")
+                self._refresh_matches()
                 return symbols
             try:
                 comments = self.controller.plan_comment_ports(match_ids)
             except FileNotFoundError as exc:
-                self._report(f"{message}; comments skipped: {exc}")
+                self._report(f"{message}; comments skipped: {exc}"
+                             "; not yet saved")
+                self._refresh_matches()
                 return symbols
             comment_result = apply_comment_ports(comments)
-            self._report(f"{message}; wrote {comment_result.applied} comment(s)")
+            self._report(f"{message}; wrote {comment_result.applied} comment(s)"
+                         "; not yet saved")
+            # The names in the table came from the result file, which has just
+            # changed, so redraw rather than leave it showing what used to be
+            # true.
+            self._refresh_matches()
             return symbols
 
         # -- pairing from the unmatched views --------------------------------

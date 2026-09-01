@@ -193,3 +193,38 @@ def test_edits_are_visible_to_the_engine_reader(bindiff_module, diffed, tmp_path
     assert len(added) == 1
     assert added[0].is_manual, "the C++ reader should agree this match is manual"
     assert added[0].algorithm_name == MANUAL_ALGORITHM
+
+
+class TestRecordingPortedNames:
+    """A .BinDiff stores the names the differ saw. Porting renames the function
+    in IDA; without writing it back, the result file describes a function that
+    no longer answers to that name -- the matched table goes on showing
+    sub_1300B17C0 for something that is now mba_remove_insn."""
+
+    def test_the_primary_name_is_updated(self, writable):
+        before = {m.id: m.name_primary for m in writable.matches()}
+        target = next(iter(before))
+        assert writable.set_primary_names({target: "ported_name"}) == 1
+        after = {m.id: m.name_primary for m in writable.matches()}
+        assert after[target] == "ported_name"
+        # And nothing else moved.
+        assert ({k: v for k, v in after.items() if k != target}
+                == {k: v for k, v in before.items() if k != target})
+
+    def test_an_empty_name_is_ignored(self, writable):
+        """Nothing to record, and blanking a name would lose information."""
+        target = next(m.id for m in writable.matches())
+        assert writable.set_primary_names({target: ""}) == 0
+
+    def test_nothing_to_do_is_zero(self, writable):
+        assert writable.set_primary_names({}) == 0
+
+    def test_it_is_staged_like_every_other_edit(self, writable):
+        """Visible on this connection; on disk only after commit."""
+        target = next(m.id for m in writable.matches())
+        writable.set_primary_names({target: "staged_only"})
+        assert any(m.name_primary == "staged_only"
+                   for m in writable.matches())
+        with BinDiffDatabase.open(writable.path, read_only=True) as fresh:
+            assert not any(m.name_primary == "staged_only"
+                           for m in fresh.matches())
