@@ -185,3 +185,55 @@ class TestApplying:
         """Headless, the defaults must raise rather than pretend to work."""
         result = apply_symbol_ports([SymbolPort(0x1, "a", "sub_1", 1)])
         assert result.failed == 1 and result.applied == 0
+
+
+class TestExplainingSkips:
+    """"renamed 9 function(s)" out of ten selected leaves one unaccounted for,
+    and the usual reason is a deliberate refusal rather than a failure."""
+
+    def _match(self, **kw):
+        from types import SimpleNamespace
+        fields = dict(id=1, similarity=1.0, confidence=1.0,
+                      address_primary=0x1000, name_primary="sub_1000",
+                      address_secondary=0x2000, name_secondary="real_name")
+        fields.update(kw)
+        return SimpleNamespace(**fields)
+
+    def test_a_named_primary_is_reported_not_silently_dropped(self):
+        from ida_plugin.porting import (explain_symbol_port_skips,
+                                        plan_symbol_ports)
+        matches = [self._match(name_primary="wiauDbgHelper2_1")]
+        assert plan_symbol_ports(matches) == []
+        assert explain_symbol_port_skips(matches) == {
+            "already named here, and renaming would overwrite it": 1}
+
+    def test_a_weak_match_is_reported(self):
+        from ida_plugin.porting import explain_symbol_port_skips
+        assert explain_symbol_port_skips([self._match(similarity=0.1)]) == {
+            "below the similarity or confidence floor": 1}
+
+    def test_nothing_to_give_is_reported(self):
+        from ida_plugin.porting import explain_symbol_port_skips
+        assert explain_symbol_port_skips(
+            [self._match(name_secondary="sub_2000")]) == {
+                "the match has no real name to give": 1}
+
+    def test_a_portable_match_is_not_a_skip(self):
+        from ida_plugin.porting import (explain_symbol_port_skips,
+                                        plan_symbol_ports)
+        matches = [self._match()]
+        assert len(plan_symbol_ports(matches)) == 1
+        assert explain_symbol_port_skips(matches) == {}
+
+    def test_the_two_agree_on_the_total(self):
+        """Every match is either ported or explained -- the property that makes
+        the report trustworthy."""
+        from ida_plugin.porting import (explain_symbol_port_skips,
+                                        plan_symbol_ports)
+        matches = [self._match(id=1),
+                   self._match(id=2, name_primary="already_named"),
+                   self._match(id=3, similarity=0.1),
+                   self._match(id=4, name_secondary="sub_2000")]
+        ported = len(plan_symbol_ports(matches))
+        skipped = sum(explain_symbol_port_skips(matches).values())
+        assert ported + skipped == len(matches)

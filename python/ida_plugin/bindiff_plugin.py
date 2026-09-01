@@ -177,6 +177,35 @@ class BinDiffController:
             self._binexports = find_binexports_for(self._database.path)
         return self._binexports
 
+    def recorded_input_name(self, side: int) -> Optional[str]:
+        """What the result file calls one of its inputs.
+
+        A .BinDiff records the filename it was given for each side, which is
+        what Statistics shows. Used to name the file in a prompt rather than
+        asking for "the secondary .BinExport" and leaving the user to work out
+        which file that is.
+        """
+        if self._database is None:
+            return None
+        try:
+            files = self._database.files()
+        except Exception:
+            return None
+        if side < len(files):
+            name = files[side].filename
+            return Path(name).name if name else None
+        return None
+
+    def matches_for(self, match_ids=None):
+        """The match rows behind a selection, for reporting on them."""
+        if self._database is None:
+            return []
+        matches = self._database.matches()
+        if match_ids is None:
+            return matches
+        wanted = set(match_ids)
+        return [m for m in matches if m.id in wanted]
+
     def set_binexports(self, primary: Optional[str],
                        secondary: Optional[str]) -> None:
         self._binexports = (primary, secondary)
@@ -611,9 +640,20 @@ if IDA_AVAILABLE:
                 return True
 
             label = "primary" if side == 0 else "secondary"
-            path = ida_kernwin.ask_file(
-                False, "*.BinExport",
-                f"Select the {label} .BinExport for these results")
+            # The result file records what each input was called, so the
+            # prompt can name the file it wants instead of asking for "the
+            # secondary .BinExport" and leaving the user to work out which
+            # that is and why anything needs it.
+            wanted = self.controller.recorded_input_name(side)
+            suggestion = f"{wanted}.BinExport" if wanted else "*.BinExport"
+            ida_kernwin.info(
+                f"{PLUGIN_NAME} needs the {label} .BinExport.\n\n"
+                f"A .BinDiff records matches only. Unmatched functions and "
+                f"every comment live in the exports, and this one is not "
+                f"beside the result file.\n\n"
+                f"Looking for: {suggestion}")
+            path = ida_kernwin.ask_file(False, suggestion,
+                                        f"Select {suggestion}")
             if not path:
                 return False
 
@@ -713,11 +753,22 @@ if IDA_AVAILABLE:
             """Shared by the three import variants. Returns the symbol ports."""
             from ida_plugin.porting import apply_comment_ports, apply_symbol_ports
 
+            from ida_plugin.porting import explain_symbol_port_skips
+
             symbols = self.controller.plan_symbol_ports(match_ids)
             symbol_result = apply_symbol_ports(symbols)
             message = (f"renamed {symbol_result.applied} function(s)"
                        + (f", {symbol_result.failed} failed"
                           if symbol_result.failed else ""))
+            # Every selected match is either renamed or accounted for. Most
+            # of what gets skipped is a deliberate refusal -- not overwriting
+            # a name you gave -- which reads as a failure when it is silent.
+            skips = explain_symbol_port_skips(
+                self.controller.matches_for(match_ids))
+            if skips:
+                message += "; " + ", ".join(
+                    f"{count} skipped: {reason}"
+                    for reason, count in sorted(skips.items()))
             # Comments live in the secondary export, so ask for it before
             # reporting that they were skipped for want of a file the user
             # could have supplied.

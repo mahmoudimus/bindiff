@@ -90,6 +90,40 @@ def _is_generated_name(name: str) -> bool:
                             "ymmword_"))
 
 
+def explain_symbol_port_skips(
+        matches: Iterable, *,
+        min_similarity: float = DEFAULT_PORT_MIN_SIMILARITY,
+        min_confidence: float = DEFAULT_PORT_MIN_CONFIDENCE,
+        overwrite_existing: bool = False) -> dict:
+    """Why matches were not renamed, counted by reason.
+
+    plan_symbol_ports drops matches for four different reasons and says
+    nothing about it, so "renamed 9 function(s)" out of ten selected leaves
+    the tenth unaccounted for -- and the most common reason, that the primary
+    already has a name, is a deliberate refusal that looks like a failure.
+
+    Mirrors plan_symbol_ports' conditions in the same order. Both walking the
+    same list twice is worth the duplication only because they are next to
+    each other and tested together; if a third caller appears, they should be
+    one pass returning both.
+    """
+    reasons: dict = {}
+
+    def note(key):
+        reasons[key] = reasons.get(key, 0) + 1
+
+    for match in matches:
+        if match.similarity < min_similarity or match.confidence < min_confidence:
+            note("below the similarity or confidence floor")
+        elif _is_generated_name(match.name_secondary):
+            note("the match has no real name to give")
+        elif match.name_primary == match.name_secondary:
+            note("already named the same")
+        elif not overwrite_existing and not _is_generated_name(match.name_primary):
+            note("already named here, and renaming would overwrite it")
+    return reasons
+
+
 def plan_symbol_ports(
         matches: Iterable, *,
         min_similarity: float = DEFAULT_PORT_MIN_SIMILARITY,
