@@ -416,7 +416,8 @@ if IDA_AVAILABLE:
             # Shift-D is the C++ plugin's, for the same action. Someone
             # arriving from it should not have to learn a new key to open the
             # same dialog.
-            shortcuts = {ACTION_MAIN: "Shift-D"}
+            shortcuts = {ACTION_MAIN: "Shift-D",
+                         ACTION_LOAD: "Ctrl-Shift-6"}
 
             for name, label, callback, enabled in specs:
                 if ida_kernwin.register_action(ida_kernwin.action_desc_t(
@@ -427,25 +428,43 @@ if IDA_AVAILABLE:
                         f"Edit/Plugins/{PLUGIN_NAME}/", name,
                         ida_kernwin.SETMENU_APP)
 
-            # Where the C++ plugin puts them, because that is where anyone
-            # who has used BinDiff will look. Everything above is also under
-            # Edit/Plugins, which is where IDA puts a plugin by default and
-            # where these were the only place to find them until now.
+            # Upstream's own paths and flags, read out of
+            # ida/main_plugin.cc rather than guessed at. Two things about
+            # them are not obvious and both bit this:
             #
-            # The View entries carry the `loaded` predicate already, so they
-            # appear greyed until a result is open rather than being absent
-            # and then appearing, which is harder to notice.
+            # They are internal item names, not display labels --
+            # "ProduceFile", not "Produce file".
+            #
+            # A trailing slash means *inside* that submenu; without one the
+            # entry lands beside the named item. "File/Produce file/" put
+            # BinDiff at the bottom of the Produce file submenu instead of in
+            # the File menu next to it.
+            #
+            # SETMENU_FIRST is what lifts the View submenu to the top, above
+            # "Open subviews". An append puts it at the bottom by Full
+            # Screen, which is where it was.
             placements = (
-                (ACTION_MAIN, "File/Produce file/"),
-                (ACTION_SHOW_MATCHES, f"View/{PLUGIN_NAME}/"),
-                (ACTION_SHOW_STATISTICS, f"View/{PLUGIN_NAME}/"),
-                (ACTION_SHOW_PRIMARY_UNMATCHED, f"View/{PLUGIN_NAME}/"),
-                (ACTION_SHOW_SECONDARY_UNMATCHED, f"View/{PLUGIN_NAME}/"),
+                ("File/ProduceFile", ACTION_MAIN, ida_kernwin.SETMENU_APP),
+                ("File/LoadFile/AdditionalBinaryFile", ACTION_LOAD,
+                 ida_kernwin.SETMENU_APP),
+                ("File/ProduceFile/CreateCallgraphGDL", ACTION_SAVE,
+                 ida_kernwin.SETMENU_APP),
+                ("Edit/Comments/InsertPredefinedComment", ACTION_PORT_COMMENTS,
+                 ida_kernwin.SETMENU_APP),
+                # Chained: each entry is placed after the previous one, which
+                # is how upstream builds the submenu in order.
+                (f"View/{PLUGIN_NAME}/", ACTION_SHOW_MATCHES,
+                 ida_kernwin.SETMENU_FIRST),
+                (f"View/{PLUGIN_NAME}/MatchedFunctions",
+                 ACTION_SHOW_STATISTICS, ida_kernwin.SETMENU_APP),
+                (f"View/{PLUGIN_NAME}/Statistics",
+                 ACTION_SHOW_PRIMARY_UNMATCHED, ida_kernwin.SETMENU_APP),
+                (f"View/{PLUGIN_NAME}/PrimaryUnmatched",
+                 ACTION_SHOW_SECONDARY_UNMATCHED, ida_kernwin.SETMENU_APP),
             )
-            for name, path in placements:
+            for path, name, flags in placements:
                 if name in self._registered:
-                    ida_kernwin.attach_action_to_menu(
-                        path, name, ida_kernwin.SETMENU_APP)
+                    ida_kernwin.attach_action_to_menu(path, name, flags)
 
         # -- helpers --------------------------------------------------------
 
@@ -829,8 +848,11 @@ if IDA_AVAILABLE:
                     "This database has never been saved and there is no input "
                     "file to fall back on, so there is nothing to export.")
                 return
-            output = ida_kernwin.ask_file(True, "*.BinDiff",
-                                          "Save results as")
+            from ida_plugin.diff_runner import default_output_name
+
+            output = ida_kernwin.ask_file(
+                True, default_output_name(primary, secondary),
+                "Save results as")
             if not output:
                 return
 

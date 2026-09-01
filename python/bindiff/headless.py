@@ -351,6 +351,14 @@ def pipeline(primary_input: str, secondary_input: str, output: str,
             progress(_record("export", f"exporting {label}: {Path(source).name}",
                              fraction=_EXPORT_SHARE * index / len(sources),
                              step_index=index, step_count=len(sources)))
+        # Already an export: nothing to disassemble. Re-exporting one would
+        # mean opening a .BinExport as a database, which is not a thing, and
+        # a user who has just spent a minute exporting by hand should not be
+        # made to wait through it again.
+        if Path(source).suffix.lower() == ".binexport":
+            exports.append(str(source))
+            continue
+
         target = work / f"{Path(source).stem}.{label}.BinExport"
         result = export(source, str(target), exporter=exporter)
         if not result.ok:
@@ -536,11 +544,32 @@ def _ask_worker_to_stop(process, acknowledged: threading.Event) -> None:
         process.terminate()
 
 
+def worker_environment(base=None) -> dict:
+    """The child's environment, with this package reachable.
+
+    The worker is `python -m bindiff.headless`, and the interpreter it runs is
+    IDA's -- which can import bindiff only because the plugin put the package
+    directory on sys.path at load time. A subprocess inherits the environment,
+    not sys.path, so the child looked for an installed bindiff, found none, and
+    died with ModuleNotFoundError before it could report anything.
+
+    Prepended rather than replacing PYTHONPATH: a caller who set one meant it.
+    Harmless when bindiff is properly installed in the child, which is the case
+    for a wheel install -- the path is simply already satisfied.
+    """
+    environment = dict(os.environ if base is None else base)
+    package_root = str(Path(__file__).resolve().parents[1])
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = (
+        package_root + os.pathsep + existing if existing else package_root)
+    return environment
+
+
 def _stream(command: List[str], timeout: Optional[float], sink: _ProgressSink,
             cancel: Optional[threading.Event]) -> StageResult:
     """Runs the worker, reading its output as it arrives."""
     process = subprocess.Popen(
-        command, stdout=subprocess.PIPE,
+        command, env=worker_environment(), stdout=subprocess.PIPE,
         # Merged rather than piped separately and read afterwards: a worker
         # that fills the stderr pipe while this is still reading stdout would
         # deadlock, and idalib is easily chatty enough to do it. Lines are
@@ -669,7 +698,7 @@ def run_headless(args: Sequence[str], *,
         result = _stream(command, timeout, sink, cancel)
     else:
         completed = runner(command, capture_output=True, text=True,
-                           timeout=timeout)
+                           timeout=timeout, env=worker_environment())
         result = None
         for line in (completed.stdout or "").splitlines():
             kind, payload = _parse_line(line)

@@ -175,6 +175,23 @@ def primary_export_source(idb_path, input_path):
     return str(input_path) if input_path else None
 
 
+def default_output_name(primary, secondary) -> str:
+    """A .BinDiff filename built from the two sides.
+
+    "Save results as" opened on whatever directory IDA was last in, with an
+    empty name, so every diff had to be named by hand -- and the one thing the
+    name should record, which two files it compares, is exactly what the user
+    would have to retype.
+    """
+    def stem(path):
+        name = Path(path).name
+        # .dll.i64 and .BinExport both leave a stem worth keeping, so strip
+        # only the last suffix rather than every one.
+        return Path(name).stem if Path(name).suffix else name
+
+    return f"{stem(primary)}_vs_{stem(secondary)}.BinDiff"
+
+
 def worker_arguments(primary: str, secondary: str, output: str) -> list:
     """The command handed to the headless worker."""
     return ["pipeline", str(primary), str(secondary), str(output)]

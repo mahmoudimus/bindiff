@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import pytest
 
-from ida_plugin.diff_runner import (DiffRun, classify, panel_title,
+from ida_plugin.diff_runner import (DiffRun, classify, default_output_name,
+                                    panel_title,
                                     worker_arguments, primary_export_source)
 
 
@@ -306,3 +307,26 @@ class TestPrimaryExportSource:
 
     def test_nothing_to_export_reads_as_none(self):
         assert primary_export_source(None, None) is None
+
+
+class TestDefaultOutputName:
+    def test_it_names_both_sides(self):
+        assert default_output_name(
+            "/a/Wow_loader-12.1.0.69404-devirt.dll.i64",
+            "/b/Wow_loader-12.1.0.69497-devirt.dll.i64"
+        ) == ("Wow_loader-12.1.0.69404-devirt.dll_vs_"
+              "Wow_loader-12.1.0.69497-devirt.dll.BinDiff")
+
+    def test_only_the_last_suffix_goes(self):
+        """Version numbers contain dots, so stripping every suffix would turn
+        Wow_loader-12.1.0.69404-devirt.dll into Wow_loader-12."""
+        assert default_output_name("/a/x-12.1.0.dll", "/b/y-12.2.0.dll") == (
+            "x-12.1.0_vs_y-12.2.0.BinDiff")
+
+    def test_a_binexport_pair_reads_sensibly(self):
+        assert default_output_name("/a/one.BinExport", "/b/two.BinExport") == (
+            "one_vs_two.BinDiff")
+
+    def test_a_name_without_a_suffix_survives(self):
+        assert default_output_name("/a/primary", "/b/secondary") == (
+            "primary_vs_secondary.BinDiff")
