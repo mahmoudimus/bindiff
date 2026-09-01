@@ -744,6 +744,23 @@ else:
             shiboken6 = None
 
 
+def exec_widget(widget, *args):
+    """Runs a modal widget's event loop, spelled for whichever binding is here.
+
+    PySide6 kept exec_() as a deprecated alias and warns on every call;
+    PyQt5 has had exec() since 5.13. Preferring exec() keeps both quiet.
+
+    A hasattr("exec_") check is not enough and is actively misleading: the
+    compatibility setup below *creates* exec_ on Qt6, so the attribute is
+    always present and a caller probing for it lands on the deprecated
+    spelling every time.
+    """
+    runner = getattr(widget, "exec", None)
+    if runner is None:
+        runner = widget.exec_
+    return runner(*args)
+
+
 def _setup_compatibility() -> None:
     """
     Set up compatibility shims for API differences between PyQt5 and PySide6.

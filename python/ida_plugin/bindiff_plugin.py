@@ -352,7 +352,9 @@ if IDA_AVAILABLE:
 
             if ActionMenu is not None:
                 dialog = ActionMenu(f"{PLUGIN_NAME} {PLUGIN_VERSION}", entries)
-                dialog.exec_() if hasattr(dialog, "exec_") else dialog.exec()
+                from bindiff.qt_shim import exec_widget
+
+                exec_widget(dialog)
                 return dialog.chosen
 
             answer = ida_kernwin.ask_buttons(
@@ -1066,7 +1068,10 @@ if IDA_AVAILABLE:
                 return
             from ida_plugin.panels import StatisticsDialog
 
-            StatisticsDialog(self.controller.statistic_rows()).exec_()
+            from bindiff.qt_shim import exec_widget
+
+            exec_widget(StatisticsDialog(
+                self.controller.statistic_rows()))
 
         def _configure_algorithms(self) -> None:
             import bindiff
@@ -1079,7 +1084,10 @@ if IDA_AVAILABLE:
                     f"[{PLUGIN_NAME}] matching configuration updated; "
                     f"it applies to the next diff\n")
 
-            AlgorithmConfigDialog(bindiff.get_config(), apply).exec_()
+            from bindiff.qt_shim import exec_widget
+
+            exec_widget(
+                AlgorithmConfigDialog(bindiff.get_config(), apply))
 
         def _require_results(self) -> bool:
             if self.controller.loaded:

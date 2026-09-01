@@ -50,7 +50,8 @@ if IDA_AVAILABLE:
 
 
 if IDA_AVAILABLE:
-    from bindiff.qt_shim import Qt, QtCore, QtGui, QtWidgets
+    from bindiff.qt_shim import (Qt, QtCore, QtGui, QtWidgets,
+                             exec_widget)
 
     def _no_edit_triggers():
         """QAbstractItemView.NoEditTriggers, spelled for either binding."""
@@ -190,7 +191,8 @@ if IDA_AVAILABLE:
             show_all = menu.addAction("Show all")
             reset = menu.addAction("Reset to defaults")
 
-            chosen = menu.exec_(
+            chosen = exec_widget(
+                menu,
                 self.horizontalHeader().mapToGlobal(position))
             if chosen is None:
                 return
@@ -218,7 +220,8 @@ if IDA_AVAILABLE:
                     continue
                 action = menu.addAction(name.split(":", 1)[-1].replace("_", " "))
                 action.setData(name)
-            chosen = menu.exec_(self.viewport().mapToGlobal(position))
+            chosen = exec_widget(menu,
+                                 self.viewport().mapToGlobal(position))
             if chosen is not None:
                 ida_kernwin.process_ui_action(chosen.data())
 
