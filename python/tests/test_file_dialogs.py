@@ -41,8 +41,14 @@ def ask_file_defaults():
 
 def test_there_are_dialogs_to_check():
     """A rename that moved every call would otherwise make this file pass by
-    checking nothing."""
-    assert len(list(ask_file_defaults())) >= 4
+    checking nothing.
+
+    The floor is a canary, not a target: it went from four to three when
+    ControlPanel's browse button left panels.py, and it moves again when the
+    workbench grows its own. What it has to catch is the count reaching zero
+    without anyone noticing.
+    """
+    assert len(list(ask_file_defaults())) >= 3
 
 
 @pytest.mark.parametrize("where,default", list(ask_file_defaults()),
