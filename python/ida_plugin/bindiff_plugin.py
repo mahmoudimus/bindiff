@@ -753,18 +753,33 @@ if IDA_AVAILABLE:
             """Shared by the three import variants. Returns the symbol ports."""
             from ida_plugin.porting import apply_comment_ports, apply_symbol_ports
 
-            from ida_plugin.porting import explain_symbol_port_skips
+            from ida_plugin.porting import (_is_generated_name,
+                                            explain_symbol_port_skips)
 
-            symbols = self.controller.plan_symbol_ports(match_ids)
+            # Overwrites an existing name, which is what upstream does --
+            # its only guard is "already has the same name" -- and what
+            # choosing this action asks for. Refusing to overwrite made the
+            # action quietly do less than it said on exactly the functions
+            # someone had already looked at and named.
+            #
+            # The similarity and confidence floors stay. They guard against a
+            # different and measured problem: porting at 0.0 wrote 516 wrong
+            # names out of 1440 on the corpus. That is about trusting a match,
+            # not about respecting a name.
+            symbols = self.controller.plan_symbol_ports(
+                match_ids, overwrite_existing=True)
             symbol_result = apply_symbol_ports(symbols)
+            replaced = sum(1 for port in symbols
+                           if not _is_generated_name(port.old_name))
             message = (f"renamed {symbol_result.applied} function(s)"
+                       + (f" ({replaced} replaced an existing name)"
+                          if replaced else "")
                        + (f", {symbol_result.failed} failed"
                           if symbol_result.failed else ""))
-            # Every selected match is either renamed or accounted for. Most
-            # of what gets skipped is a deliberate refusal -- not overwriting
-            # a name you gave -- which reads as a failure when it is silent.
+            # Whatever is still skipped is accounted for rather than silent.
             skips = explain_symbol_port_skips(
-                self.controller.matches_for(match_ids))
+                self.controller.matches_for(match_ids),
+                overwrite_existing=True)
             if skips:
                 message += "; " + ", ".join(
                     f"{count} skipped: {reason}"

@@ -237,3 +237,39 @@ class TestExplainingSkips:
         ported = len(plan_symbol_ports(matches))
         skipped = sum(explain_symbol_port_skips(matches).values())
         assert ported + skipped == len(matches)
+
+
+class TestOverwriting:
+    """Upstream's only guard is "already has the same name" (ida/results.cc),
+    so an explicit import replaces a name that is already there."""
+
+    def _match(self, **kw):
+        from types import SimpleNamespace
+        fields = dict(id=1, similarity=1.0, confidence=1.0,
+                      address_primary=0x1000, name_primary="hand_written",
+                      address_secondary=0x2000, name_secondary="from_the_match")
+        fields.update(kw)
+        return SimpleNamespace(**fields)
+
+    def test_an_existing_name_is_replaced_when_asked(self):
+        from ida_plugin.porting import plan_symbol_ports
+        ports = plan_symbol_ports([self._match()], overwrite_existing=True)
+        assert [(p.old_name, p.new_name) for p in ports] == [
+            ("hand_written", "from_the_match")]
+
+    def test_and_is_kept_when_not(self):
+        from ida_plugin.porting import plan_symbol_ports
+        assert plan_symbol_ports([self._match()]) == []
+
+    def test_identical_names_are_still_not_ported(self):
+        """Nothing to do, and it would report work that did not happen."""
+        from ida_plugin.porting import plan_symbol_ports
+        match = self._match(name_primary="same", name_secondary="same")
+        assert plan_symbol_ports([match], overwrite_existing=True) == []
+
+    def test_the_thresholds_still_apply(self):
+        """Overwriting is about respecting a name; the floors are about
+        trusting a match, and porting at 0.0 wrote 516 wrong names of 1440."""
+        from ida_plugin.porting import plan_symbol_ports
+        weak = self._match(similarity=0.1)
+        assert plan_symbol_ports([weak], overwrite_existing=True) == []
