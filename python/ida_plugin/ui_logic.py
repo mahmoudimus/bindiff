@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from enum import IntFlag
 from typing import Callable, Iterable, List, Optional, Sequence
 
+from ida_plugin.trust import TRUST_RANK, assess, found_by as _found_by
+
 
 class ChangeType(IntFlag):
     """What differs between the two sides of a match.
@@ -70,8 +72,38 @@ def describe_change_flags(flags: int) -> List[str]:
     return [name for bit, _, name in _CHANGE_CODES if flags & int(bit)]
 
 
+_CHANGE_WORDS = {"G": "graph", "I": "instr", "O": "operands", "J": "jumps",
+                 "E": "entry", "L": "loops", "C": "calls"}
+
+
+def change_words(flags: int) -> str:
+    """Tier-1 reading of the flags: words for what is set, nothing for what
+    is not. "GI--EL-" spends a column on absence; this spends it on change."""
+    return " ".join(_CHANGE_WORDS[code] for bit, code, _ in _CHANGE_CODES
+                    if flags & int(bit))
+
+
+def change_expansions(flags: int) -> List[tuple]:
+    """Tier-2 reading for the inspector: every letter, its name, and whether
+    it is set -- token, expansion and value together, always all three."""
+    return [(code, name, bool(flags & int(bit)))
+            for bit, code, name in _CHANGE_CODES]
+
+
 def format_address(address: int) -> str:
     return f"0x{address:08X}"
+
+
+# The State column's values. The dash is the only non-ASCII character in this
+# module and it is displayed, never compared against by a caller.
+STATE_NONE = "—"
+STATE_VERIFIED = "verified"
+STATE_BY_HAND = "by hand"
+STATE_IMPORTED = "imported"
+STATE_PORTED = "ported"
+STATE_REPLACED = "replaced"
+STATE_SKIPPED = "skipped"
+STATE_REFUSED = "refused"
 
 
 @dataclass(frozen=True)
@@ -101,6 +133,29 @@ class MatchRow:
     instructions_secondary: int = 0
     edges_primary: int = 0
     edges_secondary: int = 0
+    # Derived when the row is built, so the model and the filters read one
+    # value rather than each re-deriving it.
+    trust: str = "check"
+    state: str = STATE_NONE
+    comments_available: int = 0
+
+    @property
+    def found_by(self) -> str:
+        return _found_by(self.algorithm)
+
+    @property
+    def change_words(self) -> str:
+        return change_words(self.change_flags)
+
+    @property
+    def this_database(self) -> str:
+        """Address, then name, in one cell. Two spaces between them so the
+        delegate can split without guessing where the address ends."""
+        return f"{self.address_primary:X}  {self.name_primary}"
+
+    @property
+    def other_binary(self) -> str:
+        return f"{self.address_secondary:X}  {self.name_secondary}"
 
     @property
     def has_totals(self) -> bool:
@@ -120,14 +175,24 @@ class MatchRow:
 
 
 COLUMNS: Sequence[tuple[str, str]] = (
-    ("similarity", "Similarity"),
-    ("confidence", "Confidence"),
-    ("change", "Change"),
-    ("address_primary", "EA Primary"),
-    ("name_primary", "Name Primary"),
-    ("address_secondary", "EA Secondary"),
-    ("name_secondary", "Name Secondary"),
-    ("algorithm", "Algorithm"),
+    # The seven defaults, in table order. Reordering these reorders the table.
+    ("trust", "Trust"),
+    ("this_database", "This database"),
+    ("other_binary", "Other binary"),
+    ("similarity", "Sim"),
+    ("changed", "Changed"),
+    ("found_by", "Found by"),
+    ("state", "State"),
+    # Lens-specific and reference columns, off by default.
+    ("outcome", "Outcome"),
+    ("comments_available", "Comments"),
+    ("confidence", "Block coverage"),
+    ("change", "Changed (letters)"),
+    ("address_primary", "Address here"),
+    ("name_primary", "Name here"),
+    ("address_secondary", "Address there"),
+    ("name_secondary", "Name there"),
+    ("algorithm", "Algorithm (engine)"),
     ("comments_ported", "Comments Ported"),
     ("basic_blocks", "Matched Basic Blocks"),
     ("basic_blocks_primary", "Basic Blocks Primary"),
@@ -141,7 +206,30 @@ COLUMNS: Sequence[tuple[str, str]] = (
 )
 
 
+def column_index(name: str) -> int:
+    for index, (column, _label) in enumerate(COLUMNS):
+        if column == name:
+            return index
+    raise ValueError(f"unknown column {name!r}")
+
+
 def _sort_key(column: str) -> Callable[[MatchRow], object]:
+    if column == "trust":
+        return lambda row: TRUST_RANK.get(row.trust, -1)
+    if column == "this_database":
+        return lambda row: row.address_primary
+    if column == "other_binary":
+        return lambda row: row.address_secondary
+    if column == "changed":
+        return lambda row: (bin(row.change_flags).count("1"), row.change_flags)
+    if column == "found_by":
+        return lambda row: row.found_by.lower()
+    if column in ("state", "outcome"):
+        # The outcome cell belongs to the lens, not the row, so every row
+        # sorts equal on it rather than raising on a column the table has.
+        return lambda row: row.state if column == "state" else ""
+    if column == "comments_available":
+        return lambda row: row.comments_available
     if column == "comments_ported":
         return lambda row: row.comments_ported
     if column == "change":
@@ -345,7 +433,15 @@ def cell_values(row: MatchRow) -> tuple:
     GUI, and so the model that renders it stays a thin adapter.
     """
     return (
+        row.trust.capitalize(),
+        row.this_database,
+        row.other_binary,
         f"{row.similarity:.2f}",
+        row.change_words,
+        row.found_by,
+        row.state,
+        "",                      # outcome: supplied by the lens, not the row
+        str(row.comments_available),
         f"{row.confidence:.2f}",
         row.change_text,
         format_address(row.address_primary),
@@ -412,8 +508,25 @@ def build_statistics(files, num_matches: int,
     return rows
 
 
+def _state_of(match, ledger, by_hand) -> str:
+    """One value, by precedence: what this session did to the pair, what an
+    earlier session recorded, how the pair came to exist."""
+    if ledger is not None:
+        outcome = ledger.outcome(match.id)
+        if outcome:
+            return outcome
+    if match.comments_ported:
+        return STATE_IMPORTED
+    if match.id in set(by_hand):
+        return STATE_BY_HAND
+    if match.manual:
+        return STATE_VERIFIED
+    return STATE_NONE
+
+
 def rows_from_database(database, primary_details=None,
-                      secondary_details=None) -> List[MatchRow]:
+                      secondary_details=None, *, ledger=None, by_hand=(),
+                      comment_counts=None) -> List[MatchRow]:
     """Adapts BinDiffDatabase.matches() into view rows.
 
     `primary_details` and `secondary_details` are what
@@ -421,9 +534,17 @@ def rows_from_database(database, primary_details=None,
     optional: without them the per-side count columns read zero, which is
     honest -- those totals are not in the result file -- and every other column
     still works.
+
+    `ledger` is a port ledger, anything with .outcome(match_id); `by_hand` the
+    ids matched by hand this session; `comment_counts` how many comments the
+    other binary holds, keyed by secondary address. All three feed the State
+    and Comments columns, and all three are optional -- the .BinDiff carries
+    none of them.
     """
     primary_details = primary_details or {}
     secondary_details = secondary_details or {}
+    comment_counts = comment_counts or {}
+    by_hand = set(by_hand)
 
     def totals(details, address):
         detail = details.get(address)
@@ -458,6 +579,10 @@ def rows_from_database(database, primary_details=None,
                                           match.address_secondary)[1],
             edges_secondary=totals(secondary_details,
                                    match.address_secondary)[2],
+            trust=assess(match.similarity, match.confidence,
+                         match.algorithm).value,
+            state=_state_of(match, ledger, by_hand),
+            comments_available=comment_counts.get(match.address_secondary, 0),
         )
         for match in database.matches()
     ]
@@ -692,15 +817,15 @@ def build_flow_graph_diff(blocks, edges,
 
 # -- column visibility -----------------------------------------------------
 
-# Eighteen columns is more than fits on a screen, and the C++ chooser showed
-# all of them too. These are the ones worth seeing by default; the per-side
-# counts and the ported flag are available but off, because they are reference
-# figures rather than something to scan.
+# Twenty-six columns is far more than fits on a screen, and the C++ chooser
+# showed all of them too. These seven are the spec's defaults, in table order:
+# what to trust, which two functions, how alike, what changed, which step said
+# so, and what has been done about it. Everything else -- the split address and
+# name columns, the per-side counts, the raw algorithm name -- is a reference
+# figure, still there through the Columns menu but off by default.
 DEFAULT_VISIBLE_COLUMNS: Sequence[str] = (
-    "similarity", "confidence", "change",
-    "address_primary", "name_primary",
-    "address_secondary", "name_secondary",
-    "algorithm",
+    "trust", "this_database", "other_binary", "similarity", "changed",
+    "found_by", "state",
 )
 
 

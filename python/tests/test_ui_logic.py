@@ -351,11 +351,14 @@ class TestColumnVisibility:
 
         visibility = ColumnVisibility()
         assert visibility.is_visible("similarity")
-        assert visibility.is_visible("name_primary")
-        # The per-side counts are reference figures, not something to scan.
+        assert visibility.is_visible("this_database")
+        assert visibility.is_visible("trust")
+        # The old split columns and the per-side counts are reference
+        # figures now, reachable from the Columns menu.
+        assert not visibility.is_visible("name_primary")
         assert not visibility.is_visible("basic_blocks_primary")
         assert not visibility.is_visible("comments_ported")
-        assert len(visibility.visible_columns()) < len(COLUMNS)
+        assert len(visibility.visible_columns()) == 7
 
     def test_toggle_round_trips(self):
         from ida_plugin.ui_logic import ColumnVisibility
@@ -431,12 +434,12 @@ class TestCellValues:
         assert len(cell_values(row)) == len(COLUMNS)
 
     def test_scores_are_two_decimals_and_addresses_are_hex(self):
-        from ida_plugin.ui_logic import cell_values
+        from ida_plugin.ui_logic import cell_values, column_index
         values = cell_values(_match_row(similarity=1.0, confidence=0.985,
                                         address_primary=0x401000))
-        assert values[0] == "1.00"
-        assert values[1] == "0.98"
-        assert "401000" in values[3].lower()
+        assert values[column_index("similarity")] == "1.00"
+        assert values[column_index("confidence")] == "0.98"
+        assert "401000" in values[column_index("address_primary")].lower()
 
 
 class TestNarrowing:
@@ -746,3 +749,124 @@ class TestImportedFilter:
 
         assert MatchFilter(imported=True).narrows(MatchFilter())
         assert not MatchFilter().narrows(MatchFilter(imported=True))
+
+
+class TestChangeWords:
+    def test_nothing_changed_is_empty(self):
+        from ida_plugin.ui_logic import change_words
+        assert change_words(0) == ""
+
+    def test_words_follow_engine_order(self):
+        from ida_plugin.ui_logic import ChangeType, change_words
+        flags = ChangeType.STRUCTURAL | ChangeType.INSTRUCTIONS | ChangeType.BRANCH_INVERSION
+        assert change_words(flags) == "graph instr jumps"
+
+    def test_expansions_carry_letter_name_and_state(self):
+        from ida_plugin.ui_logic import ChangeType, change_expansions
+        rows = change_expansions(ChangeType.INSTRUCTIONS)
+        assert len(rows) == 7
+        assert rows[0] == ("G", "Graph", False)
+        assert rows[1] == ("I", "Instructions", True)
+
+
+class TestDerivedColumns:
+    def test_the_seven_defaults_lead_the_table(self):
+        from ida_plugin.ui_logic import COLUMNS, DEFAULT_VISIBLE_COLUMNS
+        assert tuple(name for name, _ in COLUMNS[:7]) == DEFAULT_VISIBLE_COLUMNS
+
+    def test_column_index_finds_by_name(self):
+        from ida_plugin.ui_logic import COLUMNS, column_index
+        assert COLUMNS[column_index("similarity")][0] == "similarity"
+        with pytest.raises(ValueError):
+            column_index("no such column")
+
+    def test_side_cells_put_address_before_name(self):
+        row = make_row(address_primary=0x13008C40, name_primary="sub_13008C40",
+                       address_secondary=0x180091E0, name_secondary="mba_opt")
+        assert row.this_database == "13008C40  sub_13008C40"
+        assert row.other_binary == "180091E0  mba_opt"
+
+    def test_found_by_drops_the_prefix(self):
+        assert make_row(algorithm="function: hash matching").found_by == "function hash"
+
+    def test_cell_values_cover_the_new_columns(self):
+        from ida_plugin.ui_logic import cell_values, column_index
+        row = make_row(trust="weak", state="verified", change_flags=3,
+                       comments_available=4)
+        values = cell_values(row)
+        assert values[column_index("trust")] == "Weak"
+        assert values[column_index("state")] == "verified"
+        assert values[column_index("changed")] == "graph instr"
+        assert values[column_index("comments_available")] == "4"
+        assert values[column_index("outcome")] == ""
+
+    def test_trust_sorts_weak_first_ascending(self):
+        from ida_plugin.ui_logic import sort_rows
+        rows = [make_row(match_id=1, trust="strong"), make_row(match_id=2, trust="weak"),
+                make_row(match_id=3, trust="check")]
+        assert [r.match_id for r in sort_rows(rows, "trust")] == [2, 3, 1]
+
+    def test_changed_sorts_by_how_much_changed(self):
+        from ida_plugin.ui_logic import sort_rows
+        rows = [make_row(match_id=1, change_flags=0b111), make_row(match_id=2, change_flags=0),
+                make_row(match_id=3, change_flags=0b1)]
+        assert [r.match_id for r in sort_rows(rows, "changed")] == [2, 3, 1]
+
+
+class _FakeMatch:
+    def __init__(self, id, similarity=0.9, confidence=0.9, algorithm="function: hash matching",
+                 comments_ported=False, name_primary="sub_1", name_secondary="f"):
+        self.id = id; self.similarity = similarity; self.confidence = confidence
+        self.flags = 0; self.address_primary = 0x1000 * id; self.address_secondary = 0x2000 * id
+        self.name_primary = name_primary; self.name_secondary = name_secondary
+        self.algorithm = algorithm; self.comments_ported = comments_ported
+        self.basic_blocks = 1; self.edges = 1; self.instructions = 1
+
+    @property
+    def manual(self):
+        return self.confidence == 1.0 and "manual" in self.algorithm
+
+
+class _FakeDatabase:
+    def __init__(self, matches):
+        self._matches = matches
+
+    def matches(self):
+        return list(self._matches)
+
+
+class _FakeLedger:
+    def __init__(self, outcomes):
+        self._outcomes = outcomes
+
+    def outcome(self, match_id):
+        return self._outcomes.get(match_id)
+
+
+class TestRowsFromDatabaseDerivations:
+    def test_trust_is_assessed_per_row(self):
+        from ida_plugin.ui_logic import rows_from_database
+        rows = rows_from_database(_FakeDatabase([
+            _FakeMatch(1), _FakeMatch(2, similarity=0.2, algorithm="function: address sequence")]))
+        assert [r.trust for r in rows] == ["strong", "weak"]
+
+    def test_state_precedence(self):
+        from ida_plugin.ui_logic import (STATE_BY_HAND, STATE_IMPORTED, STATE_NONE,
+                                         STATE_PORTED, STATE_VERIFIED, rows_from_database)
+        manual = "function: manual"
+        rows = rows_from_database(
+            _FakeDatabase([
+                _FakeMatch(1, confidence=1.0, algorithm=manual, comments_ported=True),
+                _FakeMatch(2, confidence=1.0, algorithm=manual),
+                _FakeMatch(3, confidence=1.0, algorithm=manual),
+                _FakeMatch(4, comments_ported=True),
+                _FakeMatch(5)]),
+            ledger=_FakeLedger({1: STATE_PORTED}), by_hand={2})
+        assert [r.state for r in rows] == [
+            STATE_PORTED, STATE_BY_HAND, STATE_VERIFIED, STATE_IMPORTED, STATE_NONE]
+
+    def test_comment_counts_are_looked_up_by_secondary_address(self):
+        from ida_plugin.ui_logic import rows_from_database
+        rows = rows_from_database(_FakeDatabase([_FakeMatch(1), _FakeMatch(2)]),
+                                  comment_counts={0x2000: 3})
+        assert [r.comments_available for r in rows] == [3, 0]
