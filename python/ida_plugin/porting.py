@@ -187,13 +187,31 @@ def plan_comment_ports(
             continue
         if match.similarity < min_similarity or match.confidence < min_confidence:
             continue
+        # A function comment belongs to the function, so it is looked up at
+        # the match's own addresses rather than through an instruction pair.
+        # Going through instruction pairs loses it whenever the entry
+        # instruction did not match, which is common: a changed prologue
+        # means the first matched pair starts a few bytes in, and the comment
+        # sits on an address nothing points at. On the measured pair that
+        # cost 124 of 243 function comments.
+        entry = comments_by_address.get(match.address_secondary)
+        if entry:
+            ports.extend(
+                port for port in _ports_for(entry, match.address_primary,
+                                            match.address_secondary, match.id)
+                if port.kind == "function")
+
         for primary_address, secondary_address in database.instruction_matches(
                 match.id):
             found = comments_by_address.get(secondary_address)
             if not found:
                 continue
-            ports.extend(_ports_for(found, primary_address,
-                                    secondary_address, match.id))
+            ports.extend(
+                port for port in _ports_for(found, primary_address,
+                                            secondary_address, match.id)
+                # Function comments are handled above; a matched entry
+                # instruction would otherwise plan the same comment twice.
+                if port.kind != "function")
     return ports
 
 

@@ -273,3 +273,61 @@ class TestOverwriting:
         from ida_plugin.porting import plan_symbol_ports
         weak = self._match(similarity=0.1)
         assert plan_symbol_ports([weak], overwrite_existing=True) == []
+
+
+class TestFunctionCommentsFollowTheFunction:
+    """A function comment belongs to the function, not to its first
+    instruction.
+
+    Routed through matched instruction pairs it is lost whenever the entry
+    instruction did not match -- a changed prologue means the first matched
+    pair starts a few bytes in, and the comment sits on an address nothing
+    points at. Reported by a user on opt_cmp64_valranges_jmp2, whose first
+    matched pair began five bytes past the entry.
+    """
+
+    class _Database:
+        """A .BinDiff with one match whose entry instruction did not match."""
+
+        def __init__(self, pairs):
+            self._pairs = pairs
+
+        def matches(self):
+            from types import SimpleNamespace
+            return [SimpleNamespace(
+                id=1, similarity=1.0, confidence=1.0,
+                address_primary=0x1000, name_primary="sub_1000",
+                address_secondary=0x2000, name_secondary="real")]
+
+        def instruction_matches(self, _match_id):
+            return self._pairs
+
+    def _comment(self, text, kind):
+        from types import SimpleNamespace
+        return SimpleNamespace(text=text, is_function_comment=kind == "function")
+
+    def test_it_is_ported_when_the_entry_did_not_match(self):
+        from ida_plugin.porting import plan_comment_ports
+        database = self._Database([(0x1005, 0x2005)])
+        comments = {0x2000: [self._comment("what it does", "function")]}
+        ports = plan_comment_ports(database, comments)
+        assert [(p.kind, p.address) for p in ports] == [("function", 0x1000)]
+
+    def test_it_lands_on_the_function_not_the_matched_instruction(self):
+        from ida_plugin.porting import plan_comment_ports
+        database = self._Database([(0x1005, 0x2005)])
+        comments = {0x2000: [self._comment("what it does", "function")],
+                    0x2005: [self._comment("a note here", "instruction")]}
+        ports = plan_comment_ports(database, comments)
+        assert sorted((p.kind, p.address) for p in ports) == [
+            ("function", 0x1000), ("instruction", 0x1005)]
+
+    def test_it_is_not_ported_twice_when_the_entry_did_match(self):
+        """The entry appearing in the instruction pairs must not plan the
+        same comment again."""
+        from ida_plugin.porting import plan_comment_ports
+        database = self._Database([(0x1000, 0x2000), (0x1005, 0x2005)])
+        comments = {0x2000: [self._comment("what it does", "function")]}
+        ports = plan_comment_ports(database, comments)
+        assert len(ports) == 1
+        assert ports[0].kind == "function"
