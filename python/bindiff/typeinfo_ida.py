@@ -188,3 +188,55 @@ def read_function_types(addresses: Optional[Sequence[int]] = None
 def read_types() -> Tuple[List[TypeDeclaration], List[FunctionType]]:
     """Both halves, for a worker that has just opened a database."""
     return read_local_types(), read_function_types()
+
+
+def parse_declarations(statements: Sequence[str]) -> Tuple[int, int]:
+    """Defines types in this database. Returns (parsed, errors).
+
+    idaapi.parse_decls takes the declarations as a string when HTI_FIL is not
+    set, and returns the number of errors rather than raising -- so a batch
+    that half-worked is countable instead of silent.
+
+    Each statement is parsed on its own. In one batch a single bad definition
+    takes the rest with it, and the whole point of ordering them is to know
+    which one failed.
+
+    IDA-specific extensions must stay enabled for this, which is the default:
+    print_decls emits __cppobj, _DWORD and __usercall, and the clang parser
+    accepts them. Turning on "No IDA specific extensions" makes IDA unable to
+    read back what IDA wrote.
+    """
+    import idaapi
+
+    parsed = errors = 0
+    for statement in statements:
+        text = (statement or "").strip()
+        if not text:
+            continue
+        try:
+            failed = idaapi.parse_decls(None, text, None, idaapi.HTI_PAKDEF)
+        except Exception:
+            errors += 1
+            continue
+        if failed:
+            errors += 1
+        else:
+            parsed += 1
+    return parsed, errors
+
+
+def apply_prototype(address: int, declaration: str) -> bool:
+    """Gives a function the declaration another database had for it.
+
+    SetType's text wants a name in it, which is what print_decls and
+    tinfo._print produce, so the string travels unchanged from one database to
+    the other.
+    """
+    import idc
+
+    text = (declaration or "").strip()
+    if not text:
+        return False
+    if not text.endswith(";"):
+        text += ";"
+    return bool(idc.SetType(address, text))
