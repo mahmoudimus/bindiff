@@ -436,6 +436,15 @@ class PortLedger:
     def __len__(self) -> int:
         return len(self._entries)
 
+    def __iter__(self):
+        """The entries, in the order they were recorded.
+
+        A copy, so a caller merging one ledger into another -- which is what
+        the session does with a port's delta -- cannot trip over the dict
+        changing size while it reads.
+        """
+        return iter(list(self._entries.values()))
+
     def counts(self) -> Dict[str, int]:
         counts: Dict[str, int] = {}
         for entry in self._entries.values():

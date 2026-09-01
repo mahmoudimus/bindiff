@@ -119,6 +119,10 @@ class BinDiffController:
         self._details = tuple(loaded)
         return self._details
 
+    def function_details(self) -> tuple:
+        """Public name for the per-side totals; the session reads them."""
+        return self._function_details()
+
     def statistic_rows(self):
         from ida_plugin.ui_logic import build_statistics
 
