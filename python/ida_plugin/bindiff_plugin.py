@@ -452,7 +452,10 @@ if IDA_AVAILABLE:
                 ("Edit/Comments/InsertPredefinedComment", ACTION_PORT_COMMENTS,
                  ida_kernwin.SETMENU_APP),
                 # Chained: each entry is placed after the previous one, which
-                # is how upstream builds the submenu in order.
+                # is how upstream builds the submenu in order. The submenu
+                # itself is created by _create_view_menu below; attaching
+                # alone leaves IDA to put it wherever it likes, which is the
+                # bottom of View next to Full Screen.
                 (f"View/{PLUGIN_NAME}/", ACTION_SHOW_MATCHES,
                  ida_kernwin.SETMENU_FIRST),
                 (f"View/{PLUGIN_NAME}/MatchedFunctions",
@@ -462,9 +465,38 @@ if IDA_AVAILABLE:
                 (f"View/{PLUGIN_NAME}/PrimaryUnmatched",
                  ACTION_SHOW_SECONDARY_UNMATCHED, ida_kernwin.SETMENU_APP),
             )
+            self._create_view_menu()
             for path, name, flags in placements:
                 if name in self._registered:
                     ida_kernwin.attach_action_to_menu(path, name, flags)
+
+        def _create_view_menu(self) -> None:
+            """Creates the View/BinDiff submenu, positioned like upstream's.
+
+            attach_action_to_menu creates a missing submenu implicitly, but
+            only IDA decides where it goes -- which is the end of the menu, by
+            Full Screen. SETMENU_FIRST does not move it either: it places the
+            *item* at the beginning of the menu the path names, and for
+            "View/BinDiff/" that menu is BinDiff itself.
+
+            create_menu is the call that positions a submenu, and its default
+            flags insert before the path given. Upstream names
+            "View/Open subviews", so BinDiff lands immediately above it.
+
+            Guarded rather than assumed present: create_menu is a thin wrapper
+            in the SDK and a binding that does not export it should cost the
+            submenu's position, not the whole plugin.
+            """
+            create_menu = getattr(ida_kernwin, "create_menu", None)
+            if create_menu is None:
+                return
+            try:
+                create_menu(f"bindiff:view_{PLUGIN_NAME.lower()}", PLUGIN_NAME,
+                            "View/Open subviews")
+            except Exception:
+                # A failure here leaves the submenu where attaching puts it,
+                # which is worse-looking and still works.
+                pass
 
         # -- helpers --------------------------------------------------------
 
