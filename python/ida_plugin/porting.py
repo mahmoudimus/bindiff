@@ -66,12 +66,23 @@ class SymbolPort:
 
 @dataclass(frozen=True)
 class CommentPort:
-    """A comment to write into the primary database."""
+    """A comment to write into the primary database.
+
+    `kind` decides where it goes. A function comment written with set_cmt
+    lands on the first instruction instead of on the function, which looks
+    almost right and is not: it does not show in the functions list, does not
+    survive a re-analysis of that instruction, and is not what was copied.
+    """
 
     address: int
     text: str
     secondary_address: int
     match_id: int
+    kind: str = "instruction"
+
+    @property
+    def is_function_comment(self) -> bool:
+        return self.kind == "function"
 
 
 def _is_generated_name(name: str) -> bool:
@@ -227,15 +238,25 @@ def apply_symbol_ports(ports: Sequence[SymbolPort],
 
 
 def apply_comment_ports(ports: Sequence[CommentPort],
-                        set_comment: Optional[Callable[[int, str], bool]] = None
+                        set_comment: Optional[Callable[..., bool]] = None
                         ) -> PortResult:
-    """Writes comments into the open database. `set_comment` is injectable."""
+    """Writes comments into the open database. `set_comment` is injectable.
+
+    Each port knows whether it is a function comment or an instruction one and
+    the writer is told, because they go to different places in IDA.
+    """
     if set_comment is None:
         set_comment = _ida_set_comment
 
     result = PortResult()
     for port in ports:
         try:
+            if set_comment(port.address, port.text, port.kind):
+                result.applied += 1
+            else:
+                result.failed += 1
+        except TypeError:
+            # A caller's stub from before comments had kinds.
             if set_comment(port.address, port.text):
                 result.applied += 1
             else:
@@ -282,9 +303,18 @@ def _ida_rename(address: int, name: str) -> bool:
     return bool(ida_name.set_name(address, name, ida_name.SN_NOWARN))
 
 
-def _ida_set_comment(address: int, text: str) -> bool:
+def _ida_set_comment(address: int, text: str,
+                     kind: str = "instruction") -> bool:
     if not is_interactive():
         raise RuntimeError("commenting requires a running IDA database")
     import ida_bytes
+    import ida_funcs
 
+    if kind == "function":
+        function = ida_funcs.get_func(address)
+        if function is not None:
+            # Non-repeatable: a repeatable function comment is echoed at every
+            # call site, which is rarely what someone wrote it for.
+            return bool(ida_funcs.set_func_cmt(function, text, False))
+        # No function here -- fall through rather than lose the comment.
     return bool(ida_bytes.set_cmt(address, text, False))

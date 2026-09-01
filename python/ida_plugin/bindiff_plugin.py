@@ -276,7 +276,7 @@ class BinDiffController:
 
     def plan_comment_ports(self, match_ids=None, **kwargs):
         """Needs the secondary .BinExport: comments are not in a .BinDiff."""
-        from bindiff import load_comments
+        from bindiff.comments import portable_comments
         from ida_plugin.porting import plan_comment_ports
 
         database = self._require_writable()
@@ -285,7 +285,12 @@ class BinDiffController:
             raise FileNotFoundError(
                 "the secondary .BinExport was not found next to the result "
                 "file; comments live there, not in the .BinDiff")
-        return plan_comment_ports(database, load_comments(secondary),
+        # portable_comments, not bindiff.load_comments: the engine's
+        # reader keys comments by (address, operand) and keeps one per
+        # address, which for a documented function was its own name
+        # rather than the documentation.
+        return plan_comment_ports(database,
+                                  portable_comments(secondary),
                                   match_ids=match_ids, **kwargs)
 
 
