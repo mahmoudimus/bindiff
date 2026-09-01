@@ -166,6 +166,28 @@ def sort_rows(rows: Iterable[MatchRow], column: str,
     return sorted(rows, key=_sort_key(column), reverse=descending)
 
 
+# Prefixes IDA uses when it names something itself. A name starting with one
+# of these was invented by the disassembler; anything else was chosen by a
+# person or came from symbols.
+_GENERATED_PREFIXES = (
+    "sub_", "loc_", "locret_", "unknown_libname_", "nullsub_", "j_sub_",
+    "def_", "byte_", "word_", "dword_", "qword_", "off_", "unk_", "asc_",
+    "algn_", "stru_", "flt_", "dbl_", "xmmword_", "ymmword_",
+)
+
+
+def is_generated_name(name: str) -> bool:
+    """True for a name IDA generated rather than one a person chose.
+
+    Here rather than in porting because both the porting rules and the view
+    filters need it, and a second copy is how one of them gets a new prefix
+    and the other does not.
+    """
+    if not name:
+        return True
+    return name.startswith(_GENERATED_PREFIXES)
+
+
 def parse_address_query(text: str) -> Optional[int]:
     """The address a filter query names, or None when it names no address.
 
@@ -211,6 +233,9 @@ class MatchFilter:
     min_confidence: float = 0.0
     manual_only: bool = False
     changed_only: bool = False
+    # Rows where the other side has a real name and this side does not: work
+    # done in the old database that has not reached this one.
+    needs_a_name: bool = False
 
     def _address_query(self) -> Optional[int]:
         return parse_address_query(self.text)
@@ -238,6 +263,8 @@ class MatchFilter:
             return False
         if previous.changed_only and not self.changed_only:
             return False
+        if previous.needs_a_name and not self.needs_a_name:
+            return False
         return text_query_narrows(previous.text, self.text)
 
     def matches(self, row: MatchRow) -> bool:
@@ -248,6 +275,10 @@ class MatchFilter:
         if self.manual_only and not row.manual:
             return False
         if self.changed_only and row.change_flags == 0:
+            return False
+        if self.needs_a_name and not (
+                is_generated_name(row.name_primary)
+                and not is_generated_name(row.name_secondary)):
             return False
         if not self.text:
             return True

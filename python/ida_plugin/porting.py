@@ -88,17 +88,14 @@ class CommentPort:
 def _is_generated_name(name: str) -> bool:
     """True for a name IDA generated rather than one a person chose.
 
-    Porting is only useful in one direction: an auto-generated name on the
-    secondary side carries no information, and overwriting a real primary name
-    with one would be a regression.
+    Delegates to ui_logic, which the view filters use too. Two copies is how
+    one of them learns about a new prefix and the other does not, and the
+    symptom would be a filter that promises rows the porting rules then
+    refuse.
     """
-    if not name:
-        return True
-    return name.startswith(("sub_", "loc_", "locret_", "unknown_libname_",
-                            "nullsub_", "j_sub_", "def_", "byte_", "word_",
-                            "dword_", "qword_", "off_", "unk_", "asc_",
-                            "algn_", "stru_", "flt_", "dbl_", "xmmword_",
-                            "ymmword_"))
+    from ida_plugin.ui_logic import is_generated_name
+
+    return is_generated_name(name)
 
 
 def explain_symbol_port_skips(

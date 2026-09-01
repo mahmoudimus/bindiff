@@ -650,3 +650,62 @@ class TestChangeLegend:
         from ida_plugin.ui_logic import _CHANGE_CODES, format_change_flags
         assert len(format_change_flags(0)) == len(_CHANGE_CODES)
         assert format_change_flags(0) == "-" * len(_CHANGE_CODES)
+
+
+class TestNeedsANameFilter:
+    """The porting worklist: named on the other side, not on this one.
+
+    A row where Name Primary is still sub_ and Name Secondary is not means
+    somebody did that work in the old database and it has not been brought
+    across.
+    """
+
+    def test_it_keeps_a_row_named_only_on_the_other_side(self):
+        from ida_plugin.ui_logic import MatchFilter
+        row = _match_row(name_primary="sub_130236AB0",
+                         name_secondary="resolve_goto_target")
+        assert MatchFilter(needs_a_name=True).matches(row)
+
+    def test_it_drops_a_row_already_named_here(self):
+        from ida_plugin.ui_logic import MatchFilter
+        row = _match_row(name_primary="resolve_goto_target",
+                         name_secondary="resolve_goto_target")
+        assert not MatchFilter(needs_a_name=True).matches(row)
+
+    def test_it_drops_a_row_with_nothing_to_offer(self):
+        """Both sides auto-named: there is no work to bring across."""
+        from ida_plugin.ui_logic import MatchFilter
+        row = _match_row(name_primary="sub_130236AB0",
+                         name_secondary="sub_18008D120")
+        assert not MatchFilter(needs_a_name=True).matches(row)
+
+    def test_off_by_default(self):
+        from ida_plugin.ui_logic import MatchFilter
+        row = _match_row(name_primary="sub_1", name_secondary="sub_2")
+        assert MatchFilter().matches(row)
+
+    def test_it_combines_with_the_other_filters(self):
+        from ida_plugin.ui_logic import MatchFilter
+        row = _match_row(name_primary="sub_1", name_secondary="real_name",
+                         similarity=0.4)
+        assert MatchFilter(needs_a_name=True).matches(row)
+        assert not MatchFilter(needs_a_name=True, min_similarity=0.9).matches(row)
+
+    def test_turning_it_on_narrows(self):
+        from ida_plugin.ui_logic import MatchFilter
+        assert MatchFilter(needs_a_name=True).narrows(MatchFilter())
+
+    def test_turning_it_off_does_not(self):
+        from ida_plugin.ui_logic import MatchFilter
+        assert not MatchFilter().narrows(MatchFilter(needs_a_name=True))
+
+
+class TestOneGeneratedNamePredicate:
+    def test_porting_and_the_filters_agree(self):
+        """Two copies is how one learns a new prefix and the other does not,
+        and the symptom is a filter promising rows porting then refuses."""
+        from ida_plugin.porting import _is_generated_name
+        from ida_plugin.ui_logic import is_generated_name
+        for name in ("sub_401000", "loc_1", "nullsub_2", "", "real_name",
+                     "resolve_goto_target", "j_sub_5", "unk_600"):
+            assert _is_generated_name(name) == is_generated_name(name)

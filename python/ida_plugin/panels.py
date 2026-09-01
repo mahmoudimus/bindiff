@@ -1162,6 +1162,18 @@ if IDA_AVAILABLE:
                 "The engine's own matches are hidden. A confirmed match "
                 "reads as manual, which is why the Algorithm column changes "
                 "to \"function: manual\" after confirming.")
+            # The porting worklist, as one tick. Named on the other side and
+            # not on this one is exactly "somebody did this work in the old
+            # database and it has not reached the new one".
+            self._needs_a_name = QtWidgets.QCheckBox("Needs a name")
+            self._needs_a_name.setToolTip(
+                "Show only matches that are named on the other side and not "
+                "on this one.\n\n"
+                "A row where Name Primary is still sub_… and Name Secondary "
+                "is not: work done in the old database that has not been "
+                "brought across. Select them and import symbols to bring the "
+                "names, comments and prototypes over.")
+
             self._changed_only = QtWidgets.QCheckBox("Changed only")
             self._changed_only.setToolTip(
                 "Show only matches whose two functions differ FROM EACH "
@@ -1189,6 +1201,7 @@ if IDA_AVAILABLE:
                 "rather than by which algorithm found it.")
             layout.addWidget(QtWidgets.QLabel("Min confidence"))
             layout.addWidget(self._min_confidence)
+            layout.addWidget(self._needs_a_name)
             layout.addWidget(self._manual_only)
             layout.addWidget(self._changed_only)
 
@@ -1198,6 +1211,7 @@ if IDA_AVAILABLE:
             self._text.textChanged.connect(lambda _t: self._debounce.start())
             self._min_similarity.valueChanged.connect(self._emit)
             self._min_confidence.valueChanged.connect(self._emit)
+            self._needs_a_name.toggled.connect(self._emit)
             self._manual_only.toggled.connect(self._emit)
             self._changed_only.toggled.connect(self._emit)
 
@@ -1206,6 +1220,7 @@ if IDA_AVAILABLE:
                 text=self._text.text(),
                 min_similarity=self._min_similarity.value(),
                 min_confidence=self._min_confidence.value(),
+                needs_a_name=self._needs_a_name.isChecked(),
                 manual_only=self._manual_only.isChecked(),
                 changed_only=self._changed_only.isChecked(),
             )
