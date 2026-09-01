@@ -119,25 +119,59 @@ def read_metadata(binexport_path: str) -> Dict[str, str]:
 
 
 def find_binexports_for(database_path: str) -> tuple:
-    """Guesses the two .BinExport files a .BinDiff came from.
+    """Finds the two .BinExport files a .BinDiff came from.
 
-    The engine names results "<primary>_vs_<secondary>.BinDiff" and writes them
-    beside the exports, so the names can usually be recovered. Returns
-    (primary, secondary), either of which may be None -- the caller is expected
-    to ask rather than guess wrongly.
+    The result file records the name of each input in its `file` table, which
+    is what Statistics displays, so that is asked first -- it is what the
+    differ was actually given rather than an inference from the result's own
+    filename. Only if that finds nothing does this fall back to the
+    "<primary>_vs_<secondary>.BinDiff" convention.
+
+    Returns (primary, secondary), either of which may be None. A caller is
+    expected to ask rather than guess wrongly: a .BinDiff holds matches, and
+    everything else -- unmatched functions, every comment -- lives in the
+    exports.
     """
     import re
+    import sqlite3
     from pathlib import Path
 
     path = Path(database_path)
-    match = re.match(r"(.+)_vs_(.+)\.BinDiff$", path.name, re.IGNORECASE)
-    if not match:
-        return (None, None)
+    found = [None, None]
 
-    primary = path.parent / f"{match.group(1)}.BinExport"
-    secondary = path.parent / f"{match.group(2)}.BinExport"
-    return (str(primary) if primary.is_file() else None,
-            str(secondary) if secondary.is_file() else None)
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                "select filename from file order by id").fetchall()
+        finally:
+            connection.close()
+        for index, (name,) in enumerate(rows[:2]):
+            if not name:
+                continue
+            stem = Path(name).name
+            candidate = path.parent / (
+                stem if stem.lower().endswith(".binexport")
+                else f"{stem}.BinExport")
+            if candidate.is_file():
+                found[index] = str(candidate)
+    except sqlite3.Error:
+        # Not a readable result file, or a schema without `file`. The naming
+        # convention is still worth a try.
+        pass
+
+    if all(found):
+        return tuple(found)
+
+    match = re.match(r"(.+)_vs_(.+)\.BinDiff$", path.name, re.IGNORECASE)
+    if match:
+        for index, group in enumerate((match.group(1), match.group(2))):
+            if found[index] is not None:
+                continue
+            candidate = path.parent / f"{group}.BinExport"
+            if candidate.is_file():
+                found[index] = str(candidate)
+    return tuple(found)
 
 @dataclass(frozen=True)
 class FunctionDetail:

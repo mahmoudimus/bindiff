@@ -89,6 +89,7 @@ class BinDiffController:
         self._database = None
         self._matched_form = None
         self._unmatched_forms = {}
+        self._statistics_form = None
         self._binexports = (None, None)
         self._details = None
 
@@ -370,13 +371,15 @@ if IDA_AVAILABLE:
             if self._control_panel is None:
                 return
             loaded = self.controller.loaded
-            summary = ""
+            path = matches = None
             if loaded:
+                database = self.controller.database
+                path = getattr(database, "path", None)
                 try:
-                    summary = f"{len(self.controller.match_rows())} matches"
+                    matches = database.num_matches()
                 except Exception:
-                    summary = "results loaded"
-            self._control_panel.set_results_open(loaded, summary)
+                    matches = None
+            self._control_panel.set_results(loaded, path, matches)
 
         def _open_menu(self) -> None:
             """Offers what the plugin can do, rather than assuming.
@@ -1083,19 +1086,22 @@ if IDA_AVAILABLE:
                 yield primary
                 return
 
-            handle, target = tempfile.mkstemp(suffix=source.suffix,
-                                              prefix="bindiff-primary-")
-            os.close(handle)
+            # A temporary directory holding a file with the *real* name,
+            # rather than a temporary file with an invented one. BinExport
+            # records the filename it was given, so mkstemp's name ended up
+            # in the .BinExport, in the .BinDiff's file table and on screen
+            # in Statistics as "bindiff-primary-oa1ywul8.primary". It also
+            # defeated finding the exports again later, since that works from
+            # the names.
+            holder = tempfile.mkdtemp(prefix="bindiff-snapshot-")
+            target = str(Path(holder) / source.name)
             try:
                 shutil.copyfile(source, target)
                 yield target
             finally:
                 # A leftover copy of someone's database is not a small
                 # mess, so it goes even if the diff raised.
-                try:
-                    os.unlink(target)
-                except OSError:
-                    pass
+                shutil.rmtree(holder, ignore_errors=True)
 
         def _run_diff_async(self, primary: str, secondary: str,
                             output: str) -> None:
@@ -1225,12 +1231,14 @@ if IDA_AVAILABLE:
         def _show_statistics(self) -> None:
             if not self._require_results():
                 return
-            from ida_plugin.panels import StatisticsDialog
+            from ida_plugin.panels import StatisticsForm
 
-            from bindiff.qt_shim import exec_widget
-
-            exec_widget(StatisticsDialog(
-                self.controller.statistic_rows()))
+            rows = self.controller.statistic_rows()
+            if self.controller._statistics_form is None:
+                self.controller._statistics_form = StatisticsForm(rows)
+            else:
+                self.controller._statistics_form.set_rows(rows)
+            self.controller._statistics_form.Show()
 
         def _configure_algorithms(self) -> None:
             import bindiff

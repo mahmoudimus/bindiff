@@ -12,6 +12,7 @@ PySide6 (IDA 9.2+) or PyQt5 (IDA 9.1) and papers over the differences.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
 from ida_plugin.ui_logic import (
@@ -716,12 +717,34 @@ if IDA_AVAILABLE:
                 "Write confirmations, deletions and manual matches back to "
                 "the .BinDiff.")
             self._save_button.clicked.connect(lambda: self._call("on_save"))
-            self._results_label = QtWidgets.QLabel("no results loaded")
+            # A dot and a filename, with the full path on hover. "results
+            # loaded" answers a question nobody was asking; which results is
+            # the thing you need when two diffs are open in two IDAs.
+            self._results_dot = QtWidgets.QLabel()
+            self._results_label = QtWidgets.QLabel()
             row.addWidget(load)
             row.addWidget(self._save_button)
             row.addStretch(1)
+            row.addWidget(self._results_dot)
             row.addWidget(self._results_label)
+            self._set_results_text(False, None, None)
             return box
+
+        def _set_results_text(self, open_, path, matches) -> None:
+            colour = "#2e9e2e" if open_ else "#9a9a9a"
+            self._results_dot.setText("\u25cf")
+            self._results_dot.setStyleSheet(f"color: {colour};")
+            if not open_:
+                self._results_label.setText("nothing loaded")
+                self._results_label.setToolTip("")
+                self._results_dot.setToolTip("")
+                return
+            name = Path(path).name if path else "results"
+            counted = f"  --  {matches:,} matches" if matches is not None else ""
+            self._results_label.setText(f"{name}{counted}")
+            tip = str(path) if path else ""
+            self._results_label.setToolTip(tip)
+            self._results_dot.setToolTip(tip)
 
         def _progress_group(self):
             box = QtWidgets.QGroupBox("Progress")
@@ -782,18 +805,18 @@ if IDA_AVAILABLE:
                 return
             self._call("on_diff", path)
 
-        def set_results_open(self, open_: bool, summary: str = "") -> None:
-            """Enables the views. Called by the plugin, not inferred here.
+        def set_results(self, open_: bool, path=None, matches=None) -> None:
+            """What is loaded, and therefore what is available.
 
-            The views are useless without a result and IDA's own action state
-            is not to be trusted for this -- being told once that they were
+            Pushed by the plugin rather than inferred here: the panel does not
+            reach into the controller, and IDA's own action state is not to be
+            trusted for this -- being told once that the views were
             unavailable is what left them greyed for a whole session.
             """
             self._results_open = open_
             if self.parent is None:
                 return
-            self._results_label.setText(summary or (
-                "results loaded" if open_ else "no results loaded"))
+            self._set_results_text(open_, path, matches)
             self._refresh_enabled()
 
         def _refresh_enabled(self) -> None:
@@ -1222,41 +1245,63 @@ if IDA_AVAILABLE:
                          | ida_kernwin.PluginForm.WOPN_TAB),
             )
 
-    class StatisticsDialog(QtWidgets.QDialog):
-        """Read-only summary of the two inputs."""
+    class StatisticsForm(ida_kernwin.PluginForm):
+        """Read-only summary of the two inputs, as a dockable tab.
 
-        def __init__(self, rows: Sequence[StatisticRow], parent=None) -> None:
-            super().__init__(parent)
-            self.setWindowTitle("BinDiff - Statistics")
-            self.resize(720, 420)
+        It was a modal dialog, which meant it could not sit beside the matches
+        it describes and had to be dismissed before anything else could be
+        done. Every other view here docks; this is not different in kind.
+        """
 
-            table = QtWidgets.QTableWidget(len(rows), 3, self)
-            table.setHorizontalHeaderLabels(["", "Primary", "Secondary"])
-            table.setEditTriggers(_no_edit_triggers())
-            table.verticalHeader().setVisible(False)
-            for index, row in enumerate(rows):
+        def __init__(self, rows: Sequence[StatisticRow]) -> None:
+            super().__init__()
+            self._rows = list(rows)
+            self._table = None
+            self.parent = None
+
+        def OnCreate(self, form) -> None:
+            self.parent = self.FormToPyQtWidget(form)
+            layout = QtWidgets.QVBoxLayout(self.parent)
+            layout.setContentsMargins(0, 0, 0, 0)
+            self._table = QtWidgets.QTableWidget(0, 3, self.parent)
+            self._table.setHorizontalHeaderLabels(["", "Primary", "Secondary"])
+            self._table.setEditTriggers(_no_edit_triggers())
+            self._table.verticalHeader().setVisible(False)
+            self._table.setAlternatingRowColors(True)
+            self._table.setWordWrap(False)
+            metrics = self._table.fontMetrics()
+            self._table.verticalHeader().setDefaultSectionSize(
+                metrics.height() + 4)
+            header = self._table.horizontalHeader()
+            _set_interactive(header)
+            header.setStretchLastSection(True)
+            layout.addWidget(self._table)
+            self.set_rows(self._rows)
+
+        def set_rows(self, rows: Sequence[StatisticRow]) -> None:
+            self._rows = list(rows)
+            if self._table is None:
+                return
+            self._table.setRowCount(len(self._rows))
+            for index, row in enumerate(self._rows):
                 for column, value in enumerate((row.label, row.primary,
                                                 row.secondary)):
-                    table.setItem(index, column,
-                                  QtWidgets.QTableWidgetItem(value))
-            try:
-                table.horizontalHeader().setSectionResizeMode(
-                    QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-            except AttributeError:
-                table.horizontalHeader().setSectionResizeMode(
-                    QtWidgets.QHeaderView.ResizeToContents)
+                    self._table.setItem(
+                        index, column, QtWidgets.QTableWidgetItem(str(value)))
+            self._table.resizeColumnsToContents()
 
-            buttons = QtWidgets.QDialogButtonBox()
-            try:
-                buttons.setStandardButtons(
-                    QtWidgets.QDialogButtonBox.StandardButton.Close)
-            except AttributeError:
-                buttons.setStandardButtons(QtWidgets.QDialogButtonBox.Close)
-            buttons.rejected.connect(self.reject)
+        def OnClose(self, form) -> None:
+            self._table = None
+            self.parent = None
 
-            layout = QtWidgets.QVBoxLayout(self)
-            layout.addWidget(table)
-            layout.addWidget(buttons)
+        def Show(self):
+            return ida_kernwin.PluginForm.Show(
+                self, "BinDiff - Statistics",
+                options=(ida_kernwin.PluginForm.WOPN_PERSIST
+                         | ida_kernwin.PluginForm.WCLS_SAVE
+                         | ida_kernwin.PluginForm.WOPN_RESTORE
+                         | ida_kernwin.PluginForm.WOPN_TAB),
+            )
 
     class AlgorithmConfigDialog(QtWidgets.QDialog):
         """Enable, disable, reorder and re-weight the matching algorithms.
