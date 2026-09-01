@@ -101,10 +101,38 @@ def main():
     for directory in dirs:
         ok("  searched", directory)
 
+    print("\n=== the worker subprocess (this is what failed before) ===")
+    import subprocess
+
+    from bindiff.headless import find_python_interpreter, worker_environment
+
+    interpreter = find_python_interpreter()
+    ok("interpreter", interpreter)
+    completed = subprocess.run(
+        [str(interpreter), "-m", "bindiff.headless"],
+        env=worker_environment(), capture_output=True, text=True, cwd="/")
+    output = (completed.stdout or completed.stderr or "").strip()
+    imported = "No module named" not in output
+    ok("can import bindiff", imported if imported else f"NO -- {output[:70]}",
+       good=imported)
+
+    print("\n=== menu actions ===")
+    import ida_kernwin
+
+    for name, where in (("bindiff:main", "File, Shift-D"),
+                        ("bindiff:diff_database", "the dialog"),
+                        ("bindiff:load_results", "File/Load file, Ctrl-Shift-6"),
+                        ("bindiff:show_matched", "View/BinDiff")):
+        label = ida_kernwin.get_action_label(name)
+        ok(name, f"{label!r} -> {where}" if label else "NOT REGISTERED",
+           good=bool(label))
+
     print("\n=== summary ===")
-    print("  If every line above is [ok], run Ctrl-6 -> Diff database and")
-    print("  keep clicking around the disassembly while it works. The UI")
-    print("  staying live is the property the out-of-process design buys.\n")
+    print("  If every line above is [ok]:")
+    print("    File -> BinDiff...  (or Shift-D)  -> Diff database...")
+    print("  Pick the *other* .BinExport as the secondary if you have one --")
+    print("  it is used as-is now, so only this side gets exported.")
+    print("  Then keep clicking around the disassembly while it works.\n")
 
 
 main()
