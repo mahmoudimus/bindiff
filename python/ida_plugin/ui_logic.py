@@ -236,6 +236,10 @@ class MatchFilter:
     # Rows where the other side has a real name and this side does not: work
     # done in the old database that has not reached this one.
     needs_a_name: bool = False
+    # Rows this session, or an earlier one, wrote into the primary. The
+    # complement -- what is left -- is what `needs_a_name` answers, and it
+    # answers it better, from the names themselves rather than from a flag.
+    imported: bool = False
 
     def _address_query(self) -> Optional[int]:
         return parse_address_query(self.text)
@@ -265,6 +269,8 @@ class MatchFilter:
             return False
         if previous.needs_a_name and not self.needs_a_name:
             return False
+        if previous.imported and not self.imported:
+            return False
         return text_query_narrows(previous.text, self.text)
 
     def matches(self, row: MatchRow) -> bool:
@@ -275,6 +281,8 @@ class MatchFilter:
         if self.manual_only and not row.manual:
             return False
         if self.changed_only and row.change_flags == 0:
+            return False
+        if self.imported and not row.comments_ported:
             return False
         if self.needs_a_name and not (
                 is_generated_name(row.name_primary)

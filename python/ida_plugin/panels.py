@@ -1194,6 +1194,21 @@ if IDA_AVAILABLE:
                 "brought across. Select them and import symbols to bring the "
                 "names, comments and prototypes over.")
 
+            # The one thing the view could not answer after an import:
+            # which of these did I already do. The .BinDiff's own flag, so it
+            # survives saving and reloading and a diff imported from months
+            # ago still reads as imported.
+            self._imported = QtWidgets.QCheckBox("Imported")
+            self._imported.setToolTip(
+                "Show only matches whose names and comments have been "
+                "written into this database.\n\n"
+                "Recorded in the .BinDiff, so it survives a save and a "
+                "reload, and shows in the Comments Ported column -- sort on "
+                "that column to see both groups at once. Importing types "
+                "alone does not set it.\n\n"
+                "For what is left to do, use \"Needs a name\": it reads the "
+                "names themselves rather than a flag.")
+
             self._changed_only = QtWidgets.QCheckBox("Changed only")
             self._changed_only.setToolTip(
                 "Show only matches whose two functions differ FROM EACH "
@@ -1223,6 +1238,7 @@ if IDA_AVAILABLE:
             layout.addWidget(self._min_confidence)
             layout.addWidget(self._needs_a_name)
             layout.addWidget(self._manual_only)
+            layout.addWidget(self._imported)
             layout.addWidget(self._changed_only)
 
             # Typing is debounced; the rest is not. A spinbox or a checkbox
@@ -1233,6 +1249,7 @@ if IDA_AVAILABLE:
             self._min_confidence.valueChanged.connect(self._emit)
             self._needs_a_name.toggled.connect(self._emit)
             self._manual_only.toggled.connect(self._emit)
+            self._imported.toggled.connect(self._emit)
             self._changed_only.toggled.connect(self._emit)
 
         def current_filter(self) -> MatchFilter:
@@ -1242,6 +1259,7 @@ if IDA_AVAILABLE:
                 min_confidence=self._min_confidence.value(),
                 needs_a_name=self._needs_a_name.isChecked(),
                 manual_only=self._manual_only.isChecked(),
+                imported=self._imported.isChecked(),
                 changed_only=self._changed_only.isChecked(),
             )
 

@@ -709,3 +709,40 @@ class TestOneGeneratedNamePredicate:
         for name in ("sub_401000", "loc_1", "nullsub_2", "", "real_name",
                      "resolve_goto_target", "j_sub_5", "unk_600"):
             assert _is_generated_name(name) == is_generated_name(name)
+
+
+class TestImportedFilter:
+    """The view has always had a "Comments Ported" column and nothing ever
+    wrote the flag behind it, so it was permanently empty and sorting on it
+    did nothing. The filter is the other half of making it mean something."""
+
+    def _row(self, imported):
+        from ida_plugin.ui_logic import MatchRow
+        return MatchRow(
+            match_id=1, similarity=0.9, confidence=0.9, change_flags=0,
+            address_primary=0x1000, name_primary="a",
+            address_secondary=0x2000, name_secondary="b",
+            algorithm="hash matching", manual=False,
+            comments_ported=imported, basic_blocks=1, edges=1, instructions=1)
+
+    def test_it_keeps_only_imported_rows(self):
+        from ida_plugin.ui_logic import MatchFilter
+
+        f = MatchFilter(imported=True)
+        assert f.matches(self._row(True))
+        assert not f.matches(self._row(False))
+
+    def test_unset_it_constrains_nothing(self):
+        from ida_plugin.ui_logic import MatchFilter
+
+        f = MatchFilter()
+        assert f.matches(self._row(True))
+        assert f.matches(self._row(False))
+
+    def test_turning_it_off_widens_so_the_view_refilters_from_the_top(self):
+        """narrows() decides whether the view may re-filter the rows it
+        already has. Getting this wrong hides rows that should come back."""
+        from ida_plugin.ui_logic import MatchFilter
+
+        assert MatchFilter(imported=True).narrows(MatchFilter())
+        assert not MatchFilter().narrows(MatchFilter(imported=True))

@@ -370,3 +370,40 @@ class TestRefusalsAreRecorded:
             [self._port(0x1000)], set_comment=lambda *a: True)
         assert result.applied == 1
         assert result.failed_addresses == []
+
+
+class TestAppliedMatchesAreAttributed:
+    """Counts cannot say *which* matches took something, and that is what the
+    result file has to record so the view can show it later."""
+
+    def _symbol(self, match_id, address):
+        from ida_plugin.porting import SymbolPort
+        return SymbolPort(address=address, new_name="real",
+                          old_name="sub_1000", match_id=match_id)
+
+    def test_only_the_matches_that_were_written_are_recorded(self):
+        from ida_plugin.porting import apply_symbol_ports
+
+        result = apply_symbol_ports(
+            [self._symbol(1, 0x1000), self._symbol(2, 0x2000)],
+            rename=lambda address, name: address == 0x1000)
+        assert result.applied_matches == {1}
+        assert result.failed_addresses == [0x2000]
+
+    def test_a_rename_that_raises_records_neither(self):
+        from ida_plugin.porting import apply_symbol_ports
+
+        def explode(address, name):
+            raise RuntimeError("no")
+
+        result = apply_symbol_ports([self._symbol(1, 0x1000)], rename=explode)
+        assert result.applied_matches == set()
+        assert result.failed_addresses == [0x1000]
+
+    def test_comments_attribute_to_their_match_too(self):
+        from ida_plugin.porting import CommentPort, apply_comment_ports
+
+        ports = [CommentPort(address=0x1000, text="n", secondary_address=0x1,
+                             match_id=7, kind="instruction")]
+        result = apply_comment_ports(ports, set_comment=lambda *a: True)
+        assert result.applied_matches == {7}

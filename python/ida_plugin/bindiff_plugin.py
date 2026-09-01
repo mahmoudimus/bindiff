@@ -301,6 +301,23 @@ class BinDiffController:
         return database.set_primary_names(
             {port.match_id: port.new_name for port in ports})
 
+    def mark_imported(self, match_ids) -> int:
+        """Records that these matches had something written into IDA.
+
+        The .BinDiff has one flag for this, `commentsported`, and it has
+        always meant more than its name: upstream sets it from PortComments(),
+        which ports symbols as well. Kept to that meaning rather than given a
+        column of our own -- a result file has to stay readable by the C++
+        plugin and the Java UI.
+
+        Nothing wrote it before, so the "Comments Ported" column the view has
+        always had was permanently empty and its sort did nothing.
+        """
+        ids = sorted(set(match_ids))
+        if not ids:
+            return 0
+        return self._require_writable().set_comments_ported(ids)
+
     def save(self) -> None:
         self._require_writable().commit()
 
@@ -1178,6 +1195,7 @@ if IDA_AVAILABLE:
             # Comments live in the secondary export, so ask for it before
             # reporting that they were skipped for want of a file the user
             # could have supplied.
+            self.controller.mark_imported(symbol_result.applied_matches)
             if not self._ensure_export_file(1):
                 self._report(f"{message}; comments skipped: no secondary "
                              ".BinExport was given, and comments live there"
@@ -1193,6 +1211,8 @@ if IDA_AVAILABLE:
                 self._refresh_matches()
                 return symbols
             comment_result = apply_comment_ports(comments)
+            self.controller.mark_imported(symbol_result.applied_matches
+                                          | comment_result.applied_matches)
             self._report(f"{message}; {_describe_comments(comments, comment_result)}"
                          "; not yet saved")
             # The names in the table came from the result file, which has just

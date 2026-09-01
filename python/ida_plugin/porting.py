@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import (Callable, Dict, Iterable, List, Optional, Sequence,
+                    Set)
 
 from bindiff.ida_env import database_is_open
 
@@ -258,17 +259,24 @@ class PortResult:
     # indistinguishable from one that was never planned -- which is exactly
     # the question asked when a single comment goes missing from an import.
     failed_addresses: List[int] = field(default_factory=list)
+    # The matches that took something. Counts alone cannot answer "which of
+    # these did I import", which is what the result view has to show once a
+    # selection has been imported and the next one is being chosen.
+    applied_matches: Set[int] = field(default_factory=set)
 
     @property
     def attempted(self) -> int:
         return self.applied + self.skipped + self.failed
 
-    def record(self, address: int, written: bool) -> None:
+    def record(self, port, written: bool) -> None:
+        """Counts one write. Takes the port, not an address, because what
+        happened has to be attributable to a match as well as to a place."""
         if written:
             self.applied += 1
+            self.applied_matches.add(port.match_id)
         else:
             self.failed += 1
-            self.failed_addresses.append(address)
+            self.failed_addresses.append(port.address)
 
 
 def apply_symbol_ports(ports: Sequence[SymbolPort],
@@ -287,12 +295,12 @@ def apply_symbol_ports(ports: Sequence[SymbolPort],
     result = PortResult()
     for port in ports:
         try:
-            if rename(port.address, port.new_name):
-                result.applied += 1
-            else:
-                result.failed += 1
+            written = rename(port.address, port.new_name)
         except Exception:
             result.failed += 1
+            result.failed_addresses.append(port.address)
+            continue
+        result.record(port, written)
     return result
 
 
@@ -332,7 +340,7 @@ def apply_comment_ports(ports: Sequence[CommentPort],
             result.failed += 1
             result.failed_addresses.append(port.address)
             continue
-        result.record(port.address, written)
+        result.record(port, written)
     return result
 
 
