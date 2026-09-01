@@ -177,6 +177,34 @@ class MatchFilter:
         except ValueError:
             return None
 
+    def narrows(self, previous: "MatchFilter") -> bool:
+        """True when this filter can only accept a subset of `previous`.
+
+        Lets the view re-filter the rows it already has rather than all of
+        them. On a 5956-row diff, typing "acrt" is otherwise four passes over
+        everything, one per keystroke.
+
+        Every bound must be at least as strict and the text must extend the
+        previous text -- and there is one exception that makes the whole idea
+        unsound if it is missed. `text` matches names by substring but matches
+        addresses *exactly*, and exact matching does not narrow: a row at
+        0x401 does not match "40" and does match "401", so extending the query
+        adds it. Whenever either text parses as an address this returns False
+        and the caller filters from the top.
+        """
+        if self.min_similarity < previous.min_similarity:
+            return False
+        if self.min_confidence < previous.min_confidence:
+            return False
+        if previous.manual_only and not self.manual_only:
+            return False
+        if previous.changed_only and not self.changed_only:
+            return False
+        if not self.text.startswith(previous.text):
+            return False
+        return (self._address_query() is None
+                and previous._address_query() is None)
+
     def matches(self, row: MatchRow) -> bool:
         if row.similarity < self.min_similarity:
             return False
@@ -195,6 +223,34 @@ class MatchFilter:
         address = self._address_query()
         return address is not None and address in (
             row.address_primary, row.address_secondary)
+
+
+def cell_values(row: MatchRow) -> tuple:
+    """One row's cells, in COLUMNS order.
+
+    Here rather than in the Qt table so the formatting is testable without a
+    GUI, and so the model that renders it stays a thin adapter.
+    """
+    return (
+        f"{row.similarity:.2f}",
+        f"{row.confidence:.2f}",
+        row.change_text,
+        format_address(row.address_primary),
+        row.name_primary,
+        format_address(row.address_secondary),
+        row.name_secondary,
+        row.algorithm,
+        "yes" if row.comments_ported else "",
+        str(row.basic_blocks),
+        str(row.basic_blocks_primary),
+        str(row.basic_blocks_secondary),
+        str(row.instructions),
+        str(row.instructions_primary),
+        str(row.instructions_secondary),
+        str(row.edges),
+        str(row.edges_primary),
+        str(row.edges_secondary),
+    )
 
 
 def filter_rows(rows: Iterable[MatchRow],

@@ -29,6 +29,7 @@ from ida_plugin.ui_logic import (
     MatchRow,
     StatisticRow,
     describe_change_flags,
+    cell_values,
     filter_rows,
     format_address,
     similarity_color,
@@ -113,7 +114,92 @@ if IDA_AVAILABLE:
             self.chosen = callback
             self.accept()
 
-    class MatchTable(QtWidgets.QTableWidget):
+    class MatchTableModel(QtCore.QAbstractTableModel):
+        """Serves MatchRow objects to a view on demand.
+
+        The table was a QTableWidget, which materialises a QTableWidgetItem
+        per cell: 5956 rows by 18 columns is 107,208 widgets built on every
+        repopulate, and the filter box repopulated on every keystroke. A model
+        builds nothing. The view asks for the cells it is about to paint --
+        thirty-odd rows -- and asks again when you scroll.
+
+        Formatting lives in ui_logic.cell_values so it stays testable without
+        a GUI; this class is the adapter and nothing more.
+        """
+
+        def __init__(self, parent=None) -> None:
+            super().__init__(parent)
+            self._rows: List[MatchRow] = []
+            # data() is called once per visible cell, so the same row is
+            # formatted eighteen times in a row. One slot of memory removes
+            # seventeen of those.
+            self._cached_index = -1
+            self._cached_values: tuple = ()
+
+        # -- Qt model interface ---------------------------------------------
+
+        def rowCount(self, parent=None) -> int:
+            if parent is not None and parent.isValid():
+                return 0
+            return len(self._rows)
+
+        def columnCount(self, parent=None) -> int:
+            if parent is not None and parent.isValid():
+                return 0
+            return len(COLUMNS)
+
+        def _values(self, index: int) -> tuple:
+            if index != self._cached_index:
+                self._cached_index = index
+                self._cached_values = cell_values(self._rows[index])
+            return self._cached_values
+
+        def data(self, index, role=None):
+            if not index.isValid():
+                return None
+            if role is None:
+                role = Qt.DisplayRole
+            position = index.row()
+            if position >= len(self._rows):
+                return None
+            row = self._rows[position]
+
+            if role == Qt.DisplayRole:
+                return self._values(position)[index.column()]
+            if role == Qt.BackgroundRole and index.column() == 0:
+                return QtGui.QBrush(
+                    QtGui.QColor(*similarity_color(row.similarity)))
+            if role == Qt.ToolTipRole and index.column() == 2:
+                changed = describe_change_flags(row.change_flags)
+                return ", ".join(changed) if changed else "No changes"
+            if role == Qt.FontRole and row.manual:
+                font = QtGui.QFont()
+                font.setBold(True)
+                return font
+            return None
+
+        def headerData(self, section, orientation, role=None):
+            if role is None:
+                role = Qt.DisplayRole
+            if role != Qt.DisplayRole or orientation != Qt.Horizontal:
+                return None
+            if 0 <= section < len(COLUMNS):
+                return COLUMNS[section][1]
+            return None
+
+        # -- our interface ---------------------------------------------------
+
+        def set_rows(self, rows: Sequence[MatchRow]) -> None:
+            self.beginResetModel()
+            self._rows = list(rows)
+            self._cached_index = -1
+            self.endResetModel()
+
+        @property
+        def rows(self) -> List[MatchRow]:
+            return self._rows
+
+    class MatchTable(QtWidgets.QTableView):
         """The matched-functions table.
 
         Sorting is done in ui_logic rather than by Qt so the order is the same
@@ -121,8 +207,9 @@ if IDA_AVAILABLE:
         """
 
         def __init__(self, parent=None) -> None:
-            super().__init__(0, len(COLUMNS), parent)
-            self.setHorizontalHeaderLabels([label for _, label in COLUMNS])
+            super().__init__(parent)
+            self._model = MatchTableModel(self)
+            self.setModel(self._model)
             self.setEditTriggers(_no_edit_triggers())
             self.setSelectionBehavior(_select_rows())
             self.setSelectionMode(_extended_selection())
@@ -138,11 +225,10 @@ if IDA_AVAILABLE:
             header.setSectionsClickable(True)
             header.sectionClicked.connect(self._on_header_clicked)
 
-            self._rows: List[MatchRow] = []
             self._sort_column = "similarity"
             self._sort_descending = True
             self.on_activated: Optional[Callable[[MatchRow], None]] = None
-            self.cellDoubleClicked.connect(self._on_double_clicked)
+            self.doubleClicked.connect(self._on_double_clicked)
 
             # Context menu entries name IDA actions, so they stay in one
             # place: registered once, reachable from the plugin menu and from
@@ -249,12 +335,17 @@ if IDA_AVAILABLE:
                 ida_kernwin.process_ui_action(chosen.data())
 
         def set_rows(self, rows: Sequence[MatchRow]) -> None:
-            self._rows = sort_rows(rows, self._sort_column, self._sort_descending)
-            self._repopulate()
+            self._model.set_rows(
+                sort_rows(rows, self._sort_column, self._sort_descending))
+
+        @property
+        def _rows(self) -> List[MatchRow]:
+            return self._model.rows
 
         def selected_rows(self) -> List[MatchRow]:
+            rows = self._model.rows
             indexes = {index.row() for index in self.selectedIndexes()}
-            return [self._rows[i] for i in sorted(indexes) if i < len(self._rows)]
+            return [rows[i] for i in sorted(indexes) if i < len(rows)]
 
         def _on_header_clicked(self, section: int) -> None:
             column = COLUMNS[section][0]
@@ -264,49 +355,12 @@ if IDA_AVAILABLE:
                 self._sort_column = column
                 # Scores read best highest-first; names and addresses ascending.
                 self._sort_descending = column in ("similarity", "confidence")
-            self.set_rows(self._rows)
+            self.set_rows(self._model.rows)
 
-        def _on_double_clicked(self, row: int, _column: int) -> None:
-            if self.on_activated and 0 <= row < len(self._rows):
-                self.on_activated(self._rows[row])
-
-        def _repopulate(self) -> None:
-            self.setRowCount(len(self._rows))
-            for index, row in enumerate(self._rows):
-                values = (
-                    f"{row.similarity:.2f}",
-                    f"{row.confidence:.2f}",
-                    row.change_text,
-                    format_address(row.address_primary),
-                    row.name_primary,
-                    format_address(row.address_secondary),
-                    row.name_secondary,
-                    row.algorithm,
-                    "yes" if row.comments_ported else "",
-                    str(row.basic_blocks),
-                    str(row.basic_blocks_primary),
-                    str(row.basic_blocks_secondary),
-                    str(row.instructions),
-                    str(row.instructions_primary),
-                    str(row.instructions_secondary),
-                    str(row.edges),
-                    str(row.edges_primary),
-                    str(row.edges_secondary),
-                )
-                for column, value in enumerate(values):
-                    item = QtWidgets.QTableWidgetItem(value)
-                    if column == 0:
-                        item.setBackground(QtGui.QBrush(QtGui.QColor(
-                            *similarity_color(row.similarity))))
-                    if column == 2:
-                        changed = describe_change_flags(row.change_flags)
-                        item.setToolTip(
-                            ", ".join(changed) if changed else "No changes")
-                    if row.manual:
-                        font = item.font()
-                        font.setBold(True)
-                        item.setFont(font)
-                    self.setItem(index, column, item)
+        def _on_double_clicked(self, index) -> None:
+            rows = self._model.rows
+            if self.on_activated and index.isValid() and index.row() < len(rows):
+                self.on_activated(rows[index.row()])
 
 
 
@@ -678,7 +732,17 @@ if IDA_AVAILABLE:
             layout.addWidget(self._manual_only)
             layout.addWidget(self._changed_only)
 
-            self._text.textChanged.connect(self._emit)
+            # Typing is debounced; the rest is not. A keystroke arrives every
+            # few tens of milliseconds and each one would otherwise re-filter
+            # and repaint, so "acrt" costs four passes to show a result nobody
+            # read on the way. A spinbox or a checkbox is one deliberate act
+            # and answers immediately.
+            self._debounce = QtCore.QTimer(self)
+            self._debounce.setSingleShot(True)
+            self._debounce.setInterval(150)
+            self._debounce.timeout.connect(self._emit)
+
+            self._text.textChanged.connect(lambda _t: self._debounce.start())
             self._min_similarity.valueChanged.connect(self._emit)
             self._min_confidence.valueChanged.connect(self._emit)
             self._manual_only.toggled.connect(self._emit)
@@ -718,6 +782,8 @@ if IDA_AVAILABLE:
             self.parent = self.FormToPyQtWidget(form)
             layout = QtWidgets.QVBoxLayout(self.parent)
 
+            self._last_filter: Optional[MatchFilter] = None
+            self._last_visible: List[MatchRow] = []
             self._filter_bar = FilterBar(self._apply_filter)
             self._table = MatchTable()
             self._table.on_activated = self._activate
@@ -737,13 +803,38 @@ if IDA_AVAILABLE:
 
         def set_rows(self, rows: Sequence[MatchRow]) -> None:
             self._all_rows = list(rows)
+            # New data, so the cached result narrowing would build on no
+            # longer describes anything.
+            self._invalidate_filter_cache()
             if self._table is not None:
                 self._apply_filter(self._filter_bar.current_filter())
+
+        def _invalidate_filter_cache(self) -> None:
+            """Forgets the narrowing base.
+
+            Called whenever the underlying rows change: narrowing filters the
+            *previous result*, so a stale base would quietly hide rows that
+            the new data contains.
+            """
+            self._last_filter = None
+            self._last_visible = []
 
         def _apply_filter(self, match_filter: MatchFilter) -> None:
             if self._table is None:
                 return
-            visible = filter_rows(self._all_rows, match_filter)
+            # Filter the previous result when this filter can only accept a
+            # subset of it, which is the common case: extending a query.
+            # narrows() carries the conditions, including the one that makes
+            # it unsound -- a text that parses as an address matches exactly
+            # rather than by substring, so extending it can add a row.
+            if (self._last_filter is not None
+                    and match_filter.narrows(self._last_filter)):
+                source = self._last_visible
+            else:
+                source = self._all_rows
+            visible = filter_rows(source, match_filter)
+            self._last_filter = match_filter
+            self._last_visible = visible
             self._table.set_rows(visible)
             if self._status is not None:
                 self._status.setText(

@@ -422,3 +422,90 @@ class TestColumnVisibility:
         assert len(visibility.visible_columns()) == len(COLUMNS)
         visibility.reset()
         assert len(visibility.visible_columns()) < len(COLUMNS)
+
+
+class TestCellValues:
+    def test_one_value_per_column(self):
+        from ida_plugin.ui_logic import COLUMNS, cell_values
+        row = _match_row()
+        assert len(cell_values(row)) == len(COLUMNS)
+
+    def test_scores_are_two_decimals_and_addresses_are_hex(self):
+        from ida_plugin.ui_logic import cell_values
+        values = cell_values(_match_row(similarity=1.0, confidence=0.985,
+                                        address_primary=0x401000))
+        assert values[0] == "1.00"
+        assert values[1] == "0.98"
+        assert "401000" in values[3].lower()
+
+
+class TestNarrowing:
+    """Re-filtering the previous result instead of every row.
+
+    Unsound in one case, and the case is easy to miss: text matches names by
+    substring but addresses exactly, so extending the query can *add* a row.
+    """
+
+    def test_extending_the_text_narrows(self):
+        from ida_plugin.ui_logic import MatchFilter
+        assert MatchFilter(text="acrt_x").narrows(MatchFilter(text="acrt"))
+
+    def test_starting_from_nothing_narrows(self):
+        from ida_plugin.ui_logic import MatchFilter
+        assert MatchFilter(text="acrt").narrows(MatchFilter())
+
+    def test_a_different_text_does_not(self):
+        from ida_plugin.ui_logic import MatchFilter
+        assert not MatchFilter(text="zzz").narrows(MatchFilter(text="acrt"))
+
+    def test_deleting_a_character_does_not(self):
+        from ida_plugin.ui_logic import MatchFilter
+        assert not MatchFilter(text="acr").narrows(MatchFilter(text="acrt"))
+
+    def test_a_hex_query_never_narrows(self):
+        """0x401 does not match "40" and does match "401": extending the
+        query adds the row, so the previous result is not a superset."""
+        from ida_plugin.ui_logic import MatchFilter
+        assert not MatchFilter(text="401").narrows(MatchFilter(text="40"))
+        assert not MatchFilter(text="beef").narrows(MatchFilter(text="bee"))
+
+    def test_a_loosened_threshold_does_not(self):
+        from ida_plugin.ui_logic import MatchFilter
+        assert not MatchFilter(min_similarity=0.1).narrows(
+            MatchFilter(min_similarity=0.5))
+
+    def test_a_tightened_threshold_does(self):
+        from ida_plugin.ui_logic import MatchFilter
+        assert MatchFilter(min_similarity=0.9).narrows(
+            MatchFilter(min_similarity=0.5))
+
+    def test_dropping_a_flag_does_not(self):
+        from ida_plugin.ui_logic import MatchFilter
+        assert not MatchFilter().narrows(MatchFilter(manual_only=True))
+        assert not MatchFilter().narrows(MatchFilter(changed_only=True))
+
+    def test_narrowing_agrees_with_filtering_from_scratch(self):
+        """The property that matters: when narrows() says yes, filtering the
+        previous result must equal filtering everything."""
+        from ida_plugin.ui_logic import MatchFilter, filter_rows
+        rows = [_match_row(match_id=i, name_primary=n, similarity=s)
+                for i, (n, s) in enumerate(
+                    [("acrt_add_locale", 1.0), ("acrt_free", 0.9),
+                     ("zzz_other", 0.4), ("acrt_zzz", 0.7)])]
+        previous, current = MatchFilter(text="acrt"), MatchFilter(text="acrt_z")
+        assert current.narrows(previous)
+        assert (filter_rows(filter_rows(rows, previous), current)
+                == filter_rows(rows, current))
+
+
+def _match_row(**overrides):
+    """A MatchRow with every field defaulted, for tests that care about one."""
+    from ida_plugin.ui_logic import MatchRow
+    fields = dict(match_id=1, similarity=1.0, confidence=1.0, change_flags=0,
+                  address_primary=0x401000, name_primary="a",
+                  address_secondary=0x501000, name_secondary="b",
+                  algorithm="hash matching", manual=False,
+                  comments_ported=False, basic_blocks=1, edges=1,
+                  instructions=1)
+    fields.update(overrides)
+    return MatchRow(**fields)
