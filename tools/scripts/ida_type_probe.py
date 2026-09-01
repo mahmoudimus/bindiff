@@ -124,6 +124,54 @@ def probe_local_types():
         if shown >= 5:
             break
 
+    print("\n=== print_decls: the purpose-built way to dump a local type ===")
+    import idc
+
+    ordinal = None
+    for candidate in range(1, count + 1):
+        if ida_typeinf.get_numbered_type_name(til, candidate) == "mblock_t":
+            ordinal = candidate
+            break
+    if ordinal is None:
+        line("mblock_t", "not a local type here")
+        return
+
+    line("mblock_t ordinal", ordinal)
+    for label, flags in (
+            ("plain", 0),
+            ("PDF_INCL_DEPS", getattr(idc, "PDF_INCL_DEPS", 1)),
+            ("PDF_INCL_DEPS|PDF_DEF_FWD",
+             getattr(idc, "PDF_INCL_DEPS", 1) | getattr(idc, "PDF_DEF_FWD", 2)),
+    ):
+        try:
+            text = idc.print_decls(str(ordinal), flags)
+        except Exception as exc:
+            line(f"print_decls {label}", f"failed: {exc}")
+            continue
+        text = (text or "").strip()
+        line(f"print_decls {label}", f"{len(text)} chars")
+        for row in text.splitlines()[:8]:
+            print(f"      {row}")
+        if len(text.splitlines()) > 8:
+            print(f"      ... {len(text.splitlines()) - 8} more lines")
+
+    print("\n  -- the flags that print a definition rather than a name --")
+    info = ida_typeinf.tinfo_t()
+    info.get_numbered_type(til, ordinal)
+    for label, flags in (
+            ("MULTI|TYPE|SEMI",
+             ida_typeinf.PRTYPE_MULTI | ida_typeinf.PRTYPE_TYPE
+             | ida_typeinf.PRTYPE_SEMI),
+            ("MULTI|TYPE|SEMI|DEF",
+             ida_typeinf.PRTYPE_MULTI | ida_typeinf.PRTYPE_TYPE
+             | ida_typeinf.PRTYPE_SEMI | getattr(ida_typeinf, "PRTYPE_DEF", 0)),
+    ):
+        try:
+            out = info._print("mblock_t", flags) or ""
+        except Exception as exc:
+            out = f"failed: {exc}"
+        line(f"_print {label}", " ".join(out.split())[:90])
+
     print(f"\n  -- is mblock_t among them? --")
     for ordinal in range(1, count + 1):
         if ida_typeinf.get_numbered_type_name(til, ordinal) == "mblock_t":
