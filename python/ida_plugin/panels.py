@@ -57,6 +57,30 @@ if IDA_AVAILABLE:
     from bindiff.qt_shim import (Qt, QtCore, QtGui, QtWidgets,
                              exec_widget)
 
+    def _set_interactive(header) -> None:
+        """Columns the user can drag, spelled for either Qt binding."""
+        try:
+            header.setSectionResizeMode(
+                QtWidgets.QHeaderView.ResizeMode.Interactive)
+        except AttributeError:
+            header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+
+    class _SizesColumnsOnce:
+        """Sizes columns to their contents the first time rows arrive.
+
+        Once only: doing it on every set_rows would undo a width the user had
+        dragged, every time the filter box changed the visible set. The point
+        of Interactive columns is that the widths are theirs after that.
+        """
+
+        def _size_columns_once(self) -> None:
+            if getattr(self, "_columns_sized", False):
+                return
+            if not self._model.rows:
+                return
+            self._columns_sized = True
+            self.resizeColumnsToContents()
+
     def show_action_menu(view, actions, on_action, position) -> None:
         """Pops up a menu of IDA action names and runs the chosen one.
 
@@ -243,7 +267,7 @@ if IDA_AVAILABLE:
         def rows(self) -> List[MatchRow]:
             return self._rows
 
-    class MatchTable(QtWidgets.QTableView):
+    class MatchTable(_SizesColumnsOnce, QtWidgets.QTableView):
         """The matched-functions table.
 
         Sorting is done in ui_logic rather than by Qt so the order is the same
@@ -261,11 +285,14 @@ if IDA_AVAILABLE:
             self.verticalHeader().setVisible(False)
 
             header = self.horizontalHeader()
-            try:
-                header.setSectionResizeMode(
-                    QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-            except AttributeError:
-                header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+            # Interactive, not ResizeToContents. ResizeToContents locks the
+            # header: the columns are sized for the widest cell and cannot be
+            # dragged, so one long mangled name makes its column
+            # unmanageable and there is nothing to be done about it.
+            # Interactive plus a one-off sizing gives sensible defaults that
+            # can then be changed.
+            _set_interactive(header)
+            header.setStretchLastSection(True)
             header.setSectionsClickable(True)
             header.sectionClicked.connect(self._on_header_clicked)
 
@@ -358,6 +385,7 @@ if IDA_AVAILABLE:
         def set_rows(self, rows: Sequence[MatchRow]) -> None:
             self._model.set_rows(
                 sort_rows(rows, self._sort_column, self._sort_descending))
+            self._size_columns_once()
 
         @property
         def _rows(self) -> List[MatchRow]:
@@ -534,7 +562,7 @@ if IDA_AVAILABLE:
         def rows(self) -> List[UnmatchedRow]:
             return self._rows
 
-    class UnmatchedTable(QtWidgets.QTableView):
+    class UnmatchedTable(_SizesColumnsOnce, QtWidgets.QTableView):
         """Functions on one side that no match refers to."""
 
         def __init__(self, parent=None) -> None:
@@ -552,11 +580,14 @@ if IDA_AVAILABLE:
             self.setWordWrap(False)
 
             header = self.horizontalHeader()
-            try:
-                header.setSectionResizeMode(
-                    QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-            except AttributeError:
-                header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+            # Interactive, not ResizeToContents. ResizeToContents locks the
+            # header: the columns are sized for the widest cell and cannot be
+            # dragged, so one long mangled name makes its column
+            # unmanageable and there is nothing to be done about it.
+            # Interactive plus a one-off sizing gives sensible defaults that
+            # can then be changed.
+            _set_interactive(header)
+            header.setStretchLastSection(True)
             header.setSectionsClickable(True)
             header.sectionClicked.connect(self._on_header_clicked)
 
@@ -580,6 +611,7 @@ if IDA_AVAILABLE:
         def set_rows(self, rows: Sequence[UnmatchedRow]) -> None:
             self._model.set_rows(
                 sort_unmatched(rows, self._sort_column, self._sort_descending))
+            self._size_columns_once()
 
         @property
         def _rows(self) -> List[UnmatchedRow]:
@@ -648,9 +680,19 @@ if IDA_AVAILABLE:
             self._cancel.setEnabled(self._on_cancel is not None)
             self._cancel.clicked.connect(self._request_cancel)
 
+            # Appears only once there is nothing left to watch. While a diff
+            # runs the panel is the only thing reporting it, so there is
+            # nothing to offer to hide.
+            self._hide = QtWidgets.QPushButton("Hide")
+            self._hide.setToolTip(
+                "Close this panel. The results stay open.")
+            self._hide.clicked.connect(lambda: self.Close(0))
+            self._hide.setVisible(False)
+
             buttons = QtWidgets.QHBoxLayout()
             buttons.addWidget(self._elapsed)
             buttons.addStretch(1)
+            buttons.addWidget(self._hide)
             buttons.addWidget(self._cancel)
 
             layout.addWidget(self._status)
@@ -714,6 +756,7 @@ if IDA_AVAILABLE:
             self._bar.setRange(0, 100)
             self._bar.setValue(100)
             self._cancel.setEnabled(False)
+            self._hide.setVisible(True)
             self._detail.setText(message)
             self._elapsed.setText(
                 f"Took {format_elapsed(time.monotonic() - self._started)}")
@@ -822,14 +865,35 @@ if IDA_AVAILABLE:
             self._min_confidence.setSingleStep(0.05)
             self._min_confidence.setDecimals(2)
 
+            # Both of these were opaque: the labels name a property of a
+            # match without saying which, and neither is guessable.
             self._manual_only = QtWidgets.QCheckBox("Manual only")
+            self._manual_only.setToolTip(
+                "Show only matches you made or confirmed by hand.\n"
+                "The engine's own matches are hidden. A confirmed match "
+                "reads as manual, which is why the Algorithm column changes "
+                "to \"function: manual\" after confirming.")
             self._changed_only = QtWidgets.QCheckBox("Changed only")
+            self._changed_only.setToolTip(
+                "Show only matches whose two functions differ.\n"
+                "Hides pairs that came out identical, so what is left is the "
+                "work. The Change column spells out how: instructions, "
+                "operands, branch inversion, loops, calls, entry point.")
 
             layout = QtWidgets.QHBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(self._text, 1)
             layout.addWidget(QtWidgets.QLabel("Min similarity"))
             layout.addWidget(self._min_similarity)
+            self._min_similarity.setToolTip(
+                "Hide matches below this similarity.\n"
+                "Similarity is how alike the two functions are; the column "
+                "is coloured by it.")
+            self._min_confidence.setToolTip(
+                "Hide matches below this confidence.\n"
+                "Confidence is how much the engine trusts the pairing, and "
+                "is mostly decided by how well the basic blocks matched "
+                "rather than by which algorithm found it.")
             layout.addWidget(QtWidgets.QLabel("Min confidence"))
             layout.addWidget(self._min_confidence)
             layout.addWidget(self._manual_only)
