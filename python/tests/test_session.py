@@ -194,6 +194,14 @@ class TestOpening:
         with pytest.raises(FileNotFoundError):
             session.unmatched(1)
 
+    def test_locating_an_export_updates_the_counts_without_losing_edits(self, session):
+        session.open_result("/tmp/x.BinDiff")
+        session.unmatch([1])
+        session.controller.set_binexports("p", "s")
+        session.exports_located()
+        assert session.meta.only_there == 1
+        assert session.edits == 1
+
     def test_close_returns_to_idle(self, session):
         session.open_result("/tmp/x.BinDiff")
         recorder = Recorder(session)

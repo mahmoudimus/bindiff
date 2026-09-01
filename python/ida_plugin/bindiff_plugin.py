@@ -1,14 +1,19 @@
 """BinDiff plugin for IDA Pro.
 
-Replaces the four ida_kernwin.Choose lists with Qt views. The choosers could
-not filter, could not sort on anything but the column IDA happened to give
-them, and could not show two values side by side without string padding.
+Six PluginForms and four ida_kernwin.Choose lists collapsed into one dock tab
+and its companion inspector. The choosers could not filter, could not sort on
+anything but the column IDA happened to give them, and could not show two
+values side by side without string padding; the six forms each carried their
+own copy of what was open and each learned about a change separately.
 
 Structure:
 
-    ui_logic.py   pure view logic, no Qt and no IDA -- tested headless
-    controller.py the data layer over the .BinDiff and its exports, no Qt
-    panels.py     Qt views, defined only when IDA is importable
+    ui_logic.py, trust.py, query.py, lenses.py, inspection.py, theme.py
+                  pure view logic, no Qt and no IDA -- tested headless
+    controller.py the data layer over the .BinDiff and the exports
+    session.py    DiffSession: the one owner of every fact the UI shows
+    panels.py     the two tables, the flow graph, the algorithm editor
+    workbench.py  the dock tab that is the plugin; inspector.py its companion
     this file     plugin lifecycle, actions, and the IDA-side glue
 
 Data comes from bindiff.BinDiffDatabase, which reads and writes the .BinDiff
@@ -23,7 +28,7 @@ import contextlib
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 # IDA loads this file as a top-level script, not as a package member, so
 # `from ida_plugin.panels import ...` fails here with "no known parent package". Putting
@@ -42,30 +47,6 @@ from bindiff.ida_env import qt_widgets_usable
 IDA_AVAILABLE = qt_widgets_usable()
 
 from ida_plugin.controller import BinDiffController, _describe_comments  # noqa: E402,F401
-
-
-def _describe_symbols(planned, result, replaced: int, skips) -> str:
-    """The names half of an import.
-
-    Leads with what happened rather than with a count, because a selection
-    that is already fully named is the common case once you have imported
-    once, and "renamed 0 function(s)" reads as a failure of the thing that
-    was in fact unnecessary.
-    """
-    if result.applied:
-        text = f"{result.applied} written"
-        if replaced:
-            text += f" ({replaced} replaced an existing name)"
-    elif planned:
-        text = "none written"
-    else:
-        text = "nothing to write"
-    if result.failed:
-        text += f", {result.failed} failed"
-    if skips:
-        text += " -- " + ", ".join(f"{count} {reason}"
-                                   for reason, count in sorted(skips.items()))
-    return text
 
 
 if IDA_AVAILABLE:
@@ -108,6 +89,12 @@ ACTION_CONFIGURE = "bindiff:configure_algorithms"
 
 
 if IDA_AVAILABLE:
+    from ida_plugin import session as actions
+    from ida_plugin.porting import (DEFAULT_PORT_MIN_CONFIDENCE,
+                                    DEFAULT_PORT_MIN_SIMILARITY, PortLedger)
+    from ida_plugin.session import DiffSession, State
+    from ida_plugin.ui_logic import (STATE_IMPORTED, STATE_PORTED,
+                                     STATE_REPLACED)
 
     def _ask_for_database() -> Optional[str]:
         path = ida_kernwin.ask_file(False, "*.BinDiff",
@@ -125,33 +112,29 @@ if IDA_AVAILABLE:
     class _Action(ida_kernwin.action_handler_t):
         """Wraps a plain callable so each action is not its own class."""
 
-        def __init__(self, callback, enabled=None) -> None:
+        def __init__(self, callback) -> None:
             super().__init__()
             self._callback = callback
-            self._enabled = enabled
 
         def activate(self, ctx) -> int:
             self._callback()
             return 1
 
         def update(self, ctx) -> int:
-            """Whether the action is available right now.
+            """Always available, as far as IDA is concerned.
 
-            The _ALWAYS variants mean what they say: IDA records the answer
-            and stops calling update(). Returning AST_DISABLE_ALWAYS for an
-            action that is merely unavailable *yet* disables it for the life
-            of the session -- which is what happened to every view action
-            here. They were greyed before a result existed, IDA never asked
-            again, and loading one changed nothing: Matched functions,
-            Statistics and both unmatched lists stayed unreachable.
+            Availability is the session's answer and it changes constantly:
+            what is selected, whether a result is open, whether a comparison
+            is running. IDA's own action state cannot express that. The
+            _ALWAYS variants mean what they say -- IDA records the answer and
+            stops asking -- so an action reported unavailable *yet* stayed
+            unavailable for the life of the session, which is what left four
+            views permanently greyed.
 
-            AST_ENABLE and AST_DISABLE are the ones that get re-asked.
+            So every action is enabled here and every handler asks the
+            session first, reporting one line when the answer is no.
             """
-            if self._enabled is None:
-                # Genuinely always available, so there is nothing to re-ask.
-                return ida_kernwin.AST_ENABLE_ALWAYS
-            return (ida_kernwin.AST_ENABLE if self._enabled()
-                    else ida_kernwin.AST_DISABLE)
+            return ida_kernwin.AST_ENABLE_ALWAYS
 
     class BinDiffPlugin(ida_idaapi.plugin_t):
         flags = ida_idaapi.PLUGIN_PROC | ida_idaapi.PLUGIN_FIX
@@ -163,19 +146,33 @@ if IDA_AVAILABLE:
         def __init__(self) -> None:
             super().__init__()
             self.controller = BinDiffController()
-            self._registered: list[str] = []
+            # One session over that one controller. Every view reads it and
+            # every handler writes through it; nothing here keeps a second
+            # copy of what is open.
+            self.session = DiffSession(self.controller)
+            self.workbench = None
+            self.inspector = None
+            self._registered: list = []
             # Kept alive: a GraphViewer that is garbage collected takes its
             # window with it.
             self._graph_viewers: list = []
+            self._cancel_event = None
+            self._autosave_timer = None
+            # The worker's StageResult, so `load` can tell a partial result
+            # from a complete one. Set on the diff thread, read on the UI
+            # thread after the worker has returned.
+            self._last_result = None
 
         # -- lifecycle ------------------------------------------------------
 
-        _control_panel = None
-        _cancel_event = None
-        _autosave_timer = None
-
         def init(self):
+            from ida_plugin.workbench import AUTOSAVE_SECONDS
+
             self._register_actions()
+            # The strip's toggle starts checked and only *reports* changes, so
+            # unless the timer is started here the default is a tick nobody
+            # made and a checkbox that lies.
+            self._set_autosave(True, AUTOSAVE_SECONDS)
             return ida_idaapi.PLUGIN_KEEP
 
         def term(self) -> None:
@@ -188,225 +185,120 @@ if IDA_AVAILABLE:
             self.controller.close()
 
         def run(self, arg) -> bool:
-            self._show_control_panel()
+            self._open_workbench()
             return True
 
-        def _show_control_panel(self) -> None:
-            """The plugin's front door.
+        # -- the two forms ---------------------------------------------------
 
-            A panel rather than a modal chooser: the actions stay on screen
-            while you work, and their enabled state is ours rather than
-            IDA's -- which is what left three of the four views greyed for a
-            whole session.
+        def handlers(self) -> dict:
+            """The contract between this object and the two forms.
+
+            One dict, handed to both: a form calls a key, this object decides
+            whether the session permits it and does it. Nothing in a form
+            reaches into the controller, and nothing here reaches into a
+            widget except through the two entry points below.
             """
-            from ida_plugin.panels import ControlPanel
+            return {
+                "compare": self._compare,
+                "cancel": self._cancel,
+                "browse": self._browse,
+                "configure": self._configure,
+                "save": self._save,
+                "close": self._close,
+                "unmatch": self._unmatch,
+                "verify": self._verify,
+                "port": self._port,
+                "restore_name": self._restore_name,
+                "pair": self._pair,
+                "graphs": self._graphs,
+                "inspect": self._inspect,
+                "copy_here": lambda: self._copy(0),
+                "copy_there": lambda: self._copy(1),
+                "locate_export": self._locate_export,
+                "jump": _jump_to,
+                "autosave": self._set_autosave,
+                "threshold": (lambda t: self.inspector.set_threshold(t)
+                              if self.inspector is not None else None),
+            }
 
-            if self._control_panel is None:
-                self._control_panel = ControlPanel({
-                    "on_diff": lambda path: self._diff_database(secondary=path),
-                    "on_load": self._load_results,
-                    "on_save": self._save_results,
-                    "on_cancel": self._cancel_running_diff,
-                    "on_show": self._show_view,
-                    "on_autosave": self._set_autosave,
-                })
-            self._control_panel.Show()
-            self._sync_control_panel()
+        def _the_workbench(self):
+            """The dock tab, created on first use and kept.
 
-        def _set_autosave(self, enabled: bool, seconds: int) -> None:
-            """Starts or stops the auto-save timer.
-
-            The timer lives here rather than on the panel so hiding the panel
-            does not silently stop saving. A checkbox that stops working when
-            its window is closed is worse than no checkbox.
+            Kept rather than rebuilt: it is the subscriber list on the
+            session, and a second one would draw the same result twice.
             """
-            from bindiff.qt_shim import QtCore
+            from ida_plugin.workbench import Workbench
 
-            if self._autosave_timer is None:
-                self._autosave_timer = QtCore.QTimer()
-                self._autosave_timer.timeout.connect(self._autosave_tick)
-            self._autosave_timer.stop()
-            if enabled:
-                self._autosave_timer.setInterval(max(5, int(seconds)) * 1000)
-                self._autosave_timer.start()
+            if self.workbench is None:
+                self.workbench = Workbench(self.session, self.handlers())
+            return self.workbench
 
-        def _autosave_tick(self) -> None:
-            """Commits, but only when there is something to commit.
+        def _open_workbench(self) -> None:
+            self._the_workbench().show_scope("matches")
 
-            Asking the connection rather than tracking a flag: sqlite knows
-            whether a write has happened since the last commit, and a flag of
-            our own would go stale the first time a new edit method forgot to
-            set it. It also keeps this quiet -- a timer that reported "saved"
-            every minute with nothing to save would train you to ignore it.
-            """
-            database = getattr(self.controller, "database", None)
-            if database is None or not database.has_unsaved_changes:
+        def _show_scope(self, key: str) -> None:
+            self._the_workbench().show_scope(key)
+
+        def _inspect(self) -> None:
+            if not self._allowed(actions.INSPECT):
                 return
-            try:
-                self.controller.save()
-            except Exception as exc:
-                # Stop rather than fail on a timer forever: a broken save that
-                # complains once a minute is its own problem.
-                self._set_autosave(False, 0)
-                ida_kernwin.warning(
-                    f"{PLUGIN_NAME}: auto-save failed and has been turned "
-                    f"off.\n\n{exc}")
-                return
-            self._report("auto-saved")
+            from ida_plugin.inspector import InspectorForm
 
-        def _show_view(self, key: str) -> None:
-            {"matched": self._show_matches,
-             "statistics": self._show_statistics,
-             "primary_unmatched": self._show_primary_unmatched,
-             "secondary_unmatched": self._show_secondary_unmatched}[key]()
-
-        def _cancel_running_diff(self) -> None:
-            if self._cancel_event is not None:
-                self._cancel_event.set()
-
-        def _sync_control_panel(self) -> None:
-            """Tells the panel whether there are results. Pushed, not polled:
-            the panel must not reach into the controller."""
-            if self._control_panel is None:
-                return
-            loaded = self.controller.loaded
-            path = matches = secondary = None
-            if loaded:
-                database = self.controller.database
-                path = getattr(database, "path", None)
-                try:
-                    matches = database.num_matches()
-                except Exception:
-                    matches = None
-                # What "diff again" means for a loaded result: the same
-                # secondary, against a primary that has changed since. Offered
-                # rather than left blank because the obvious thing to reach
-                # for is the .BinDiff sitting right there in the field above,
-                # which is a result and not an input.
-                try:
-                    secondary = self.controller.resolve_binexports()[1]
-                except Exception:
-                    secondary = None
-            self._control_panel.set_results(loaded, path, matches, secondary)
-
-        def _open_menu(self) -> None:
-            """Offers what the plugin can do, rather than assuming.
-
-            This used to call _load_results() directly, so choosing BinDiff
-            from the menu opened a file dialog and nothing else: the diff was
-            unreachable unless you already knew the action name. The C++
-            plugin puts up a small menu here and that is what anyone arriving
-            from it expects.
-            """
-            entries = [("Diff database...", self._diff_database),
-                       ("Load results...", self._load_results)]
-            if self.controller.loaded:
-                # Only worth offering once there is something to show.
-                entries.append(("Matched functions", self._show_matches))
-                entries.append(("Statistics", self._show_statistics))
-
-            chosen = self._choose_action(entries)
-            if chosen:
-                chosen()
-
-        def _choose_action(self, entries):
-            """The menu, in Qt where it is available and in IDA's own dialog
-            where it is not.
-
-            ask_buttons carries at most three, so the fallback offers the two
-            that are always present and drops the rest; it is the path for a
-            headless or Qt-less IDA, where the extra views have nothing to
-            draw on anyway.
-            """
-            try:
-                from ida_plugin.panels import ActionMenu
-            except ImportError:
-                ActionMenu = None
-
-            if ActionMenu is not None:
-                dialog = ActionMenu(f"{PLUGIN_NAME} {PLUGIN_VERSION}", entries)
-                from bindiff.qt_shim import exec_widget
-
-                exec_widget(dialog)
-                return dialog.chosen
-
-            answer = ida_kernwin.ask_buttons(
-                entries[0][0], entries[1][0], "Close", 1,
-                f"{PLUGIN_NAME} {PLUGIN_VERSION}")
-            if answer == 1:
-                return entries[0][1]
-            if answer == 0:
-                return entries[1][1]
-            return None
+            if self.inspector is None:
+                self.inspector = InspectorForm(self.session, self.handlers())
+            self.inspector.Show()
 
         # -- actions --------------------------------------------------------
 
         def _register_actions(self) -> None:
-            loaded = lambda: self.controller.loaded  # noqa: E731
             specs = (
-                (ACTION_MAIN, f"{PLUGIN_NAME}...", self._open_menu, None),
-                (ACTION_DIFF_DATABASE, "Diff database...",
-                 self._diff_database, None),
-                (ACTION_LOAD, "Load results...", self._load_results, None),
-                (ACTION_SAVE, "Save results", self._save_results, loaded),
+                (ACTION_MAIN, PLUGIN_NAME, self._open_workbench),
+                (ACTION_DIFF_DATABASE, "Compare with…", self._compare_from_menu),
+                (ACTION_LOAD, "Open result…", self._load_results),
+                (ACTION_SAVE, "Save result", self._save),
                 (ACTION_SHOW_MATCHES, "Matched functions",
-                 self._show_matches, loaded),
-                (ACTION_SHOW_PRIMARY_UNMATCHED, "Primary unmatched",
-                 self._show_primary_unmatched, loaded),
-                (ACTION_SHOW_SECONDARY_UNMATCHED, "Secondary unmatched",
-                 self._show_secondary_unmatched, loaded),
-                (ACTION_SHOW_STATISTICS, "Statistics",
-                 self._show_statistics, loaded),
-                (ACTION_DELETE_MATCHES, "Delete match(es)",
-                 self._delete_matches, loaded),
-                (ACTION_CONFIRM_MATCHES, "Confirm match(es)",
-                 self._confirm_matches, loaded),
-                (ACTION_IMPORT_ALL, "Import all",
-                 self._import_all, loaded),
-                (ACTION_IMPORT_TYPES, "Import types",
-                 self._import_types, loaded),
-                (ACTION_IMPORT_SYMBOLS_COMMENTS, "Import symbols/comments",
-                 self._import_symbols_comments, loaded),
+                 lambda: self._show_scope("matches")),
+                (ACTION_SHOW_PRIMARY_UNMATCHED, "Only here (primary unmatched)",
+                 lambda: self._show_scope("only_here")),
+                (ACTION_SHOW_SECONDARY_UNMATCHED,
+                 "Only there (secondary unmatched)",
+                 lambda: self._show_scope("only_there")),
+                (ACTION_SHOW_STATISTICS, "Overview (statistics)",
+                 lambda: self._show_scope("overview")),
+                (ACTION_DELETE_MATCHES, "Unmatch", self._unmatch),
+                (ACTION_CONFIRM_MATCHES, "Verify", self._verify),
+                (ACTION_IMPORT_ALL, "Port name, comments and types",
+                 self._import_all),
+                (ACTION_IMPORT_TYPES, "Port types", self._import_types),
+                (ACTION_IMPORT_SYMBOLS_COMMENTS, "Port name + comments",
+                 self._port_selected),
                 (ACTION_IMPORT_SYMBOLS_COMMENTS_EXTERNAL,
-                 "Import symbols/comments as external library",
-                 self._import_symbols_comments_external, loaded),
-                (ACTION_IMPORT_SYMBOLS_COMMENTS_GLOBAL,
-                 "Import all symbols/comments",
-                 self._import_symbols_comments_global, loaded),
-                (ACTION_UNMATCHED_ADD_MATCH_PRIMARY, "Add match",
-                 self._add_match_from_unmatched, loaded),
-                (ACTION_UNMATCHED_ADD_MATCH_SECONDARY, "Add match",
-                 self._add_match_from_unmatched, loaded),
+                 "Port name + comments as library code", self._port_external),
+                (ACTION_IMPORT_SYMBOLS_COMMENTS_GLOBAL, "Port every match…",
+                 self._port_global),
+                (ACTION_UNMATCHED_ADD_MATCH_PRIMARY, "Pair", self._pair),
+                (ACTION_UNMATCHED_ADD_MATCH_SECONDARY, "Pair", self._pair),
                 (ACTION_UNMATCHED_COPY_PRIMARY, "Copy address",
-                 lambda: self._copy_unmatched_address("primary"), loaded),
+                 lambda: self._copy_unmatched(0)),
                 (ACTION_UNMATCHED_COPY_SECONDARY, "Copy address",
-                 lambda: self._copy_unmatched_address("secondary"), loaded),
-                (ACTION_PORT_COMMENTS, "Port comments only",
-                 self._port_comments, loaded),
-                (ACTION_COPY_PRIMARY_ADDRESS, "Copy primary address",
-                 self._copy_primary_address, loaded),
-                (ACTION_COPY_SECONDARY_ADDRESS, "Copy secondary address",
-                 self._copy_secondary_address, loaded),
-                (ACTION_VIEW_FLOW_GRAPHS, "View flow graph diff",
-                 self._view_flow_graphs, loaded),
-                (ACTION_CONFIGURE, "Matching algorithms...",
-                 self._configure_algorithms, None),
+                 lambda: self._copy_unmatched(1)),
+                (ACTION_PORT_COMMENTS, "Port comments only", self._port_comments),
+                (ACTION_COPY_PRIMARY_ADDRESS, "Copy address here",
+                 lambda: self._copy(0)),
+                (ACTION_COPY_SECONDARY_ADDRESS, "Copy address there",
+                 lambda: self._copy(1)),
+                (ACTION_VIEW_FLOW_GRAPHS, "Flow graphs", self._graphs),
+                (ACTION_CONFIGURE, "Matching algorithms…", self._configure),
             )
             # Shift-D is the C++ plugin's, for the same action. Someone
             # arriving from it should not have to learn a new key to open the
-            # same dialog.
+            # same thing.
             shortcuts = {ACTION_MAIN: "Shift-D",
                          ACTION_LOAD: "Ctrl-Shift-6"}
 
-            # Kept alongside registration rather than written out a second
-            # time, so a context menu entry can never name an action whose
-            # handler this does not have.
-            self._callbacks = {name: callback for name, _, callback, _ in specs}
-
-            for name, label, callback, enabled in specs:
+            for name, label, callback in specs:
                 if ida_kernwin.register_action(ida_kernwin.action_desc_t(
-                        name, label, _Action(callback, enabled),
-                        shortcuts.get(name))):
+                        name, label, _Action(callback), shortcuts.get(name))):
                     self._registered.append(name)
                     ida_kernwin.attach_action_to_menu(
                         f"Edit/Plugins/{PLUGIN_NAME}/", name,
@@ -484,27 +376,53 @@ if IDA_AVAILABLE:
 
         # -- helpers --------------------------------------------------------
 
-        def _invoke_action(self, name: str) -> None:
-            """Runs a context-menu entry by action name.
+        def _report(self, message: str) -> None:
+            ida_kernwin.msg(f"[{PLUGIN_NAME}] {message}\n")
 
-            The panel used to hand the name to ida_kernwin.process_ui_action,
-            which returned without running anything: the menu appeared, every
-            entry was clickable, and clicking did nothing -- not even the
-            "select one or more matches first" warning that an empty
-            selection should produce. Silence in both directions is what made
-            it look like a UI problem rather than a dispatch one.
+        def _allowed(self, action: str) -> bool:
+            """Whether the session permits this now, with a line when it does not.
 
-            The handlers are in this object and the table is ours, so it calls
-            them. An unknown name is reported rather than ignored, since the
-            previous failure mode was precisely a click that went nowhere
-            quietly.
+            One line in the output window rather than a modal: an action that
+            is not available yet is not an error, and a dialog for it is a
+            click whose only content is "oh".
             """
-            handler = getattr(self, "_callbacks", {}).get(name)
-            if handler is None:
-                ida_kernwin.warning(
-                    f"{PLUGIN_NAME}: no handler registered for {name!r}.")
-                return
-            handler()
+            if self.session.can(action):
+                return True
+            self._report(self._why_not(action))
+            return False
+
+        def _why_not(self, action: str) -> str:
+            """The one thing that is missing, named."""
+            session = self.session
+            if action == actions.CANCEL:
+                return "no comparison is running"
+            if session.state is State.COMPARING:
+                return "a comparison is running"
+            if action == actions.SAVE and session.is_open:
+                return "there is nothing unsaved"
+            if not session.is_open:
+                return "no result is open"
+            if action in (actions.GRAPHS, actions.INSPECT):
+                return "select exactly one match first"
+            if action == actions.PAIR:
+                return ("choose one function under Only here and one under "
+                        "Only there first")
+            if action == actions.RESTORE_NAME:
+                return "nothing was written to that match this session"
+            return "select one or more matches first"
+
+        def _ordered_selection(self) -> list:
+            """The selected match ids, in the order they are on screen.
+
+            The session owns *what* is selected; only the table knows the
+            order it is drawn in, and a copied block of addresses that does
+            not match the rows it was copied from is worse than useless.
+            """
+            if self.workbench is not None and self.workbench.parent is not None:
+                shown = self.workbench.selected_ids()
+                if shown:
+                    return list(shown)
+            return list(self.session.selected_ids)
 
         def _ensure_export_file(self, side: int) -> bool:
             """Makes sure the .BinExport file for one side is known, asking if not.
@@ -545,75 +463,225 @@ if IDA_AVAILABLE:
             self.controller.set_binexports(known[0], known[1])
             return True
 
-        def _selected_match_ids(self) -> list:
-            form = self.controller._matched_form
-            rows = form.selected_rows() if form is not None else []
-            if not rows:
-                ida_kernwin.warning("Select one or more matches first.")
-            return [row.match_id for row in rows]
-
-        def _selected_rows(self) -> list:
-            form = self.controller._matched_form
-            return form.selected_rows() if form is not None else []
-
-        def _refresh_matches(self) -> None:
-            form = self.controller._matched_form
-            if form is not None:
-                form.set_rows(self.controller.match_rows())
-
-        def _refresh_views(self) -> None:
-            """Every view that an edit can change, refreshed together.
-
-            Deleting a match and adding one are inverses and were not
-            symmetric: adding refreshed the matched and unmatched lists,
-            deleting refreshed only the matched one, so the two functions a
-            delete frees never reappeared as unmatched. Statistics was
-            refreshed by neither, though it derives "Matched" and "Unmatched"
-            from the live match count and so moves on every edit.
-
-            Only forms that are already open are touched -- an edit must not
-            pop a window nobody asked for.
-            """
-            self._refresh_matches()
-            self._refresh_unmatched()
-            if self.controller._statistics_form is not None:
-                self.controller._statistics_form.set_rows(
-                    self.controller.statistic_rows())
-
-        def _report(self, message: str) -> None:
-            ida_kernwin.msg(f"[{PLUGIN_NAME}] {message}\n")
+        def _locate_export(self, side: int) -> None:
+            """The Locate button on an unmatched scope with no export."""
+            if not self._allowed(actions.LOCATE_EXPORT):
+                return
+            if not self._ensure_export_file(side):
+                return
+            # Rebuilds the counts without reopening: reopening would clear
+            # the edits and the ledger, and the result is the same one.
+            self.session.exports_located()
+            self._report(f"found the {'primary' if side == 0 else 'secondary'}"
+                         " export; the counts are up to date")
 
         # -- editing --------------------------------------------------------
 
-        def _delete_matches(self) -> None:
-            ids = self._selected_match_ids()
-            if not ids:
+        def _unmatch(self) -> None:
+            if not self._allowed(actions.UNMATCH):
                 return
-            if ida_kernwin.ask_yn(
-                    ida_kernwin.ASKBTN_NO,
-                    f"Delete {len(ids)} match(es)?") != ida_kernwin.ASKBTN_YES:
-                return
-            deleted = self.controller.delete_matches(ids)
-            self._refresh_views()
-            self._report(f"deleted {deleted} match(es); not yet saved")
+            ids = list(self.session.selected_ids)
+            count = self.session.unmatch(ids)
+            self._report(f"unmatched {count} match(es); not yet saved")
 
-        def _confirm_matches(self) -> None:
-            ids = self._selected_match_ids()
-            if not ids:
+        def _verify(self) -> None:
+            if not self._allowed(actions.VERIFY):
                 return
-            changed = self.controller.confirm_matches(ids)
-            self._refresh_views()
-            self._report(f"confirmed {changed} match(es); not yet saved")
+            ids = list(self.session.selected_ids)
+            count = self.session.verify(ids)
+            self._report(f"verified {count} match(es); not yet saved")
 
-        def _save_results(self) -> None:
+        def _pair(self) -> None:
+            if not self._allowed(actions.PAIR):
+                return
+            here = self.session.chosen_unmatched[0]
+            there = self.session.chosen_unmatched[1]
             try:
-                self.controller.save()
+                self.session.pair(here, there)
+            except ValueError as exc:
+                ida_kernwin.warning(str(exc))
+                return
+            self._report(f"matched 0x{here:X} to 0x{there:X}; not yet saved")
+
+        def _save(self) -> None:
+            if not self._allowed(actions.SAVE):
+                return
+            try:
+                self.session.save()
             except Exception as exc:
                 ida_kernwin.warning(f"Could not save:\n{exc}")
                 return
             self._report("saved")
 
+        def _close(self) -> None:
+            """Closes the result, asking only when that would lose something.
+
+            The one confirmation in the interface. Everything else here is
+            either reversible or reported; unsaved edits are neither, so the
+            question names how many there are rather than asking whether the
+            user is sure.
+            """
+            if not self._allowed(actions.CLOSE):
+                return
+            if self.session.state is State.OPEN_EDITED:
+                if ida_kernwin.ask_yn(
+                        ida_kernwin.ASKBTN_NO,
+                        f"Close with {self.session.edits} unsaved edit(s)?"
+                        "\n\nSave first to keep them."
+                ) != ida_kernwin.ASKBTN_YES:
+                    return
+            self.session.close_result()
+            self._report("closed")
+
         # -- porting --------------------------------------------------------
+
+        def _port(self, threshold: float, ids, *,
+                  floors_for_comments=None) -> Optional[PortLedger]:
+            """Names and comments for these matches, at this threshold.
+
+            The preview decides; the ledger records; the session tells the
+            views. Types are separate (they have their own sidecar).
+
+            Not guarded on can(PORT): the footer ports what is *on screen*
+            when nothing is picked, which is the flagship path and has no
+            selection by definition. What has to be true is that there is a
+            result and something to write to.
+            """
+            from ida_plugin.porting import (apply_comment_ports, apply_symbol_ports,
+                                            build_ledger, preview_symbol_ports)
+
+            ids = list(ids)
+            if not self.session.is_open or not ids:
+                self._report("nothing to port: " + ("no result is open"
+                                                    if not self.session.is_open
+                                                    else "nothing is selected"))
+                return None
+
+            # A threshold of 0.0 is the inspector's "I have read this pair and
+            # I want it": the block-coverage floor is the same judgement made
+            # in bulk, so it goes too. Both the preview and the comments read
+            # the one number, or they disagree about the same pair.
+            confidence = (floors_for_comments if floors_for_comments is not None
+                          else (0.0 if threshold == 0.0
+                                else DEFAULT_PORT_MIN_CONFIDENCE))
+            controller = self.session.controller
+            matches = controller.matches_for(ids)
+            preview = preview_symbol_ports(matches, min_similarity=threshold,
+                                           min_confidence=confidence)
+            symbols = apply_symbol_ports(preview.ports)
+            controller.record_ported_names(preview.ports)
+            comments = None
+            planned = ()
+            if self._ensure_export_file(1):
+                try:
+                    planned = controller.plan_comment_ports(
+                        ids, min_similarity=threshold,
+                        min_confidence=confidence)
+                except FileNotFoundError as exc:
+                    self._report(f"comments skipped: {exc}")
+                else:
+                    comments = apply_comment_ports(planned)
+            ledger = build_ledger(preview, symbols, comments)
+            self.session.note_ports(ledger)
+            message = "names: " + ledger.summary()
+            if comments is not None:
+                message += "; comments: " + _describe_comments(planned, comments)
+            if preview.below_threshold:
+                message += (f"; {len(preview.below_threshold)} below the "
+                            f"{threshold:.2f} threshold -- drag the footer slider or "
+                            f"port one from the inspector")
+            self._report(message + "; not yet saved")
+            # Both write into IDA rather than into the .BinDiff, so they are
+            # outside the ledger: there is no port outcome to record and
+            # nothing for the table to show. Each reports its own line and
+            # neither is allowed to fail the import.
+            self._apply_pseudocode_comments(ids)
+            self._apply_stack_names(ids)
+            return ledger
+
+        def _port_selected(self) -> None:
+            if not self._allowed(actions.PORT):
+                return
+            self._port(DEFAULT_PORT_MIN_SIMILARITY, self.session.selected_ids)
+
+        def _port_external(self) -> None:
+            """Ports, then marks the primary functions as library code."""
+            from ida_plugin.porting import mark_as_library
+
+            if not self._allowed(actions.PORT):
+                return
+            ledger = self._port(DEFAULT_PORT_MIN_SIMILARITY,
+                                self.session.selected_ids)
+            if ledger is None:
+                return
+            # Only what was really written: marking a function whose rename
+            # IDA refused says something about this database that is not true.
+            addresses = [entry.address for entry in ledger
+                         if entry.outcome in (STATE_PORTED, STATE_REPLACED)]
+            marked = mark_as_library(addresses)
+            self._report(f"marked {marked.applied} function(s) as library code")
+
+        def _port_global(self) -> None:
+            """Every match, not the selection."""
+            if not self.session.is_open:
+                self._report("no result is open")
+                return
+            ids = [row.match_id for row in self.session.rows()]
+            if ida_kernwin.ask_yn(
+                    ida_kernwin.ASKBTN_NO,
+                    f"Port names and comments for all {len(ids)} matches?\n\n"
+                    f"Only matches at or above the {DEFAULT_PORT_MIN_SIMILARITY:.2f} "
+                    "similarity floor are written."
+            ) != ida_kernwin.ASKBTN_YES:
+                return
+            self._port(DEFAULT_PORT_MIN_SIMILARITY, ids)
+
+        def _port_comments(self) -> None:
+            """Comments and nothing else, for the selection."""
+            from ida_plugin.porting import LedgerEntry, apply_comment_ports
+
+            if not self._allowed(actions.PORT):
+                return
+            ids = list(self.session.selected_ids)
+            if not self._ensure_export_file(1):
+                self._report("comments skipped: no secondary .BinExport was "
+                             "given, and comments live there")
+                return
+            try:
+                planned = self.session.controller.plan_comment_ports(ids)
+            except FileNotFoundError as exc:
+                ida_kernwin.warning(str(exc))
+                return
+            result = apply_comment_ports(planned)
+            # Recorded as "imported" rather than as a port outcome: no name
+            # was written, so there is nothing to restore, but something did
+            # land in this database and the row has to say so.
+            delta = PortLedger()
+            for match_id in sorted(result.applied_matches):
+                delta.record(LedgerEntry(match_id, STATE_IMPORTED, 0, "", "",
+                                         comments_written=1))
+            self.session.note_ports(delta)
+            self._report("comments: " + _describe_comments(planned, result)
+                         + "; not yet saved")
+            self._apply_pseudocode_comments(ids)
+            self._apply_stack_names(ids)
+
+        def _restore_name(self) -> None:
+            """Puts back the name this session replaced, one row at a time."""
+            from ida_plugin.porting import apply_symbol_ports
+
+            if not self._allowed(actions.RESTORE_NAME):
+                return
+            match_id = self.session.current_id
+            reverse = self.session.ledger.reversal(match_id)
+            if reverse is None:
+                return
+            apply_symbol_ports([reverse])
+            self.session.controller.record_ported_names([reverse])
+            self.session.forget_port(match_id)
+            self._report(f"restored {reverse.new_name}")
+
+        # -- types ----------------------------------------------------------
 
         def _ensure_types_sidecar(self) -> bool:
             """Makes sure the secondary's types have been read out.
@@ -646,7 +714,7 @@ if IDA_AVAILABLE:
                 return False
 
             # One mask or none: a list is read as a literal filename and
-            # greys the dialog out. See ControlPanel._browse.
+            # greys the dialog out. See RunStrip._browse.
             database = ida_kernwin.ask_file(
                 False, "*",
                 "Select the secondary IDA database (.i64) to read types from")
@@ -802,79 +870,13 @@ if IDA_AVAILABLE:
             self._report("types: " + message + "; not yet saved")
             return True
 
-        def _import_types(self) -> None:
-            """Prototypes and the types they need, and nothing else."""
-            ids = self._selected_match_ids()
-            if not ids:
-                return
-            if not self._ensure_types_sidecar():
-                return
-            self._apply_types(ids)
-            self._refresh_matches()
-
-        def _import_all(self) -> None:
-            """Everything the other side knows about these functions.
-
-            Names and comments first, then prototypes. The order matters for
-            reading the log more than for correctness: a rename that fails is
-            worth seeing before a prototype that depended on it.
-            """
-            ids = self._selected_match_ids()
-            if not ids:
-                return
-
-            self._apply_ports(ids)
-            if self.controller.types_sidecar() is None:
-                # Ask once, and let the symbols and comments stand on their
-                # own if the answer is no.
-                if not self._ensure_types_sidecar():
-                    return
-            self._apply_types(ids)
-            self._refresh_matches()
-
-        def _import_symbols_comments(self) -> None:
-            """Ports names, and comments too when the .BinExport is available.
-
-            Names come from the result file itself. Comments do not -- they
-            live in the secondary .BinExport -- so a missing export degrades to
-            names only rather than failing the whole action.
-            """
-            ids = self._selected_match_ids()
-            if not ids:
-                return
-
-            self._apply_ports(ids)
-
-        def _import_symbols_comments_external(self) -> None:
-            """Ports, then marks the primary functions as library code."""
-            from ida_plugin.porting import mark_as_library
-
-            ids = self._selected_match_ids()
-            if not ids:
-                return
-            ports = self._apply_ports(ids)
-            marked = mark_as_library([p.address for p in ports])
-            self._report(f"marked {marked.applied} function(s) as library code")
-
-        def _import_symbols_comments_global(self) -> None:
-            """Every match, not the selection."""
-            if not self._require_results():
-                return
-            count = self.controller.database.num_matches()
-            if ida_kernwin.ask_yn(
-                    ida_kernwin.ASKBTN_NO,
-                    f"Import symbols and comments for all {count} matches?"
-            ) != ida_kernwin.ASKBTN_YES:
-                return
-            self._apply_ports(match_ids=None)
-
         def _ask_to_ignore_floors(self, skips: dict, total: int) -> bool:
             """Offers to import a selection the thresholds refused.
 
             The floors exist because porting everything at 0.0 wrote 516 wrong
             names out of 1,440 on the measured corpus. That is an argument
             about *bulk* porting: nobody read those matches. Hand-picking a
-            handful of rows and choosing Import is the judgement the floor is
+            handful of rows and choosing Port is the judgement the floor is
             standing in for, so being told "0 renamed" and left to work out
             why is the wrong answer.
 
@@ -882,8 +884,6 @@ if IDA_AVAILABLE:
             A selection skipped because there was no name to give has nothing
             to reconsider.
             """
-            from ida_plugin.porting import DEFAULT_PORT_MIN_SIMILARITY
-
             blocked = skips.get("below the similarity or confidence floor", 0)
             if not blocked or blocked != total:
                 return False
@@ -897,140 +897,71 @@ if IDA_AVAILABLE:
                 "read the matches. You have selected these by hand.\n\n"
                 "Import them anyway?") == ida_kernwin.ASKBTN_YES
 
-        def _apply_ports(self, match_ids):
-            """Shared by the three import variants. Returns the symbol ports."""
-            from ida_plugin.porting import (
-                _is_generated_name, apply_comment_ports, apply_symbol_ports,
-                explain_symbol_port_skips)
+        def _import_types(self) -> None:
+            """Prototypes and the types they need, and nothing else."""
+            if not self._allowed(actions.PORT):
+                return
+            ids = list(self.session.selected_ids)
+            if not self._ensure_types_sidecar():
+                return
+            self._apply_types(ids)
 
-            # Overwrites an existing name, which is what upstream does --
-            # its only guard is "already has the same name" -- and what
-            # choosing this action asks for. Refusing to overwrite made the
-            # action quietly do less than it said on exactly the functions
-            # someone had already looked at and named.
-            #
-            # The similarity and confidence floors stay. They guard against a
-            # different and measured problem: porting at 0.0 wrote 516 wrong
-            # names out of 1440 on the corpus. That is about trusting a match,
-            # not about respecting a name.
-            floors = {}
-            symbols = self.controller.plan_symbol_ports(
-                match_ids, overwrite_existing=True)
-            if not symbols:
-                blocked = explain_symbol_port_skips(
-                    self.controller.matches_for(match_ids),
-                    overwrite_existing=True)
-                if self._ask_to_ignore_floors(blocked, len(list(match_ids))):
-                    floors = {"min_similarity": 0.0, "min_confidence": 0.0}
-                    symbols = self.controller.plan_symbol_ports(
-                        match_ids, overwrite_existing=True, **floors)
-            symbol_result = apply_symbol_ports(symbols)
-            # The result file records the names the differ saw. Leaving it
-            # alone means the table keeps showing the old name for a function
-            # that has just been renamed, and a result reopened later
-            # contradicts the database it came from.
-            self.controller.record_ported_names(symbols)
-            replaced = sum(1 for port in symbols
-                           if not _is_generated_name(port.old_name))
-            # Whatever is still skipped is accounted for rather than silent.
-            skips = explain_symbol_port_skips(
-                self.controller.matches_for(match_ids),
-                overwrite_existing=True,
-                **{k: v for k, v in floors.items()})
-            # One line per kind of thing. Crammed into one sentence it read
-            # as "renamed 0 function(s); 30 skipped: already named the same,
-            # 1 skipped: below the similarity or confidence floor; wrote 37
-            # of 37 comment(s) ..." -- four clauses deep, leading with a zero,
-            # and the question it was asked to answer (did the comments go?)
-            # buried at the end.
-            self._report("names: " + _describe_symbols(
-                symbols, symbol_result, replaced, skips))
-            # Comments live in the secondary export, so ask for it before
-            # reporting that they were skipped for want of a file the user
-            # could have supplied.
-            self.controller.mark_imported(symbol_result.applied_matches)
-            if not self._ensure_export_file(1):
-                self._report("comments: skipped, no secondary .BinExport was "
-                             "given and comments live there")
-                self._refresh_matches()
-                return symbols
-            try:
-                comments = self.controller.plan_comment_ports(
-                    match_ids, **floors)
-            except FileNotFoundError as exc:
-                self._report(f"comments: skipped, {exc}")
-                self._refresh_matches()
-                return symbols
-            comment_result = apply_comment_ports(comments)
-            self.controller.mark_imported(symbol_result.applied_matches
-                                          | comment_result.applied_matches)
-            self._report("comments: "
-                         + _describe_comments(comments, comment_result)
-                         + "; not yet saved")
-            self._apply_pseudocode_comments(match_ids)
-            self._apply_stack_names(match_ids)
-            # The names in the table came from the result file, which has just
-            # changed, so redraw rather than leave it showing what used to be
-            # true.
-            self._refresh_matches()
-            return symbols
+        def _import_all(self) -> None:
+            """Everything the other side knows about these functions.
 
-        # -- pairing from the unmatched views --------------------------------
-
-        def _add_match_from_unmatched(self) -> None:
-            """Pairs the selected primary and secondary unmatched functions.
-
-            Needs exactly one on each side: the pairing is one-to-one, and
-            guessing which of several selections was meant would be worse than
-            asking.
+            Names and comments first, then prototypes. The order matters for
+            reading the log more than for correctness: a rename that fails is
+            worth seeing before a prototype that depended on it.
             """
-            forms = self.controller._unmatched_forms
-            primary_rows = (forms["primary"].selected_rows()
-                            if "primary" in forms else [])
-            secondary_rows = (forms["secondary"].selected_rows()
-                              if "secondary" in forms else [])
-
-            if len(primary_rows) != 1 or len(secondary_rows) != 1:
-                ida_kernwin.warning(
-                    "Select exactly one function in the primary unmatched view "
-                    "and one in the secondary unmatched view.")
+            if not self._allowed(actions.PORT):
                 return
+            ids = list(self.session.selected_ids)
+            self._port(DEFAULT_PORT_MIN_SIMILARITY, ids)
+            if self.controller.types_sidecar() is None:
+                # Ask once, and let the names and comments stand on their own
+                # if the answer is no.
+                if not self._ensure_types_sidecar():
+                    return
+            self._apply_types(ids)
 
-            try:
-                self.controller.add_manual_match(primary_rows[0].address,
-                                                 secondary_rows[0].address)
-            except ValueError as exc:
-                ida_kernwin.warning(str(exc))
+        # -- clipboard ------------------------------------------------------
+
+        def _copy(self, side: int) -> None:
+            """The picked addresses on one side, to the clipboard."""
+            if not self.session.can(actions.COPY):
+                # The unmatched scopes route their Copy here too, where there
+                # is no match selection and the row under the cursor is what
+                # was asked for.
+                self._copy_unmatched(side)
                 return
+            addresses = []
+            for match_id in self._ordered_selection():
+                row = self.session.row(match_id)
+                if row is not None:
+                    addresses.append(row.address_secondary if side
+                                     else row.address_primary)
+            self._to_clipboard(addresses)
 
-            self._refresh_views()
-            self._report(
-                f"matched 0x{primary_rows[0].address:X} to "
-                f"0x{secondary_rows[0].address:X}; not yet saved")
+        def _copy_unmatched(self, side: int) -> None:
+            chosen = self.session.chosen_unmatched.get(side)
+            if chosen is None:
+                self._report("select a function first")
+                return
+            self._to_clipboard([chosen])
 
-        def _refresh_unmatched(self) -> None:
-            for side, form in self.controller._unmatched_forms.items():
-                try:
-                    rows = (self.controller.unmatched_secondary()
-                            if side == "secondary"
-                            else self.controller.unmatched_primary())
-                except FileNotFoundError:
-                    continue
-                form.set_rows(rows)
-
-        def _copy_unmatched_address(self, side: str) -> None:
-            form = self.controller._unmatched_forms.get(side)
-            rows = form.selected_rows() if form is not None else []
-            if not rows:
-                ida_kernwin.warning("Select a function first.")
+        def _to_clipboard(self, addresses: Sequence[int]) -> None:
+            if not addresses:
+                self._report("nothing to copy")
                 return
             from bindiff.qt_shim import QtWidgets
 
             QtWidgets.QApplication.clipboard().setText(
-                "\n".join(f"0x{r.address:X}" for r in rows))
-            self._report(f"copied {len(rows)} address(es)")
+                "\n".join(f"0x{address:X}" for address in addresses))
+            self._report(f"copied {len(addresses)} address(es)")
 
-        def _view_flow_graphs(self) -> None:
+        # -- graphs ---------------------------------------------------------
+
+        def _graphs(self) -> None:
             """Shows the primary function's CFG, coloured by match state.
 
             Drawn with IDA's own graph widget rather than the Java UI: it docks
@@ -1038,9 +969,11 @@ if IDA_AVAILABLE:
             """
             from ida_plugin import panels
 
-            rows = self._selected_rows()
-            if len(rows) != 1:
-                ida_kernwin.warning("Select exactly one match.")
+            if not self._allowed(actions.GRAPHS):
+                return
+            row = self.session.row(self.session.current_id)
+            if row is None:
+                self._report("that match is no longer in the result")
                 return
             if not getattr(panels, "GRAPH_AVAILABLE", False):
                 ida_kernwin.warning(
@@ -1048,99 +981,9 @@ if IDA_AVAILABLE:
                 return
             try:
                 self._graph_viewers.append(
-                    panels.show_flow_graph_diff(rows[0],
-                                                self.controller.database))
+                    panels.show_flow_graph_diff(row, self.controller.database))
             except Exception as exc:
                 ida_kernwin.warning(f"Could not build the graph:\n{exc}")
-
-        def _port_comments(self) -> None:
-            from ida_plugin.porting import apply_comment_ports
-
-            ids = self._selected_match_ids()
-            if not ids:
-                return
-            try:
-                ports = self.controller.plan_comment_ports(ids)
-            except FileNotFoundError as exc:
-                ida_kernwin.warning(str(exc))
-                return
-            result = apply_comment_ports(ports)
-            # The same sentence import-all prints. Two wordings for one
-            # action read as two different things having happened.
-            self.controller.mark_imported(result.applied_matches)
-            self._report("comments: " + _describe_comments(ports, result)
-                         + "; not yet saved")
-            self._apply_pseudocode_comments(ids)
-            self._apply_stack_names(ids)
-            self._refresh_views()
-
-        # -- clipboard ------------------------------------------------------
-
-        def _copy_address(self, secondary: bool) -> None:
-            rows = self._selected_rows()
-            if not rows:
-                ida_kernwin.warning("Select a match first.")
-                return
-            text = "\n".join(
-                f"0x{(r.address_secondary if secondary else r.address_primary):X}"
-                for r in rows)
-            from bindiff.qt_shim import QtWidgets
-
-            QtWidgets.QApplication.clipboard().setText(text)
-            self._report(f"copied {len(rows)} address(es)")
-
-        def _copy_primary_address(self) -> None:
-            self._copy_address(secondary=False)
-
-        def _copy_secondary_address(self) -> None:
-            self._copy_address(secondary=True)
-
-        # -- unmatched ------------------------------------------------------
-
-        def _show_unmatched(self, secondary: bool) -> None:
-            if not self._require_results():
-                return
-            from ida_plugin.panels import UnmatchedFunctionsForm
-
-            side = "secondary" if secondary else "primary"
-            # The unmatched list is derived from the export, not the result
-            # file, so there is nothing to show without one.
-            if not self._ensure_export_file(1 if secondary else 0):
-                return
-            try:
-                rows = (self.controller.unmatched_secondary() if secondary
-                        else self.controller.unmatched_primary())
-            except FileNotFoundError as exc:
-                ida_kernwin.warning(
-                    f"Cannot list {side} unmatched functions.\n\n{exc}")
-                return
-
-            form = self.controller._unmatched_forms.get(side)
-            if form is None:
-                # Only the primary side can be navigated to: the secondary's
-                # addresses belong to a different database.
-                # The side decides which actions apply: "add match" and
-                # "copy address" mean different things on each, and the
-                # registered actions are already per-side.
-                if secondary:
-                    actions = (ACTION_UNMATCHED_ADD_MATCH_SECONDARY,
-                               ACTION_UNMATCHED_COPY_SECONDARY)
-                else:
-                    actions = (ACTION_UNMATCHED_ADD_MATCH_PRIMARY,
-                               ACTION_UNMATCHED_COPY_PRIMARY)
-                form = UnmatchedFunctionsForm(
-                    rows, side, on_jump=None if secondary else _jump_to,
-                    context_actions=actions, on_action=self._invoke_action)
-                self.controller._unmatched_forms[side] = form
-            else:
-                form.set_rows(rows)
-            form.Show()
-
-        def _show_primary_unmatched(self) -> None:
-            self._show_unmatched(secondary=False)
-
-        def _show_secondary_unmatched(self) -> None:
-            self._show_unmatched(secondary=True)
 
         # -- diffing --------------------------------------------------------
 
@@ -1198,15 +1041,15 @@ if IDA_AVAILABLE:
             answer = ida_kernwin.ask_yn(
                 ida_kernwin.ASKBTN_YES,
                 "HIDECANCEL\n"
-                "Diffing two binaries needs the BinExport plugin, which is "
+                "Comparing two binaries needs the BinExport plugin, which is "
                 "not installed.\n\n"
                 f"Download it from\n{plan.archive_url}\n"
                 f"and install it as\n{plan.destination}?\n\n"
                 "The archive is checked against the digest published with the "
                 "release before anything is written.")
             if answer != ida_kernwin.ASKBTN_YES:
-                self._report("BinExport was not installed; the diff needs it "
-                             "to export a binary.")
+                self._report("BinExport was not installed; the comparison "
+                             "needs it to export a binary.")
                 return False
 
             return self._install_binexport(plan)
@@ -1246,41 +1089,69 @@ if IDA_AVAILABLE:
             self._report(f"installed BinExport at {written}")
             return True
 
-        def _diff_database(self, secondary: Optional[str] = None) -> None:
-            """Runs a diff against another binary, out of process.
+        def _browse(self):
+            """What this object has to offer for the other side: nothing.
+
+            The run strip asks here first and falls back to IDA's own file
+            dialog when the answer is None, which is what the harness drives.
+            It is also where a picker that knows about recent results would
+            go.
+            """
+            return None
+
+        def _compare_from_menu(self) -> None:
+            """The menu's way in, which is the strip's way in with a prompt.
+
+            The field is asked first: someone who typed a path into the strip
+            and then reached for the menu means that path, and a file dialog
+            over the top of it would be the plugin ignoring what it was told.
+            """
+            if not self._allowed(actions.COMPARE):
+                return
+            workbench = self._the_workbench()
+            workbench.show_scope("matches")
+            path = (workbench.run_strip.secondary_path()
+                    if workbench.run_strip is not None else "")
+            if not path:
+                # "*" and not "*.*": the latter requires a dot in the name,
+                # so a stripped ELF with no extension is not selectable.
+                path = ida_kernwin.ask_file(
+                    False, "*",
+                    "Select the binary, database or export to compare with")
+            if not path:
+                return
+            self._compare(path)
+
+        def _compare(self, secondary: str) -> None:
+            """Compares this database with another binary, out of process.
 
             The export is what makes this slow, and it is why the C++ plugin
             freezes the IDB: it exports the secondary from inside this process.
             Here a worker does both exports and the diff, so the UI stays live.
             """
+            from ida_plugin.diff_runner import (default_output_name,
+                                                panel_title, reject_reason)
+
+            if not self._allowed(actions.COMPARE):
+                return
             # Checked before anything is asked for: finding out that the
-            # exporter is missing after picking two files and a destination
+            # exporter is missing after picking a file and a destination
             # wastes the answers.
             if not self._ensure_binexport_plugin():
                 return
-
-            if not secondary:
-                # "*" and not "*.*": the latter requires a dot in the name,
-                # so a stripped ELF with no extension is not selectable.
-                secondary = ida_kernwin.ask_file(
-                    False, "*", "Select the secondary binary or database")
-            if not secondary:
-                return
-
-            from ida_plugin.diff_runner import reject_reason
 
             refusal = reject_reason(secondary)
             if refusal:
                 ida_kernwin.warning(
                     f"{refusal}\n\n"
-                    "Diff against the other side of the comparison: its "
-                    "binary, its .i64 database, or its .BinExport.\n\n"
-                    "Your open database is always the primary and is "
-                    "exported again for every diff, so names, comments and "
-                    "types you have imported since the last one are already "
-                    "included. To re-diff after importing, pick the same "
-                    "secondary as before -- its .BinExport is quickest, "
-                    "since it needs no export at all.")
+                    "Compare against the other side: its binary, its .i64 "
+                    "database, or its .BinExport.\n\n"
+                    "Your open database is always this side and is exported "
+                    "again for every comparison, so names, comments and types "
+                    "you have ported since the last one are already included. "
+                    "To compare again after porting, pick the same other side "
+                    "as before -- its .BinExport is quickest, since it needs "
+                    "no export at all.")
                 return
 
             primary = self._primary_to_export()
@@ -1289,17 +1160,30 @@ if IDA_AVAILABLE:
                     "This database has never been saved and there is no input "
                     "file to fall back on, so there is nothing to export.")
                 return
-            from ida_plugin.diff_runner import default_output_name
 
             output = ida_kernwin.ask_file(
                 True, default_output_name(primary, secondary),
-                "Save results as")
+                "Save result as")
             if not output:
                 return
 
-            self._report("diffing in a background process; the UI stays "
+            title = panel_title(primary)
+            workbench = self._the_workbench()
+            workbench.show_scope("matches")
+            self.session.begin_compare(title)
+            if workbench.run_strip is not None:
+                workbench.run_strip.start(title)
+            self._report("comparing in a background process; the UI stays "
                          "responsive. This can take a while.")
             self._run_diff_async(primary, secondary, output)
+
+        def _cancel(self) -> None:
+            if not self._allowed(actions.CANCEL):
+                return
+            if self._cancel_event is not None:
+                self._cancel_event.set()
+                self._report("asked the worker to stop and keep what it has "
+                             "matched so far")
 
         def _primary_to_export(self):
             """The file the worker exports for this side of the diff.
@@ -1322,7 +1206,7 @@ if IDA_AVAILABLE:
             if ida_kernwin.ask_yn(
                     ida_kernwin.ASKBTN_YES,
                     "HIDECANCEL\nSave the database first?\n\n"
-                    "The diff exports a copy of the saved database, so "
+                    "The comparison exports a copy of the saved database, so "
                     "anything not written yet will be missing from it."
             ) == ida_kernwin.ASKBTN_YES:
                 ida_loader.save_database(
@@ -1355,7 +1239,7 @@ if IDA_AVAILABLE:
             # rather than a temporary file with an invented one. BinExport
             # records the filename it was given, so mkstemp's name ended up
             # in the .BinExport, in the .BinDiff's file table and on screen
-            # in Statistics as "bindiff-primary-oa1ywul8.primary". It also
+            # in the overview as "bindiff-primary-oa1ywul8.primary". It also
             # defeated finding the exports again later, since that works from
             # the names.
             holder = tempfile.mkdtemp(prefix="bindiff-snapshot-")
@@ -1374,34 +1258,44 @@ if IDA_AVAILABLE:
 
             The sequence itself lives in ida_plugin.diff_runner, which has no
             Qt and no IDA in it, so the harness can drive it. What is left here
-            is only the wiring: the panel, the marshal to the UI thread, and
-            the thread.
+            is only the wiring: the panel adapter, the marshal to the UI
+            thread, and the thread.
             """
             import functools
             import threading
 
             from bindiff.headless import run_headless
             from ida_plugin.diff_runner import (DEFAULT_TIMEOUT_SECONDS,
-                                                DiffRun, panel_title,
-                                                worker_arguments)
-            from ida_plugin.panels import DiffProgressForm
+                                                DiffRun, worker_arguments)
 
             cancel = threading.Event()
-            # Kept so the control panel's Cancel can reach this diff.
+            # Kept so the strip's Cancel can reach this comparison.
             self._cancel_event = cancel
+            plugin = self
 
-            # Report into the control panel when it is open, so a diff started
-            # from it does not open a second window to watch. The standalone
-            # progress form is still the answer for a diff started from a
-            # menu, which is the case the control panel is not part of.
-            panel = self._control_panel
-            if panel is not None and panel.parent is not None:
-                panel.start(panel_title(primary))
-                form = panel
-            else:
-                form = DiffProgressForm(panel_title(primary),
-                                        on_cancel=cancel.set)
-                form.Show()
+            class _PanelAdapter:
+                """DiffRun's panel protocol, routed through the session.
+
+                Progress goes to the session and nowhere else: the workbench
+                subscribes to session.progress and updates the strip itself,
+                so calling the strip from here as well would draw every record
+                twice. The end of the run is the other way round -- the strip
+                owns its own clock and its own stacked page -- so finish
+                reaches it directly, and then the session is told the
+                comparison is over.
+                """
+
+                def update_progress(self, progress) -> None:
+                    plugin.session.report_progress(progress)
+
+                def finish(self, message: str) -> None:
+                    strip = (plugin.workbench.run_strip
+                             if plugin.workbench is not None else None)
+                    # The tab can have been closed mid-comparison, which takes
+                    # the strip with it; the session still has to hear.
+                    if strip is not None:
+                        strip.finish(message)
+                    plugin.session.finish_compare(None)
 
             def post(action, flags) -> None:
                 # Touching Qt or IDA from the worker thread is not safe.
@@ -1415,31 +1309,40 @@ if IDA_AVAILABLE:
                 ida_kernwin.execute_sync(wrapped, flags)
 
             def load(path: str, exports: Sequence[str] = ()) -> None:
-                self.controller.open_database(path)
-                # Recorded rather than guessed. open_database clears them, so
-                # this has to come after it.
-                if len(exports) == 2:
-                    self.controller.set_binexports(exports[0], exports[1])
-                self._show_matches()
-                self._sync_control_panel()
+                # A cancelled comparison still produced matches worth having,
+                # and the result carries that so nobody reads a partial answer
+                # as the whole picture.
+                result = self._last_result
+                partial = bool(result.details.get("cancelled")) if result else False
+                self.session.open_result(path, exports, partial=partial)
+                workbench = self._the_workbench()
+                # A fresh result is something to read before it is something
+                # to port from, so it opens on the audit lens.
+                workbench.set_lens("needs_a_look")
+                workbench.show_scope("matches")
 
             def runner(args, **kwargs):
-                # Both sides are copied, and here rather than in
-                # _diff_database so the copying happens on this thread instead
-                # of the UI's. The secondary needs it as much as the primary:
-                # an .i64 open in another IDA is locked, idalib's
-                # open_database returns non-zero for it, and that surfaced as
-                # a bare "could not open <path>" with nothing to do about it.
+                # Both sides are copied, and here rather than in _compare so
+                # the copying happens on this thread instead of the UI's. The
+                # secondary needs it as much as the primary: an .i64 open in
+                # another IDA is locked, idalib's open_database returns
+                # non-zero for it, and that surfaced as a bare "could not open
+                # <path>" with nothing to do about it.
                 with self._snapshot(args[1]) as primary_source, \
                         self._snapshot(args[2]) as secondary_source:
-                    return run_headless(
+                    result = run_headless(
                         [args[0], primary_source, secondary_source,
                          *args[3:]],
                         timeout=DEFAULT_TIMEOUT_SECONDS, **kwargs)
+                # Stashed rather than threaded through DiffRun: `load` is
+                # handed the path and the exports only, and whether the run
+                # was cancelled is the one other thing the session needs.
+                self._last_result = result
+                return result
 
             run = DiffRun(
                 runner=runner,
-                panel=form,
+                panel=_PanelAdapter(),
                 # Progress repaints must not queue behind a database lock the
                 # user's own analysis is holding; the single final call loads a
                 # file and opens windows, so it takes the stronger flag.
@@ -1456,83 +1359,80 @@ if IDA_AVAILABLE:
                       cancel),
                 daemon=True).start()
 
+        # -- results --------------------------------------------------------
+
         def _load_results(self) -> None:
             path = _ask_for_database()
             if path is None:
                 return
             try:
-                self.controller.open_database(path)
+                meta = self.session.open_result(path)
             except Exception as exc:
                 ida_kernwin.warning(f"Could not open {path}:\n{exc}")
                 return
-            ida_kernwin.msg(
-                f"[{PLUGIN_NAME}] loaded {path} "
-                f"({self.controller.database.num_matches()} matches)\n")
-            self._show_matches()
-            self._sync_control_panel()
+            self._report(f"opened {path} ({meta.matched} matches)")
+            self._the_workbench().show_scope("matches")
 
-        def _show_matches(self) -> None:
-            if not self._require_results():
-                return
-            from ida_plugin.panels import MatchedFunctionsForm
-
-            if self.controller._matched_form is None:
-                self.controller._matched_form = MatchedFunctionsForm(
-                    self.controller.match_rows(), on_jump=_jump_to,
-                    context_actions=(
-                        ACTION_VIEW_FLOW_GRAPHS,
-                        None,
-                        ACTION_IMPORT_ALL,
-                        ACTION_IMPORT_SYMBOLS_COMMENTS,
-                        ACTION_IMPORT_TYPES,
-                        ACTION_PORT_COMMENTS,
-                        None,
-                        ACTION_CONFIRM_MATCHES,
-                        ACTION_DELETE_MATCHES,
-                        None,
-                        ACTION_COPY_PRIMARY_ADDRESS,
-                        ACTION_COPY_SECONDARY_ADDRESS,
-                    ),
-                    on_action=self._invoke_action)
-                self.controller._matched_form.Show()
-            else:
-                self.controller._matched_form.set_rows(
-                    self.controller.match_rows())
-                self.controller._matched_form.Show()
-
-        def _show_statistics(self) -> None:
-            if not self._require_results():
-                return
-            from ida_plugin.panels import StatisticsForm
-
-            rows = self.controller.statistic_rows()
-            if self.controller._statistics_form is None:
-                self.controller._statistics_form = StatisticsForm(rows)
-            else:
-                self.controller._statistics_form.set_rows(rows)
-            self.controller._statistics_form.Show()
-
-        def _configure_algorithms(self) -> None:
+        def _configure(self) -> None:
             import bindiff
 
             from ida_plugin.panels import AlgorithmConfigDialog
 
+            if not self._allowed(actions.CONFIGURE):
+                return
+
             def apply(changes: dict) -> None:
                 bindiff.set_config(changes)
-                ida_kernwin.msg(
-                    f"[{PLUGIN_NAME}] matching configuration updated; "
-                    f"it applies to the next diff\n")
+                self._report("matching configuration updated; it applies to "
+                             "the next comparison")
 
             from bindiff.qt_shim import exec_widget
 
             exec_widget(
                 AlgorithmConfigDialog(bindiff.get_config(), apply))
 
-        def _require_results(self) -> bool:
-            if self.controller.loaded:
-                return True
-            ida_kernwin.warning("Load a .BinDiff result file first.")
-            return False
+        # -- auto-save ------------------------------------------------------
+
+        def _set_autosave(self, enabled: bool, seconds: int) -> None:
+            """Starts or stops the auto-save timer.
+
+            The timer lives here rather than on the strip so hiding the tab
+            does not silently stop saving. A checkbox that stops working when
+            its window is closed is worse than no checkbox.
+            """
+            from bindiff.qt_shim import QtCore
+
+            if self._autosave_timer is None:
+                self._autosave_timer = QtCore.QTimer()
+                self._autosave_timer.timeout.connect(self._autosave_tick)
+            self._autosave_timer.stop()
+            if enabled:
+                self._autosave_timer.setInterval(max(5, int(seconds)) * 1000)
+                self._autosave_timer.start()
+
+        def _autosave_tick(self) -> None:
+            """Commits, but only when there is something to commit.
+
+            Asking the connection rather than tracking a flag: sqlite knows
+            whether a write has happened since the last commit, and a flag of
+            our own would go stale the first time a new edit method forgot to
+            set it. It also keeps this quiet -- a timer that reported "saved"
+            every minute with nothing to save would train you to ignore it.
+            """
+            database = getattr(self.controller, "database", None)
+            if database is None or not database.has_unsaved_changes:
+                return
+            try:
+                self.session.save()
+            except Exception as exc:
+                # Stop rather than fail on a timer forever: a broken save that
+                # complains once a minute is its own problem.
+                self._set_autosave(False, 0)
+                ida_kernwin.warning(
+                    f"{PLUGIN_NAME}: auto-save failed and has been turned "
+                    f"off.\n\n{exc}")
+                return
+            self._report("auto-saved")
 
     def PLUGIN_ENTRY():
         return BinDiffPlugin()

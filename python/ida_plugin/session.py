@@ -190,6 +190,21 @@ class DiffSession:
         if self.meta is not None:
             self.meta = self._build_meta(self.meta.path, self.meta.partial)
 
+    def exports_located(self) -> None:
+        """A .BinExport that was missing has been pointed at.
+
+        Not open_result again: reopening clears the edits, the ledger and the
+        selection, and naming a file the result always described is not a
+        reason to forget what has been done to it. What changes is what can
+        now be counted -- the unmatched lists -- so meta is rebuilt and the
+        views are told to redraw from it.
+        """
+        if self.meta is None:
+            return
+        self._refresh_meta()
+        self.result_opened.emit(self.meta)
+        self.matches_changed.emit(())
+
     def close_result(self) -> None:
         self._controller.close()
         self.meta = None

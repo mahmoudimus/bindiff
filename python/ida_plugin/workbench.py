@@ -1037,6 +1037,10 @@ if IDA_AVAILABLE:
 
         def _on_threshold(self, threshold: float) -> None:
             self._threshold = threshold
+            # The inspector says "below the threshold" about the same number,
+            # so it hears about the slider too. Optional because the handler
+            # dict is also written by the harness, which has no inspector.
+            self._handlers.get("threshold", lambda _t: None)(threshold)
             self._refresh_rows()
 
         def _on_review(self) -> None:
