@@ -1,403 +1,115 @@
-# BinDiff IDA Plugin (Python Implementation)
-
-This is a **complete Python implementation** of the BinDiff IDA plugin, replacing the C++ version. The plugin uses Cython bindings to call BinDiff's C++ core while providing all UI and interaction logic in Python.
-
-## Features
-
-### Complete Functionality
-- ✅ **Matched Functions Viewer** - Browse all function matches with similarity/confidence
-- ✅ **Unmatched Functions Viewers** - View unmatched functions in both binaries
-- ✅ **Statistics Viewer** - Display comprehensive diff statistics
-- ✅ **Manual Matching** - Add custom matches between functions
-- ✅ **Match Deletion** - Remove incorrect matches
-- ✅ **Match Confirmation** - Mark matches as manually verified
-- ✅ **Comment/Symbol Porting** - Import symbols and comments from matched functions
-- ✅ **Incremental Diff** - Re-run diff with manual changes
-- ✅ **Visual Diff Preparation** - Prepare for flow graph and call graph visualization
-
-### Advantages Over C++ Plugin
-- **Easier Customization** - Modify UI and behavior without recompiling
-- **Python Ecosystem** - Use Python libraries for analysis and automation
-- **Rapid Development** - Iterate faster with Python
-- **Better Integration** - Leverage IDA's Python API features
-- **PySide6 Compatible** - Can be extended with modern Qt GUI
-
-## Architecture
-
-```
-┌─────────────────────────────────────┐
-│   IDA Python Plugin (bindiff_plugin.py)   │
-│   - MatchedFunctionsChooser        │
-│   - UnmatchedFunctionsChoosers     │
-│   - StatisticsChooser              │
-└──────────────┬──────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────┐
-│  Python Bindings (ida_plugin.pyx)  │
-│  - BindiffResults class            │
-│  - Match, UnmatchedFunction        │
-│  - Statistic classes               │
-└──────────────┬──────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────┐
-│  C++ Wrappers (results_wrapper.cc)  │
-│  - ResultsWrapper                   │
-│  - Simplified API for Cython        │
-└──────────────┬──────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────┐
-│    BinDiff C++ Core (ida/results.cc)    │
-│    - Results class                  │
-│    - Diff engine integration        │
-└─────────────────────────────────────┘
-```
-
-## Installation
-
-### Prerequisites
-
-1. **IDA Pro 8.2+** with Python 3 support
-2. **BinDiff** built from source
-3. **Python 3.8+**
-4. **Cython 3.0+**
-
-### Build Steps
-
-#### 1. Build BinDiff with IDA Plugin Support
-
-```bash
-cd bindiff
-mkdir build && cd build
-
-# Configure with IDA SDK path
-cmake .. \
-  -DIdaSdk_ROOT_DIR=/path/to/idasdk \
-  -DBINDIFF_BUILD_TESTING=OFF
-
-# Build everything
-cmake --build .
-```
-
-#### 2. Build Python Bindings
-
-```bash
-cd ../python
-
-# Install Python dependencies
-pip install Cython>=3.0 setuptools wheel
-
-# Build bindings (requires IDA plugin to be built)
-python setup.py build_ext --inplace
-pip install -e .
-```
-
-#### 3. Install Plugin to IDA
-
-```bash
-# Copy plugin file
-cp ida_plugin/bindiff_plugin.py ~/.idapro/plugins/
+# BinDiff plugin for IDA Pro
 
-# Copy Python module (or ensure it's in PYTHONPATH)
-cp -r build/lib.*/bindiff ~/.idapro/python/
-```
+A Python plugin that runs a diff and shows the result inside IDA. The engine
+is the same C++ one the `bindiff` CLI uses, reached either through the Cython
+bindings or through a worker process; this package is the surface over it.
 
-#### Alternative: Manual Installation
+Comparing runs a worker so IDA stays usable. Reading and editing a result is
+`bindiff.database`, plain sqlite3 over the `.BinDiff` file.
 
-```bash
-# Symlink for easier development
-ln -s /path/to/bindiff/python/ida_plugin/bindiff_plugin.py ~/.idapro/plugins/
-ln -s /path/to/bindiff/python/bindiff ~/.idapro/python/
-```
+## What is on screen
 
-### Verify Installation
+One dock tab, **BinDiff**, and one companion, **Match inspector**.
 
-1. Start IDA Pro
-2. Check the Output window for:
-   ```
-   BinDiff-NG 8.1.0 initialized
-   ```
-3. Press `Ctrl+6` or go to `Edit` → `Plugins` → `BinDiff`
+The tab has a run strip at the top -- the file to compare with, a Compare
+button that becomes the progress bar and a Cancel while a diff runs, and the
+open result with Save and Close -- then four scopes as tabs: **Matches**,
+**Only here**, **Only there**, **Overview**. The status line at the bottom
+counts what is shown, what exists and what is selected, and carries the
+"follow selection" toggle -- off by default -- that jumps IDA as the
+selection moves.
 
-## Usage
+The inspector shows one match: its two sides, the engine's numbers, the step
+that found it, what the change flags mean, and the buttons for the actions
+that apply to a single match. It is a second dock, so it can sit beside the
+table or be closed.
 
-### Basic Workflow
+## Lenses
 
-1. **Load BinDiff Results**
-   - Press `Ctrl+6`
-   - Select "YES" to load results
-   - Choose a `.BinDiff` file
+The Matches table is used for three different jobs, so it has three saved
+filter-plus-column sets rather than one table with switches:
 
-2. **View Matched Functions**
-   - Automatically shown after loading
-   - Double-click to jump to function
-   - Select multiple rows for batch operations
+- **Needs a look** -- anything not Strong, or whose graph changed.
+- **Ready to port** -- the other side has a name worth carrying over. This is
+  the lens that shows the Outcome column and the port footer.
+- **All** -- everything; the search field does the narrowing.
 
-3. **View Unmatched Functions**
-   - Shown if you answer "YES" to the prompt
-   - Separate windows for primary and secondary binaries
+## Search
 
-4. **View Statistics**
-   - Shows comprehensive diff statistics
-   - Function/basic block/instruction counts
-   - Similarity metrics
+Free text matches a name or an address. A token of the form `key:value`
+becomes a removable chip:
 
-### Advanced Features
+| key | values |
+| --- | --- |
+| `sim:` | a number 0-1, optionally with `<`, `<=`, `>`, `>=`, `=`; bare means `>=` |
+| `coverage:` | same forms as `sim:` |
+| `changed:` | `graph`, `instructions`, `operands`, `jumps`, `entry`, `loops`, `calls`, or `any` / `none` |
+| `state:` | `unverified`, `verified`, `by-hand`, `imported`, `ported`, `skipped`, `replaced`, `refused` |
+| `found-by:` | any substring of the engine step's name, e.g. `hash` |
+| `trust:` | `strong`, `check`, `weak` |
 
-#### Manual Matching
+A token that looks like a chip but does not parse is searched as text. The
+field never refuses to search.
 
-```python
-# In IDA's Python console
-from bindiff.ida_plugin import BindiffResults
+## Porting, and what it records
 
-results = BindiffResults.create()
-results.read_from_file('path/to/diff.BinDiff')
+A port writes into *this* database, where a wrong name reads afterwards like
+analysis somebody did. So the footer under the Ready to port lens shows what
+a port would do before it does it: a similarity floor (0.50 by default, where
+the measured precision was 93.8%), how many names would be written, and
+separately how many would replace a name already here -- Review selects those
+rows.
 
-# Add manual match
-results.add_match(0x401000, 0x402000)  # primary_addr, secondary_addr
+What a port did is kept per row in a session-only ledger: the State column
+says ported, replaced, skipped or refused for that match, and a ported or
+replaced name can be put back one row at a time. The `.BinDiff` schema is not
+extended, so the ledger and the by-hand set live only as long as the session.
 
-# Save updated results
-results.write_to_file('path/to/diff.BinDiff')
-```
+## Install for development
 
-#### Port Comments/Symbols
+    tools/scripts/install_dev_plugin.sh
 
-```python
-# Port comments from selected matches
-indices = [0, 1, 2, 3]  # Match indices
-results.port_comments(indices, PortCommentsKind.NORMAL)
+It links the manifest and the `python/` directory individually. Do not symlink
+the repository root into `~/.idapro/plugins`: the build tree contains a
+symlink back to the repository, IDA's scanner descends it and loads a second
+copy of the plugin.
 
-# Or port as external library
-results.port_comments(indices, PortCommentsKind.AS_EXTERNAL_LIB)
-```
+## Tests
 
-#### Incremental Diff
+Everything that can be tested without IDA is a pure module, and is. From
+`python/`:
 
-```python
-# After adding manual matches
-results.incremental_diff()
-```
+    python3 -m pytest tests/test_ui_logic.py tests/test_trust.py \
+        tests/test_query.py tests/test_lenses.py tests/test_session.py \
+        tests/test_inspection.py tests/test_porting.py tests/test_theme.py -q
 
-### Automation Example
+`ui_logic`, `trust`, `query`, `lenses`, `inspection`, `theme` and `porting`
+have no Qt and no IDA import. `panels`, `workbench` and `inspector` are
+covered headless too (`test_*_headless.py`), for the parts that do not need a
+widget. Anything importing `bindiff.*` needs the Cython extension, which is
+why the rest of `tests/` does not run from a bare checkout.
 
-```python
-# Script to auto-process diff results
-import ida_auto
-import ida_kernwin
-from bindiff.ida_plugin import BindiffResults, PortCommentsKind
+The Qt layer, the action handlers and the graph view cannot be reached that
+way, so they run inside a real IDA under Xvfb:
 
-def auto_process_diff(diff_file):
-    """Automatically load diff and port high-confidence matches."""
-    # Wait for auto-analysis
-    ida_auto.auto_wait()
+    tools/scripts/run_gui_tests_docker.sh
 
-    # Load results
-    results = BindiffResults.create()
-    if results.read_from_file(diff_file) != 0:
-        print(f"Failed to load {diff_file}")
-        return
+`tests/gui/gui_driver.py` is that harness. It runs *in* IDA, not in pytest:
+it builds a small `.BinDiff` against the functions of the database it opened,
+drives the workbench, and writes a JSON report.
 
-    # Find high-confidence matches
-    high_conf_indices = []
-    for i in range(results.num_matches):
-        match = results.get_match(i)
-        if match.confidence >= 0.9 and match.similarity >= 0.95:
-            high_conf_indices.append(i)
-
-    print(f"Found {len(high_conf_indices)} high-confidence matches")
-
-    # Port comments
-    if high_conf_indices:
-        results.port_comments(high_conf_indices, PortCommentsKind.NORMAL)
-        print(f"Ported comments from {len(high_conf_indices)} functions")
-
-    # Save
-    results.write_to_file(diff_file)
-    print("Results saved")
-
-# Usage
-auto_process_diff("/path/to/diff.BinDiff")
-```
-
-## Customization
-
-### Extending the Plugin
-
-The Python implementation makes it easy to customize:
-
-```python
-class CustomMatchedChooser(MatchedFunctionsChooser):
-    """Custom chooser with additional filtering."""
-
-    def __init__(self, results, min_similarity=0.8):
-        super().__init__(results)
-        self.min_similarity = min_similarity
-
-    def refresh_items(self):
-        """Only show matches above threshold."""
-        super().refresh_items()
-        # Filter by similarity
-        self.items = [
-            item for i, item in enumerate(self.items)
-            if self.results.get_match(i).similarity >= self.min_similarity
-        ]
-```
-
-### Adding Context Menu Actions
-
-```python
-import ida_kernwin
-
-class ImportSymbolsAction(ida_kernwin.action_handler_t):
-    """Action to import symbols from selected matches."""
-
-    def __init__(self, results):
-        super().__init__()
-        self.results = results
-
-    def activate(self, ctx):
-        # Get selected indices from chooser
-        # (implementation depends on chooser context)
-        indices = [...]
-        self.results.port_comments(indices, PortCommentsKind.NORMAL)
-        return 1
-
-    def update(self, ctx):
-        return ida_kernwin.AST_ENABLE_ALWAYS
-
-# Register action
-ida_kernwin.register_action(
-    ida_kernwin.action_desc_t(
-        "bindiff:import_symbols",
-        "Import symbols/comments",
-        ImportSymbolsAction(results)
-    )
-)
-```
-
-## Troubleshooting
-
-### Plugin Not Loading
-
-**Problem**: Plugin doesn't appear in IDA
-
-**Solutions**:
-1. Check IDA output window for errors
-2. Verify Python module is importable:
-   ```python
-   import bindiff.ida_plugin
-   ```
-3. Check file permissions on plugin file
-4. Ensure Cython extensions are built for correct Python version
-
-### Import Errors
-
-**Problem**: `ImportError: No module named 'bindiff'`
-
-**Solutions**:
-1. Add to PYTHONPATH:
-   ```bash
-   export PYTHONPATH=/path/to/bindiff/python:$PYTHONPATH
-   ```
-2. Or copy `bindiff` module to IDA's Python directory:
-   ```bash
-   cp -r bindiff ~/.idapro/python/
-   ```
-
-### Results Not Loading
-
-**Problem**: Results file fails to load
-
-**Solutions**:
-1. Verify file is a valid BinDiff database (`.BinDiff` extension)
-2. Check file was created with compatible BinDiff version
-3. Ensure file permissions allow reading
-4. Try loading in IDA console:
-   ```python
-   from bindiff.ida_plugin import BindiffResults
-   r = BindiffResults.create()
-   print(r.read_from_file('/path/to/file.BinDiff'))
-   ```
-
-### Crashes or Segfaults
-
-**Problem**: IDA crashes when using plugin
-
-**Solutions**:
-1. Ensure BinDiff and bindings built with same compiler
-2. Check for ABI compatibility between Python versions
-3. Verify IDA SDK version matches build configuration
-4. Run with debug logging:
-   ```bash
-   export IDAPYTHON_DEBUG=1
-   ```
-
-## Development
-
-### Building for Development
-
-```bash
-# Build in debug mode
-python setup.py build_ext --inplace --debug
-
-# Enable verbose output
-python setup.py build_ext --inplace -v
-```
-
-### Running Tests
-
-```bash
-# Unit tests for Python code
-pytest python/tests/
-
-# Test in IDA (manual)
-ida64 -A -S"test_script.py" test_binary.idb
-```
-
-### Code Structure
-
-- `bindiff_plugin.py` - Main plugin file (IDA entry point)
-- `ida_plugin.pyx` - Cython bindings for Results API
-- `ida_plugin.pxd` - Cython declarations
-- `results_wrapper.h/cc` - C++ wrapper layer
-
-## Performance
-
-The Python plugin has comparable performance to the C++ version:
-
-- **Loading**: ~same speed (I/O bound)
-- **UI Updates**: Slightly slower for very large result sets (10,000+ matches)
-- **Match Operations**: ~same speed (C++ backend)
-
-For better performance with large datasets:
-- Use filtering to reduce displayed items
-- Implement lazy loading for choosers
-- Cache frequently accessed data
-
-## Contributing
-
-To contribute improvements:
-
-1. Modify `bindiff_plugin.py` for UI changes
-2. Modify `ida_plugin.pyx` for API bindings
-3. Modify `results_wrapper.h/cc` for C++ interface
-4. Test thoroughly with various diff files
-5. Submit pull request
-
-## License
-
-Apache License 2.0 - See LICENSE file
-
-## Support
-
-- **Issues**: https://github.com/google/bindiff/issues
-- **Documentation**: https://github.com/google/bindiff
-- **IDA SDK Docs**: https://hex-rays.com/products/ida/support/sdkdoc/
-
-## Credits
-
-- Original C++ plugin by Google BinDiff team
-- Python port maintains full compatibility
-- Uses Cython for high-performance bindings
+## Module map
+
+    ui_logic.py, trust.py, query.py, lenses.py, inspection.py, theme.py
+                  pure view logic, no Qt and no IDA -- tested headless
+    controller.py the data layer over the .BinDiff and the exports
+    session.py    DiffSession: the one owner of every fact the UI shows
+    panels.py     the two tables, the flow graph, the algorithm editor
+    workbench.py  the dock tab that is the plugin; inspector.py its companion
+    porting.py    what a port would do, and what it did
+    diff_runner.py the sequence from "two files picked" to "results on screen"
+    bindiff_plugin.py  plugin lifecycle, actions, and the IDA-side glue
+
+Nothing in a view reaches into the controller: views read `session` and call
+handlers the plugin supplies. `session.can(action)` is asked afresh every
+time it matters.

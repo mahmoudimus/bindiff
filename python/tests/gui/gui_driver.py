@@ -138,12 +138,7 @@ def run_checks() -> None:
     sys.path.insert(0, "/work/python")
 
     from ida_plugin import panels
-    from ida_plugin.bindiff_plugin import (
-        ACTION_SHOW_MATCHES,
-        ACTION_SHOW_STATISTICS,
-        ACTION_VIEW_FLOW_GRAPHS,
-        BinDiffPlugin,
-    )
+    from ida_plugin.bindiff_plugin import BinDiffPlugin
 
     # The environment the plugin actually runs in.
     from bindiff.ida_env import is_interactive, qt_widgets_usable
@@ -160,7 +155,7 @@ def run_checks() -> None:
 
     plugin = BinDiffPlugin()
     plugin.init()
-    check("registers actions", len(plugin._registered) >= 19,
+    check("registers actions", len(plugin._registered) >= 24,
           f"only registered {len(plugin._registered)}: {plugin._registered}")
     note("actions registered", str(len(plugin._registered)))
 
@@ -176,79 +171,67 @@ def run_checks() -> None:
         os.unlink(database_path)
     build_database(database_path, functions)
 
-    plugin.controller.open_database(database_path)
+    plugin.session.open_result(database_path)
     check("opens a result file", plugin.controller.loaded)
-    rows = plugin.controller.match_rows()
+    check("session opens the result", plugin.session.state.value == "open",
+          f"state was {plugin.session.state}")
+    rows = plugin.session.rows()
     check("builds match rows", len(rows) == len(functions),
           f"{len(rows)} rows for {len(functions)} matches")
 
     # -- the part nothing else covers: real widgets --------------------------
 
-    plugin._show_matches()
-    widget = ida_kernwin.find_widget("BinDiff - Matched Functions")
-    check("matched functions dock exists", widget is not None)
+    plugin._open_workbench()
+    widget = ida_kernwin.find_widget("BinDiff")
+    check("workbench dock exists", widget is not None)
+    bench = plugin.workbench
+    check("table populated",
+          bench is not None and bench.parent is not None
+          and bench._table.model().rowCount() == len(rows),
+          "table row count differs from the session's rows")
+    check("seven columns visible",
+          sum(1 for i in range(bench._table.model().columnCount())
+              if not bench._table.isColumnHidden(i)) == 7)
 
-    form = plugin.controller._matched_form
-    check("match table populated",
-          form is not None and form._table is not None
-          and form._table.rowCount() == len(rows),
-          f"table had {form._table.rowCount() if form and form._table else None} rows")
-    check("all 18 columns rendered",
-          form._table.columnCount() == 18,
-          f"columnCount() was {form._table.columnCount()}")
+    # The visible set belongs to the lens, so choosing columns by hand and
+    # then switching lens has to put the lens's own set back.
+    bench._table.set_columns(["trust", "similarity"])
+    check("choosing columns hides the rest",
+          sum(1 for i in range(bench._table.model().columnCount())
+              if not bench._table.isColumnHidden(i)) == 2)
 
-    # Filtering is wired through the pure logic, but the widgets carrying it
-    # have never been constructed before now.
-    form._filter_bar._text.setText("no-such-function-name-xyz")
-    check("filter empties the table", form._table.rowCount() == 0,
-          f"{form._table.rowCount()} rows survived an impossible filter")
-    form._filter_bar._text.setText("")
-    check("clearing the filter restores rows",
-          form._table.rowCount() == len(rows))
+    # Lenses and search go through the pure logic; here only that the
+    # widgets carry them.
+    bench.set_lens("all")
+    check("the lens restores its columns",
+          sum(1 for i in range(bench._table.model().columnCount())
+              if not bench._table.isColumnHidden(i)) == 7)
+    bench._search.setText("nomatch_zzz")
+    bench._apply_search()   # bypass the debounce
+    check("search narrows", bench._table.model().rowCount() == 0)
+    bench._search.setText("")
+    bench._apply_search()
 
-    # Sorting by every column: a bad column name raises in the model, and the
-    # header click path has never run.
-    for section in range(form._table.columnCount()):
+    bench._table.select_ids([rows[0].match_id])
+    check("selection reaches the session",
+          plugin.session.selected_ids == (rows[0].match_id,),
+          f"the session holds {plugin.session.selected_ids!r}")
+    check("verify is available with a selection", plugin.session.can("verify"))
+
+    plugin._inspect()
+    check("inspector dock exists",
+          ida_kernwin.find_widget("Match inspector") is not None)
+
+    # The four scopes are tabs on the one dock now, so each has to be
+    # reachable without a second widget existing.
+    for scope in ("only_here", "only_there", "overview", "matches"):
         try:
-            form._table._on_header_clicked(section)
-        except Exception as exc:
-            check(f"sort by column {section}", False, repr(exc))
+            bench.show_scope(scope)
+        except Exception:
+            check(f"scope {scope} opens", False, traceback.format_exc(limit=3))
             break
     else:
-        check("sorting by every column", True)
-
-    # Column visibility: hidden columns must actually be hidden, and the
-    # header menu must not be able to hide the last one.
-    from ida_plugin.ui_logic import COLUMNS
-
-    hidden = [index for index, (name, _) in enumerate(COLUMNS)
-              if form._table.isColumnHidden(index)]
-    check("count columns hidden by default", len(hidden) == 10,
-          f"{len(hidden)} of 18 columns hidden, expected 10")
-
-    form._table.visibility.toggle("edges_primary")
-    form._table._apply_visibility()
-    edges_index = [i for i, (n, _) in enumerate(COLUMNS)
-                   if n == "edges_primary"][0]
-    check("toggling a column shows it",
-          not form._table.isColumnHidden(edges_index))
-
-    from ida_plugin.ui_logic import ColumnVisibility
-
-    form._table.set_visibility(ColumnVisibility(["similarity"]))
-    check("hiding the last column is refused",
-          form._table.visibility.set_visible("similarity", False) is False)
-    form._table.set_visibility(ColumnVisibility())
-
-    plugin._show_statistics_widget_check = True
-    try:
-        from ida_plugin.panels import StatisticsDialog
-
-        dialog = StatisticsDialog(plugin.controller.statistic_rows())
-        check("statistics dialog builds", dialog is not None)
-        dialog.close()
-    except Exception as exc:
-        check("statistics dialog builds", False, traceback.format_exc(limit=3))
+        check("every scope opens", True)
 
     # The algorithm config dialog reads the live engine config.
     try:
@@ -305,78 +288,46 @@ def run_checks() -> None:
             check("flow graph viewer opens", False,
                   traceback.format_exc(limit=5))
 
-    # -- unmatched view ------------------------------------------------------
-
-    try:
-        from ida_plugin.panels import UnmatchedFunctionsForm
-        from ida_plugin.ui_logic import UnmatchedRow
-
-        unmatched = [UnmatchedRow(address=0x401000, name="orphan",
-                                  is_library=False, has_real_name=True)]
-        unmatched_form = UnmatchedFunctionsForm(unmatched, "primary")
-        unmatched_form.Show()
-        check("unmatched dock exists",
-              ida_kernwin.find_widget("BinDiff - Unmatched (primary)") is not None)
-    except Exception:
-        check("unmatched dock exists", False, traceback.format_exc(limit=3))
-
-    # -- the diff progress panel ---------------------------------------------
+    # -- progress through the run strip --------------------------------------
     #
-    # The only place this code runs at all: headless there is no QProgressBar
-    # to set a range on. What the headless suite checks is the arithmetic
-    # behind it (ui_logic.DiffProgress); what is checked here is that the
-    # widget reflects it.
+    # The strip is the panel protocol DiffRun expects: start, update_progress,
+    # finish. This is the only place that code runs at all -- headless there
+    # is no QProgressBar to set a range on. What the headless suite checks is
+    # the arithmetic behind it (ui_logic.DiffProgress); what is checked here
+    # is that the widget reflects it.
 
     try:
-        from ida_plugin.panels import DiffProgressForm
         from ida_plugin.ui_logic import DiffProgress
 
-        cancelled = []
-        progress_form = DiffProgressForm("BinDiff - progress probe",
-                                         on_cancel=lambda: cancelled.append(1))
-        progress_form.Show()
-        check("progress dock exists",
-              ida_kernwin.find_widget("BinDiff - progress probe") is not None)
+        # None until OnCreate has run, which _open_workbench above did.
+        check("run strip exists", bench.run_strip is not None,
+              "the workbench has no run strip, so OnCreate did not run")
+        if bench.run_strip is not None:
+            bench.run_strip.start("probe")
+            check("starting shows the running page",
+                  bench.run_strip._stack.currentIndex() == 1)
 
-        progress_form.update_progress(DiffProgress.from_record(
-            {"stage": "export", "message": "exporting primary: a.exe",
-             "fraction": None}))
-        # 0/0 is Qt's indeterminate bar, which is what an export deserves:
-        # idalib's auto-analysis reports nothing to make a fraction from.
-        check("an export shows an indeterminate bar",
-              (progress_form._bar.minimum(),
-               progress_form._bar.maximum()) == (0, 0),
-              f"range was {progress_form._bar.minimum()}-"
-              f"{progress_form._bar.maximum()}")
+            bench.run_strip.update_progress(DiffProgress.from_record(
+                {"stage": "export", "message": "exporting", "fraction": None}))
+            # 0/0 is Qt's indeterminate bar, which is what an export
+            # deserves: idalib's auto-analysis reports nothing to make a
+            # fraction from.
+            check("export shows an indeterminate bar",
+                  bench.run_strip._bar.maximum() == 0,
+                  f"maximum was {bench.run_strip._bar.maximum()}")
 
-        progress_form.update_progress(DiffProgress.from_record(
-            {"stage": "diff", "message": "function: MD index matching",
-             "fraction": 0.75, "step_index": 3, "step_count": 8,
-             "matches": 412}))
-        check("a diff step shows its percentage",
-              progress_form._bar.maximum() == 100
-              and progress_form._bar.value() == 75,
-              f"value was {progress_form._bar.value()} of "
-              f"{progress_form._bar.maximum()}")
-        check("the status line names the step and the match count",
-              "MD index" in progress_form._detail.text()
-              and "412 matched" in progress_form._detail.text(),
-              progress_form._detail.text())
+            bench.run_strip.update_progress(DiffProgress.from_record(
+                {"stage": "diff", "message": "matching", "fraction": 0.5}))
+            check("diff shows a fraction",
+                  bench.run_strip._bar.value() == 50,
+                  f"value was {bench.run_strip._bar.value()} of "
+                  f"{bench.run_strip._bar.maximum()}")
 
-        progress_form._cancel.click()
-        check("cancel reaches the caller", cancelled == [1])
-        check("cancel disables itself once pressed",
-              not progress_form._cancel.isEnabled())
-
-        progress_form.finish("116 matches")
-        check("finishing stops the clock",
-              not progress_form._timer.isActive())
-        check("finishing leaves the outcome on screen",
-              progress_form._detail.text() == "116 matches"
-              and progress_form._bar.value() == 100,
-              progress_form._detail.text())
+            bench.run_strip.finish("probe done")
+            check("compare button returns",
+                  bench.run_strip._stack.currentIndex() == 0)
     except Exception:
-        check("progress dock exists", False, traceback.format_exc(limit=5))
+        check("run strip exists", False, traceback.format_exc(limit=5))
 
     # -- the asynchronous service client -------------------------------------
     #
