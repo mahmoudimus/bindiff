@@ -172,6 +172,22 @@ if IDA_AVAILABLE:
             flag = Qt
         return flag.AlignVCenter | flag.AlignLeft
 
+    def _fixed_font_family() -> str:
+        """The platform's monospace family, or "" if Qt will not name one.
+
+        Asked of QFontDatabase rather than hardcoded: "Menlo" exists on macOS
+        and nowhere else, so naming it left Windows and Linux falling through
+        to the style hint. Read once by the delegate, not per paint.
+        """
+        try:
+            try:
+                fixed = QtGui.QFontDatabase.SystemFont.FixedFont
+            except AttributeError:
+                fixed = QtGui.QFontDatabase.FixedFont
+            return QtGui.QFontDatabase.systemFont(fixed).family()
+        except Exception:
+            return ""
+
     class MatchTableModel(QtCore.QAbstractTableModel):
         """Serves MatchRow objects to a view on demand.
 
@@ -296,6 +312,7 @@ if IDA_AVAILABLE:
             super().__init__(parent)
             self._table = table
             self._generated_side = generated_side  # "primary" | "secondary"
+            self._mono_family = _fixed_font_family()
 
         def paint(self, painter, option, index) -> None:
             text = index.data(Qt.DisplayRole) or ""
@@ -311,27 +328,44 @@ if IDA_AVAILABLE:
                 item_view_item = QtWidgets.QStyle.CE_ItemViewItem
             style.drawControl(item_view_item, option, painter, option.widget)
 
+            row = self._table.row_at(index)
+            dim_name = (row is not None and is_generated_name(
+                row.name_primary if self._generated_side == "primary"
+                else row.name_secondary))
+            # The highlight is already painted, so on a selected row both pens
+            # are the palette's highlighted text. Keeping the tints there put
+            # dim grey on the selection colour -- light on light in IDA's dark
+            # theme -- which made the one row being looked at the least
+            # readable on screen.
+            try:
+                selected = QtWidgets.QStyle.StateFlag.State_Selected
+            except AttributeError:
+                selected = QtWidgets.QStyle.State_Selected
+            if option.state & selected:
+                address_pen = option.palette.highlightedText().color()
+                name_pen = address_pen
+            else:
+                address_pen = tints.get("dim") or option.palette.text().color()
+                name_pen = (address_pen if dim_name
+                            else option.palette.text().color())
+
             painter.save()
             rect = option.rect.adjusted(4, 0, -4, 0)
-            dim = tints.get("dim") or option.palette.text().color()
             mono = QtGui.QFont(option.font)
-            mono.setFamily("Menlo")
+            if self._mono_family:
+                mono.setFamily(self._mono_family)
             try:
                 monospace = QtGui.QFont.StyleHint.Monospace
             except AttributeError:
                 monospace = QtGui.QFont.Monospace
             mono.setStyleHint(monospace)
             painter.setFont(mono)
-            painter.setPen(dim)
+            painter.setPen(address_pen)
             metrics = QtGui.QFontMetrics(mono)
             painter.drawText(rect, _align_left(), address)
 
             painter.setFont(option.font)
-            row = self._table.row_at(index)
-            dim_name = (row is not None and is_generated_name(
-                row.name_primary if self._generated_side == "primary"
-                else row.name_secondary))
-            painter.setPen(dim if dim_name else option.palette.text().color())
+            painter.setPen(name_pen)
             offset = metrics.horizontalAdvance(address + "  ")
             painter.drawText(rect.adjusted(offset, 0, 0, 0),
                              _align_left(), name)
@@ -506,17 +540,41 @@ if IDA_AVAILABLE:
             return [row.match_id for row in self.selected_rows()]
 
         def select_ids(self, ids) -> None:
+            """Selects the rows carrying these match ids, in one operation.
+
+            One QItemSelection built from contiguous runs, not a select() per
+            row: every select() emits selectionChanged, whose handler asks for
+            selected_ids(), which walks selectedIndexes() -- so restoring N
+            rows one at a time is quadratic. set_rows restores the selection
+            on every refresh, and the search field refreshes per keystroke
+            over a lens where the whole shown set can be selected.
+            """
             wanted = set(ids)
-            selection = self.selectionModel()
-            selection.clearSelection()
+            rows = self._model.rows
+            last_column = len(COLUMNS) - 1
+            selection = QtCore.QItemSelection()
+            run_start = None
+            for position, row in enumerate(rows):
+                if row.match_id in wanted:
+                    if run_start is None:
+                        run_start = position
+                    continue
+                if run_start is not None:
+                    selection.select(self._model.index(run_start, 0),
+                                     self._model.index(position - 1,
+                                                       last_column))
+                    run_start = None
+            if run_start is not None:
+                selection.select(self._model.index(run_start, 0),
+                                 self._model.index(len(rows) - 1, last_column))
             try:
                 flag = QtCore.QItemSelectionModel.SelectionFlag
             except AttributeError:
                 flag = QtCore.QItemSelectionModel
-            flags = flag.Select | flag.Rows
-            for position, row in enumerate(self._model.rows):
-                if row.match_id in wanted:
-                    selection.select(self._model.index(position, 0), flags)
+            # ClearAndSelect rather than a clearSelection() first, so an empty
+            # selection is one signal too rather than two.
+            self.selectionModel().select(selection,
+                                         flag.ClearAndSelect | flag.Rows)
 
         def _on_header_clicked(self, section: int) -> None:
             column = COLUMNS[section][0]
