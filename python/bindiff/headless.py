@@ -259,9 +259,14 @@ def dump_types(input_path: str, output_path: str) -> StageResult:
         return StageResult(ok=False, stage="types",
                            message=f"could not open {input_path}")
     try:
+        from bindiff.pseudocode_ida import read_pseudocode_comments
         from bindiff.typeinfo_ida import read_types
 
         declarations, functions = read_types()
+        # Same file, same open, same reason: what BinExport2 cannot carry.
+        # This is also the path that refreshes a sidecar written before
+        # decompiler comments existed, so nobody has to re-export to get them.
+        comments = read_pseudocode_comments()
     except Exception as exc:  # an IDA API this build does not have
         idapro.close_database(False)
         shutil.rmtree(holder, ignore_errors=True)
@@ -270,15 +275,20 @@ def dump_types(input_path: str, output_path: str) -> StageResult:
     idapro.close_database(False)
     shutil.rmtree(holder, ignore_errors=True)
 
+    from bindiff.typeinfo import with_pseudocode
+
     Path(output_path).write_text(
-        json.dumps(to_json(declarations, functions, source=input_path),
-                   indent=1),
+        json.dumps(with_pseudocode(
+            to_json(declarations, functions, source=input_path), comments),
+            indent=1),
         encoding="utf-8")
+    message = f"{len(declarations)} type(s), {len(functions)} prototype(s)"
+    if comments:
+        message += f", {len(comments)} decompiler comment(s)"
     return StageResult(
-        ok=True, stage="types", output=output_path,
-        message=(f"{len(declarations)} type(s), "
-                 f"{len(functions)} prototype(s)"),
-        details={"types": len(declarations), "functions": len(functions)})
+        ok=True, stage="types", output=output_path, message=message,
+        details={"types": len(declarations), "functions": len(functions),
+                 "pseudocode_comments": len(comments)})
 
 
 def export(input_path: str, output_path: str,
