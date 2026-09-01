@@ -200,6 +200,35 @@ def default_output_name(primary, secondary) -> str:
     return f"{stem(primary)}_vs_{stem(secondary)}.BinDiff"
 
 
+# The files this tool writes. Nothing here can be a side of a diff, and
+# handing one over does not fail -- which is the problem. IDA loads anything
+# as raw bytes, so a .BinDiff is disassembled as a flat blob of SQLite,
+# exported, and diffed: a real run against a 10,000-match pair came back with
+# 499 matches and no error, named "<primary>_vs_<primary>_vs_<secondary>".
+#
+# It is a refusal list rather than an allow list because a binary may carry
+# any extension or none at all. Only the names this tool chose are knowable.
+_OUR_OWN_OUTPUT = {
+    ".bindiff": "a result file",
+    ".results": "a diff log",
+    ".truth": "a ground-truth file",
+    ".meta": "a metadata sidecar",
+}
+
+
+def reject_reason(path) -> Optional[str]:
+    """Why `path` cannot be a side of a diff, or None when it can be.
+
+    Names the file, because the two fields sit next to each other and picking
+    the result you just loaded instead of the binary it came from is an easy
+    slip to make and an expensive one to diagnose.
+    """
+    what = _OUR_OWN_OUTPUT.get(Path(path).suffix.lower())
+    if what is None:
+        return None
+    return f"{Path(path).name} is {what} this tool produced, not an input."
+
+
 def worker_arguments(primary: str, secondary: str, output: str) -> list:
     """The command handed to the headless worker."""
     return ["pipeline", str(primary), str(secondary), str(output)]

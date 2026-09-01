@@ -844,18 +844,25 @@ if IDA_AVAILABLE:
                 return
             self._call("on_diff", path)
 
-        def set_results(self, open_: bool, path=None, matches=None) -> None:
+        def set_results(self, open_: bool, path=None, matches=None,
+                        secondary=None) -> None:
             """What is loaded, and therefore what is available.
 
             Pushed by the plugin rather than inferred here: the panel does not
             reach into the controller, and IDA's own action state is not to be
             trusted for this -- being told once that the views were
             unavailable is what left them greyed for a whole session.
+
+            `secondary` is the other side of the loaded result, offered as the
+            thing to diff against next. Only ever filled into an empty field:
+            a suggestion must not overwrite a path somebody typed.
             """
             self._results_open = open_
             if self.parent is None:
                 return
             self._set_results_text(open_, path, matches)
+            if secondary and not self._secondary.text().strip():
+                self._secondary.setText(str(secondary))
             self._refresh_enabled()
 
         def _refresh_enabled(self) -> None:

@@ -94,6 +94,7 @@ class BinDiffController:
         self._statistics_form = None
         self._binexports = (None, None)
         self._details = None
+        self._functions = {}
 
     @property
     def database(self):
@@ -113,6 +114,7 @@ class BinDiffController:
         self._database = BinDiffDatabase.open(path, read_only=read_only)
         self._binexports = (None, None)
         self._details = None
+        self._functions = {}
         return self._database
 
     def close(self) -> None:
@@ -211,9 +213,26 @@ class BinDiffController:
     def set_binexports(self, primary: Optional[str],
                        secondary: Optional[str]) -> None:
         self._binexports = (primary, secondary)
+        # Both caches are keyed on the old pair and neither would notice.
+        self._details = None
+        self._functions = {}
+
+    def _exported_functions(self, path: str):
+        """Every function in one .BinExport, parsed once and kept.
+
+        read_functions parses the whole protobuf, which is seconds on a large
+        export. The unmatched lists are now refreshed after every edit, so
+        without this a delete over a multi-selection would re-parse both
+        exports and stall the UI for exactly as long as the diff's inputs are
+        big.
+        """
+        from bindiff.binexport import read_functions
+
+        if path not in self._functions:
+            self._functions[path] = read_functions(path)
+        return self._functions[path]
 
     def _unmatched(self, side: int):
-        from bindiff.binexport import read_functions
         from ida_plugin.ui_logic import unmatched_functions
 
         if self._database is None:
@@ -227,7 +246,7 @@ class BinDiffController:
         matches = self._database.matches()
         matched = [m.address_primary if side == 0 else m.address_secondary
                    for m in matches]
-        return unmatched_functions(read_functions(path), matched)
+        return unmatched_functions(self._exported_functions(path), matched)
 
     def unmatched_primary(self):
         return self._unmatched(0)
@@ -528,7 +547,7 @@ if IDA_AVAILABLE:
             if self._control_panel is None:
                 return
             loaded = self.controller.loaded
-            path = matches = None
+            path = matches = secondary = None
             if loaded:
                 database = self.controller.database
                 path = getattr(database, "path", None)
@@ -536,7 +555,16 @@ if IDA_AVAILABLE:
                     matches = database.num_matches()
                 except Exception:
                     matches = None
-            self._control_panel.set_results(loaded, path, matches)
+                # What "diff again" means for a loaded result: the same
+                # secondary, against a primary that has changed since. Offered
+                # rather than left blank because the obvious thing to reach
+                # for is the .BinDiff sitting right there in the field above,
+                # which is a result and not an input.
+                try:
+                    secondary = self.controller.resolve_binexports()[1]
+                except Exception:
+                    secondary = None
+            self._control_panel.set_results(loaded, path, matches, secondary)
 
         def _open_menu(self) -> None:
             """Offers what the plugin can do, rather than assuming.
@@ -810,6 +838,25 @@ if IDA_AVAILABLE:
             if form is not None:
                 form.set_rows(self.controller.match_rows())
 
+        def _refresh_views(self) -> None:
+            """Every view that an edit can change, refreshed together.
+
+            Deleting a match and adding one are inverses and were not
+            symmetric: adding refreshed the matched and unmatched lists,
+            deleting refreshed only the matched one, so the two functions a
+            delete frees never reappeared as unmatched. Statistics was
+            refreshed by neither, though it derives "Matched" and "Unmatched"
+            from the live match count and so moves on every edit.
+
+            Only forms that are already open are touched -- an edit must not
+            pop a window nobody asked for.
+            """
+            self._refresh_matches()
+            self._refresh_unmatched()
+            if self.controller._statistics_form is not None:
+                self.controller._statistics_form.set_rows(
+                    self.controller.statistic_rows())
+
         def _report(self, message: str) -> None:
             ida_kernwin.msg(f"[{PLUGIN_NAME}] {message}\n")
 
@@ -824,7 +871,7 @@ if IDA_AVAILABLE:
                     f"Delete {len(ids)} match(es)?") != ida_kernwin.ASKBTN_YES:
                 return
             deleted = self.controller.delete_matches(ids)
-            self._refresh_matches()
+            self._refresh_views()
             self._report(f"deleted {deleted} match(es); not yet saved")
 
         def _confirm_matches(self) -> None:
@@ -832,7 +879,7 @@ if IDA_AVAILABLE:
             if not ids:
                 return
             changed = self.controller.confirm_matches(ids)
-            self._refresh_matches()
+            self._refresh_views()
             self._report(f"confirmed {changed} match(es); not yet saved")
 
         def _save_results(self) -> None:
@@ -1156,8 +1203,7 @@ if IDA_AVAILABLE:
                 ida_kernwin.warning(str(exc))
                 return
 
-            self._refresh_matches()
-            self._refresh_unmatched()
+            self._refresh_views()
             self._report(
                 f"matched 0x{primary_rows[0].address:X} to "
                 f"0x{secondary_rows[0].address:X}; not yet saved")
@@ -1412,6 +1458,23 @@ if IDA_AVAILABLE:
                     False, "*.*", "Select the secondary binary or database")
             if not secondary:
                 return
+
+            from ida_plugin.diff_runner import reject_reason
+
+            refusal = reject_reason(secondary)
+            if refusal:
+                ida_kernwin.warning(
+                    f"{refusal}\n\n"
+                    "Diff against the other side of the comparison: its "
+                    "binary, its .i64 database, or its .BinExport.\n\n"
+                    "Your open database is always the primary and is "
+                    "exported again for every diff, so names, comments and "
+                    "types you have imported since the last one are already "
+                    "included. To re-diff after importing, pick the same "
+                    "secondary as before -- its .BinExport is quickest, "
+                    "since it needs no export at all.")
+                return
+
             primary = self._primary_to_export()
             if not primary:
                 ida_kernwin.warning(
@@ -1553,13 +1616,18 @@ if IDA_AVAILABLE:
                 self._sync_control_panel()
 
             def runner(args, **kwargs):
-                # The snapshot lives exactly as long as the worker needs it,
-                # and is made here rather than in _diff_database so the copy
-                # happens on this thread instead of the UI's.
-                with self._snapshot(args[1]) as source:
-                    return run_headless([args[0], source, *args[2:]],
-                                        timeout=DEFAULT_TIMEOUT_SECONDS,
-                                        **kwargs)
+                # Both sides are copied, and here rather than in
+                # _diff_database so the copying happens on this thread instead
+                # of the UI's. The secondary needs it as much as the primary:
+                # an .i64 open in another IDA is locked, idalib's
+                # open_database returns non-zero for it, and that surfaced as
+                # a bare "could not open <path>" with nothing to do about it.
+                with self._snapshot(args[1]) as primary_source, \
+                        self._snapshot(args[2]) as secondary_source:
+                    return run_headless(
+                        [args[0], primary_source, secondary_source,
+                         *args[3:]],
+                        timeout=DEFAULT_TIMEOUT_SECONDS, **kwargs)
 
             run = DiffRun(
                 runner=runner,

@@ -751,3 +751,45 @@ def test_export_reports_an_unopenable_input(tmp_path):
     assert result.stage == "export"
     assert "could not open" in result.message
     assert "no such file" in result.message
+
+
+class TestExportRefusesOurOwnOutput:
+    """The export stage is where the damage happens: IDA disassembles any
+    file, so a .BinDiff handed to it as an input is exported as a flat blob
+    of SQLite and diffed. It comes back with matches and no error.
+
+    Both guards run before idalib is imported, so this needs no IDA.
+    """
+
+    def test_a_result_file_is_refused(self, tmp_path):
+        from bindiff.headless import export
+
+        result = export(str(_touch(tmp_path / "a_vs_b.BinDiff")),
+                        str(tmp_path / "out.BinExport"))
+        assert not result.ok
+        assert "not an input" in result.message
+
+    def test_a_missing_input_is_refused(self, tmp_path):
+        from bindiff.headless import export
+
+        result = export(str(tmp_path / "gone.i64"),
+                        str(tmp_path / "out.BinExport"))
+        assert not result.ok
+        assert "no such file" in result.message
+
+    def test_a_real_input_gets_past_the_guards(self, tmp_path):
+        """It must not refuse a database: the exporter is reached, and here
+        that is a stub, so what is asserted is that the guards let it by."""
+        from bindiff.headless import export
+
+        source = _touch(tmp_path / "hexx64.dll.i64")
+        try:
+            result = export(str(source), str(tmp_path / "out.BinExport"))
+        except ImportError:
+            pytest.skip("idalib is not importable here")
+        assert "not an input" not in (result.message or "")
+
+
+def _touch(path):
+    path.write_bytes(b"SQLite format 3\x00")
+    return path

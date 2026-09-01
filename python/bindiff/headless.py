@@ -292,19 +292,35 @@ def export(input_path: str, output_path: str,
     Must run in a worker process: it imports idapro, which is not permitted
     inside the IDA GUI.
     """
+    # Both guards come before the idalib import, because neither needs a
+    # disassembler and importing one costs seconds.
+    #
+    # Existence is checked here rather than left to idalib: on IDA 9.1
+    # open_database() with a path that does not exist terminates the process
+    # outright instead of returning non-zero, which takes the whole worker
+    # down and leaves the caller with no result to report. 9.4 returns an
+    # error. Either way a missing input is the caller's mistake.
+    if not Path(input_path).exists():
+        return StageResult(ok=False, stage="export",
+                           message=f"could not open {input_path}: no such file")
+
+    # A file this tool wrote is refused rather than disassembled. IDA loads
+    # anything as raw bytes, so a result file is not rejected downstream by
+    # accident -- it is exported as a flat blob and diffed, producing a
+    # plausible number of matches and no error at all. The launcher checks
+    # this too, where it can say what to pick instead; this is for the worker
+    # run by hand.
+    if Path(input_path).suffix.lower() in (".bindiff", ".results", ".truth",
+                                           ".meta"):
+        return StageResult(
+            ok=False, stage="export",
+            message=f"refusing to disassemble {Path(input_path).name}: it is "
+                    f"a file BinDiff produced, not an input to a diff")
+
     import idapro
 
     if exporter is None:
         exporter = _invoke_binexport
-
-    # Checked here rather than left to idalib: on IDA 9.1 open_database() with a
-    # path that does not exist terminates the process outright instead of
-    # returning non-zero, which takes the whole worker down and leaves the
-    # caller with no result to report. 9.4 returns an error. Either way a
-    # missing input is the caller's mistake and needs no disassembler to detect.
-    if not Path(input_path).exists():
-        return StageResult(ok=False, stage="export",
-                           message=f"could not open {input_path}: no such file")
 
     if idapro.open_database(str(input_path), True) != 0:
         return StageResult(ok=False, stage="export",

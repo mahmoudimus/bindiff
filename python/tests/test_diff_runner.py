@@ -361,3 +361,49 @@ class TestExportsReachTheLoader:
         harness = Harness(Result(ok=True, matches=116))
         harness.build().execute(["diff", "a", "b", "o.BinDiff"], "o.BinDiff")
         assert ("load", "o.BinDiff", ()) in harness.events
+
+
+class TestRefusingOurOwnOutput:
+    """A .BinDiff in the "diff against" field is not caught by anything
+    downstream: IDA loads any file as raw bytes, so the SQLite result gets
+    disassembled, exported and diffed. A real session produced 499 matches
+    for a pair that has 10,165, with no error anywhere.
+    """
+
+    @pytest.mark.parametrize("name", [
+        "hexx64-9.4_vs_hexx64-9.3.BinDiff",
+        "a_vs_b.bindiff",
+        "run.results",
+        "insider.truth",
+        "hexx64.dll.BinExport.meta",
+    ])
+    def test_a_file_we_wrote_is_refused(self, name):
+        from ida_plugin.diff_runner import reject_reason
+
+        reason = reject_reason(name)
+        assert reason is not None
+        assert name in reason, "the message must name the file"
+
+    @pytest.mark.parametrize("name", [
+        "hexx64.dll",
+        "hexx64.dll.i64",
+        "hexx64.idb",
+        "hexx64.dll.BinExport",
+        "libc.so.6",
+        "stripped_binary_with_no_extension",
+    ])
+    def test_a_real_input_is_allowed(self, name):
+        from ida_plugin.diff_runner import reject_reason
+
+        assert reject_reason(name) is None
+
+    def test_the_check_is_case_insensitive(self):
+        """IDA writes .BinDiff; a user's shell completion may not."""
+        from ida_plugin.diff_runner import reject_reason
+
+        assert reject_reason("a_vs_b.BINDIFF") is not None
+
+    def test_it_takes_a_path_not_only_a_name(self):
+        from ida_plugin.diff_runner import reject_reason
+
+        assert reject_reason("/Volumes/code/re/a_vs_b.BinDiff") is not None
