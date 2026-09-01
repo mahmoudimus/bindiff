@@ -228,14 +228,36 @@ def parse_declarations(statements: Sequence[str]) -> Tuple[int, int]:
 def apply_prototype(address: int, declaration: str) -> bool:
     """Gives a function the declaration another database had for it.
 
+    Refuses an address IDA has not identified as a function, and an address
+    that is not a function's entry. Typing something that is not a function
+    manufactures a data point: the type is stored, `get_tinfo` returns it
+    afterwards, and every later check -- including this project's own, and
+    including a sidecar produced from this database -- reads it back as
+    though a disassembler had concluded it. A guess written down becomes
+    indistinguishable from a finding.
+
+    One address in 182 on a real pair. Small, and the wrong kind of small:
+    it propagates.
+
+    There is deliberately no "the primary already has a type, so skip"
+    check, though 101 of those 182 do. Such a check reads back whatever was
+    written on a previous run and calls it ground truth, which is the same
+    circularity from the other end. Whether to overwrite is the caller's
+    decision, made from the match, not this function's guess about
+    provenance it cannot see.
+
     SetType's text wants a name in it, which is what print_decls and
-    tinfo._print produce, so the string travels unchanged from one database to
-    the other.
+    tinfo._print produce, so the string travels unchanged.
     """
+    import ida_funcs
     import idc
 
     text = (declaration or "").strip()
     if not text:
+        return False
+
+    function = ida_funcs.get_func(address)
+    if function is None or function.start_ea != address:
         return False
     if not text.endswith(";"):
         text += ";"

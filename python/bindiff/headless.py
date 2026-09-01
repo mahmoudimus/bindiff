@@ -512,8 +512,16 @@ def _run_import(result_path: str, limit: Optional[int]) -> dict:
             else:
                 defined = failed = 0
 
-            applied, rejected = [], []
+            import ida_funcs
+
+            applied, rejected, not_a_function = [], [], 0
             for address, declaration, name in ports:
+                # Counted apart from a rejection: refusing to type something
+                # that is not a function is the guard working, not a failure
+                # to apply a prototype.
+                if ida_funcs.get_func(address) is None:
+                    not_a_function += 1
+                    continue
                 if apply_prototype(address, declaration):
                     applied.append(f"{address:#x} {declaration[:70]}")
                 else:
@@ -537,6 +545,7 @@ def _run_import(result_path: str, limit: Optional[int]) -> dict:
             prototypes = {"planned": len(ports), "applied": len(applied),
                           "skipped_uninformative": uninformative,
                           "rejected": len(rejected),
+                          "not_a_function": not_a_function,
                           "examples": applied[:3],
                           "rejected_examples": rejected[:3]}
 
