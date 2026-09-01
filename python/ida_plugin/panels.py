@@ -144,10 +144,22 @@ if IDA_AVAILABLE:
             self.on_activated: Optional[Callable[[MatchRow], None]] = None
             self.cellDoubleClicked.connect(self._on_double_clicked)
 
-            # Context menu entries are IDA actions, not Qt ones, so they stay
-            # in one place: registered once, reachable from both the plugin
-            # menu and here, and enabled/disabled by the same predicate.
+            # Context menu entries name IDA actions, so they stay in one
+            # place: registered once, reachable from the plugin menu and from
+            # here, and enabled by the same predicate.
             self.context_actions: Sequence[str] = ()
+            # How a chosen entry is run. Set by the plugin to call the handler
+            # directly; process_ui_action is the fallback and does not work
+            # from inside this menu -- see _show_context_menu.
+            self.on_action: Optional[Callable[[str], None]] = None
+
+            # Density. The default row height leaves a table that shows a
+            # dozen rows where it could show thirty, and a diff is a list you
+            # scan rather than read. Sized from the font rather than a
+            # constant so it follows IDA's own scaling.
+            metrics = self.fontMetrics()
+            self.verticalHeader().setDefaultSectionSize(metrics.height() + 4)
+            self.setWordWrap(False)
             self._visibility = ColumnVisibility()
             self.on_visibility_changed: Optional[Callable[[], None]] = None
             self._apply_visibility()
@@ -222,7 +234,18 @@ if IDA_AVAILABLE:
                 action.setData(name)
             chosen = exec_widget(menu,
                                  self.viewport().mapToGlobal(position))
-            if chosen is not None:
+            if chosen is None:
+                return
+            # Called directly rather than through
+            # ida_kernwin.process_ui_action, which returned without running
+            # anything from here: the menu appeared, every entry was
+            # clickable, and clicking did nothing at all -- not even the
+            # "select a match first" warning. Routing a click on our own
+            # widget out to IDA's action system and back was never buying
+            # anything; the callable is right here.
+            if self.on_action is not None:
+                self.on_action(chosen.data())
+            else:
                 ida_kernwin.process_ui_action(chosen.data())
 
         def set_rows(self, rows: Sequence[MatchRow]) -> None:
@@ -678,11 +701,13 @@ if IDA_AVAILABLE:
 
         def __init__(self, rows: Sequence[MatchRow],
                      on_jump: Optional[Callable[[int], None]] = None,
-                     context_actions: Sequence = ()) -> None:
+                     context_actions: Sequence = (),
+                     on_action: Optional[Callable[[str], None]] = None) -> None:
             super().__init__()
             self._all_rows = list(rows)
             self._on_jump = on_jump
             self._context_actions = tuple(context_actions)
+            self._on_action = on_action
             self._table: Optional[MatchTable] = None
             self._status: Optional[QtWidgets.QLabel] = None
             self.parent = None
@@ -697,6 +722,7 @@ if IDA_AVAILABLE:
             self._table = MatchTable()
             self._table.on_activated = self._activate
             self._table.context_actions = self._context_actions
+            self._table.on_action = self._on_action
             self._status = QtWidgets.QLabel()
 
             layout.addWidget(self._filter_bar)

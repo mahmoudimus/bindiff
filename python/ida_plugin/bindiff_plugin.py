@@ -421,6 +421,11 @@ if IDA_AVAILABLE:
             shortcuts = {ACTION_MAIN: "Shift-D",
                          ACTION_LOAD: "Ctrl-Shift-6"}
 
+            # Kept alongside registration rather than written out a second
+            # time, so a context menu entry can never name an action whose
+            # handler this does not have.
+            self._callbacks = {name: callback for name, _, callback, _ in specs}
+
             for name, label, callback, enabled in specs:
                 if ida_kernwin.register_action(ida_kernwin.action_desc_t(
                         name, label, _Action(callback, enabled),
@@ -501,6 +506,28 @@ if IDA_AVAILABLE:
                 pass
 
         # -- helpers --------------------------------------------------------
+
+        def _invoke_action(self, name: str) -> None:
+            """Runs a context-menu entry by action name.
+
+            The panel used to hand the name to ida_kernwin.process_ui_action,
+            which returned without running anything: the menu appeared, every
+            entry was clickable, and clicking did nothing -- not even the
+            "select one or more matches first" warning that an empty
+            selection should produce. Silence in both directions is what made
+            it look like a UI problem rather than a dispatch one.
+
+            The handlers are in this object and the table is ours, so it calls
+            them. An unknown name is reported rather than ignored, since the
+            previous failure mode was precisely a click that went nowhere
+            quietly.
+            """
+            handler = getattr(self, "_callbacks", {}).get(name)
+            if handler is None:
+                ida_kernwin.warning(
+                    f"{PLUGIN_NAME}: no handler registered for {name!r}.")
+                return
+            handler()
 
         def _selected_match_ids(self) -> list:
             form = self.controller._matched_form
@@ -1056,7 +1083,8 @@ if IDA_AVAILABLE:
                         None,
                         ACTION_COPY_PRIMARY_ADDRESS,
                         ACTION_COPY_SECONDARY_ADDRESS,
-                    ))
+                    ),
+                    on_action=self._invoke_action)
                 self.controller._matched_form.Show()
             else:
                 self.controller._matched_form.set_rows(
