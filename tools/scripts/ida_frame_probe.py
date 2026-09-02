@@ -4,6 +4,31 @@ checked against a build other than the one it was written on.
     exec(open("/Users/mahmoud/src/idapro/bindiff/tools/scripts/"
               "ida_frame_probe.py").read())
 
+Headlessly, against an image rather than a running IDA -- which is how 9.1
+was checked, since idalib for it is only in the container:
+
+    mkdir -p build/frame-probe && cat > build/frame-probe/driver.py <<'EOF'
+    import shutil, sys, tempfile
+    from pathlib import Path
+    binary = sys.argv[1] if len(sys.argv) > 1 else "/bin/ls"
+    holder = Path(tempfile.mkdtemp())
+    target = holder / Path(binary).name
+    shutil.copyfile(binary, target)
+    import idapro
+    assert idapro.open_database(str(target), True) == 0
+    try:
+        exec(compile(Path("/work/tools/scripts/ida_frame_probe.py").read_text(),
+                     "probe", "exec"), {"__name__": "__main__"})
+    finally:
+        idapro.close_database(False)
+        shutil.rmtree(holder, ignore_errors=True)
+    EOF
+    docker compose run --rm -T idapro-tests-9.1 /work/build/frame-probe/driver.py
+
+/bin/ls rather than a fixture: the checked-in .idb files are 32-bit and 9.x
+refuses them without an upg32 the image does not ship, and this cares about
+the API rather than about which program it is looking at.
+
 Read-only in the database that matters: it renames a frame member and then
 puts the old name back, because "does rename_udm work here" cannot be
 answered without trying it. Nothing is saved -- close without saving and
@@ -13,6 +38,9 @@ The porting was written and measured against IDA 9.4. What differs between
 versions, and cannot be checked from outside IDA:
 
   * whether a frame is a tinfo_t UDT (9.0+) or the old struc_t
+  * whether the _ea spellings exist. 9.4 deprecates get_func_frame and
+    calc_stkvar_struc_offset in favour of them; 9.1 does not have them at
+    all, so following the warning would break the compatibility leg
   * whether rename_udm reports refusal, or accepts and drops silently --
     set_name returns False and raises nothing, and six bugs hid behind that
   * what calc_stkvar_struc_offset returns for an operand that is not a

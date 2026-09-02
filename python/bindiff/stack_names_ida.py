@@ -21,6 +21,13 @@ silently applied.
 What this does not reach is the decompiler. Hex-Rays names its own local
 variables, in its own store, and a frame member renamed here does not appear
 in the pseudocode -- the same split as comments, and for the same reason.
+
+**Do not follow 9.4's deprecation warnings here.** It asks for
+get_func_frame_ea and calc_stkvar_struc_offset_ea; neither exists on 9.1,
+which is the compatibility leg. Verified with tools/scripts/ida_frame_probe.py
+on both: the un-suffixed spellings are present on 9.1 and 9.4, the _ea ones
+only on 9.4, and everything else this uses -- find_udm, rename_udm,
+STRMEM_OFFSET, TERR_OK -- behaves identically, refusal code included.
 """
 
 from __future__ import annotations

@@ -501,6 +501,14 @@ has named by hand, not on two builds of the same DLL.
 It does not reach the decompiler. Hex-Rays names its own locals in its own
 store, the same split as comments.
 
+`tools/scripts/ida_frame_probe.py` checks the API on a build this machine has
+no idalib for; its docstring carries the `docker compose run` form used for
+9.1. **Do not follow 9.4's deprecation warnings here**: it asks for
+`get_func_frame_ea` and `calc_stkvar_struc_offset_ea`, neither of which exists
+on 9.1. Everything else the porting uses behaves identically on both, refusal
+code included -- a name already taken comes back `-21` rather than being
+silently applied.
+
 **Configuration** (`config.{h,cc}`, `bindiff_config.proto`, `bindiff.json`): `bindiff.json` is embedded at build time (`file(READ)` → `config_defaults.h.in`) and also parsed into the `Config` proto. `config::Proto()` lazily loads per-user/system config and merges it over the defaults; `config::MergeInto()` special-cases the matching-step lists because order and uniqueness matter. Editing `bindiff.json` needs a rebuild to affect compiled-in defaults.
 
 **Progress and cancellation.** `Diff()` takes an optional `DiffCallback`, called before each matching step and on each round of propagating matches through the call graph — propagation is where a step spends its time, so a callback that only saw step boundaries would go quiet for exactly as long as the work takes. Returning false stops the diff; `ClassifyChanges` still runs, so a cancelled diff yields a smaller *coherent* result rather than nothing. That is worth more here than for a search: the steps run strongest first, so an interrupted diff has the matches worth having.
