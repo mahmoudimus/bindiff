@@ -476,6 +476,34 @@ times there against 38 stripped, a 33× collapse. Anything measured against
 symbols or debug info is measuring the debug info. `--strip` is the mode that
 answers the question the default config has to answer.
 
+**`bindiff/ida.py` is the only module that reaches into IDA.** `idaapi` is
+itself a facade over the `ida_*` modules and carries almost all of it -- 43 of
+43 names this package uses on 9.4, 42 of 43 on 9.1 -- so going through one
+place is what makes a version difference fixable once rather than wherever it
+bites. `first_available()` picks a spelling, `entry_points()` / `frame_of()` /
+`stack_offset()` are backports, and `module()` reaches past the facade for the
+few things it omits (`idautils`).
+
+Two rules it exists to hold, both **fatal to the process rather than
+raising**, so they are checked rather than attempted:
+
+- `idaapi` does `from ida_ida import *`, and `ida_ida` evaluates database
+  state at import time. With no database open that is INTERR 3123.
+- In an idalib worker, `idapro` must be imported **first**: it loads libida
+  with global symbols before `ida_pro` imports `_ida_pro`. Importing `idaapi`
+  ahead of it is "Fatal error before kernel init" on 9.1. 9.4 tolerates it, so
+  a 9.4-only run will not show you the bug.
+
+So `api()` refuses unless `ida_kernwin` is already in `sys.modules` (the GUI,
+which IDA's own start-up guarantees) or `idapro` is (a worker). It never
+imports `idapro` itself: which of the two a process is belongs to the caller,
+and `bindiff.headless` decides it deliberately. `available()` and
+`decompiler()` answer False/None instead of raising, so a caller asking
+whether something exists is never the thing that brings the process down.
+
+The UI modules keep their own `ida_kernwin` imports. They only ever run with
+the kernel up, and the drift this guards against is in the database API.
+
 **Stack variable names** (`stack_names.py`, `stack_names_ida.py`) — upstream
 issue #13. BinExport2 has no locals table, which is why this looks impossible;
 the names are there anyway, because a stack operand is an `IMMEDIATE_INT`

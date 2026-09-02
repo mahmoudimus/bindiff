@@ -291,7 +291,7 @@ def apply_symbol_ports(ports: Sequence[SymbolPort],
     """Applies renames to the open database.
 
     `rename` is injected so this is testable without IDA; it defaults to
-    ida_name.set_name with SN_NOWARN. A rename that IDA rejects (a name already
+    idaapi.set_name with SN_NOWARN. A rename that IDA rejects (a name already
     taken, say) counts as failed rather than aborting the run -- porting a few
     hundred names should not stop on the first collision.
     """
@@ -411,17 +411,18 @@ def mark_as_library(addresses: Sequence[int]) -> PortResult:
     """
     if not database_is_open():
         raise RuntimeError("marking functions requires a running IDA database")
-    import ida_funcs
+    from bindiff.ida import api
 
+    idaapi = api()
     result = PortResult()
     for address in addresses:
         try:
-            function = ida_funcs.get_func(address)
+            function = idaapi.get_func(address)
             if function is None:
                 result.skipped += 1
                 continue
-            function.flags |= ida_funcs.FUNC_LIB
-            if ida_funcs.update_func(function):
+            function.flags |= idaapi.FUNC_LIB
+            if idaapi.update_func(function):
                 result.applied += 1
             else:
                 result.failed += 1
@@ -433,7 +434,9 @@ def mark_as_library(addresses: Sequence[int]) -> PortResult:
 def _ida_rename(address: int, name: str) -> bool:
     if not database_is_open():
         raise RuntimeError("renaming requires a running IDA database")
-    import ida_name
+    from bindiff.ida import api
+
+    idaapi = api()
 
     # SN_NOCHECK and SN_FORCE, not the defaults. Measured over all 1,347
     # planned renames on the real pair: the defaults applied 0, adding
@@ -460,23 +463,23 @@ def _ida_rename(address: int, name: str) -> bool:
     #
     # So some functions end up as name_0 and name_1. That is honest about
     # there being several, and better than leaving them all sub_.
-    return bool(ida_name.set_name(
+    return bool(idaapi.set_name(
         address, name,
-        ida_name.SN_NOWARN | ida_name.SN_NOCHECK | ida_name.SN_FORCE))
+        idaapi.SN_NOWARN | idaapi.SN_NOCHECK | idaapi.SN_FORCE))
 
 
 def _ida_set_comment(address: int, text: str,
                      kind: str = "instruction") -> bool:
     if not database_is_open():
         raise RuntimeError("commenting requires an open IDA database")
-    import ida_bytes
-    import ida_funcs
+    from bindiff.ida import api
 
+    idaapi = api()
     if kind == "function":
-        function = ida_funcs.get_func(address)
+        function = idaapi.get_func(address)
         if function is not None:
             # Non-repeatable: a repeatable function comment is echoed at every
             # call site, which is rarely what someone wrote it for.
-            return bool(ida_funcs.set_func_cmt(function, text, False))
+            return bool(idaapi.set_func_cmt(function, text, False))
         # No function here -- fall through rather than lose the comment.
-    return bool(ida_bytes.set_cmt(address, text, False))
+    return bool(idaapi.set_cmt(address, text, False))

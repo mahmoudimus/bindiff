@@ -35,21 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
-
-class Unavailable(Exception):
-    """This IDA does not expose an API this needs."""
-
-
-# What calc_stkvar_struc_offset returns for an operand that is not a stack
-# variable. BADADDR rather than -1 or None, so it has to be spelled out.
-#
-# It is not the only value to refuse. On the measured pair 74 operands came
-# back BADADDR and another 97 came back a number outside any frame -- a
-# negative displacement read as unsigned, most likely. Multiplying one of
-# those by 8 for a bit offset overflows uint64 and the rename raises instead
-# of skipping, so the real test is whether the offset lands inside this
-# function's frame.
-_NOT_A_STACK_VARIABLE = 0xFFFFFFFFFFFFFFFF
+from bindiff.ida import Unavailable  # noqa: F401  (re-exported for callers)
 
 
 @dataclass(frozen=True)
@@ -88,6 +74,7 @@ def apply_stack_names(ports: Sequence[StackNamePort]) -> StackNameResult:
     same slot is usually referenced by several instructions -- the first port
     to resolve to a given offset wins and the rest read as unchanged.
     """
+    from bindiff import ida
     from bindiff.ida_env import database_is_open
     from bindiff.stack_names import is_generated_name
 
@@ -97,18 +84,13 @@ def apply_stack_names(ports: Sequence[StackNamePort]) -> StackNameResult:
         raise RuntimeError("renaming a stack variable requires an open "
                            "IDA database")
 
-    import ida_frame
-    import ida_funcs
-    import ida_typeinf
-    import ida_ua
-
-    for module, name in ((ida_frame, "calc_stkvar_struc_offset"),
-                         (ida_frame, "get_func_frame"),
-                         (ida_typeinf, "STRMEM_OFFSET")):
-        if getattr(module, name, None) is None:
-            raise Unavailable(
-                f"{module.__name__} has no {name}; the frame API has moved "
-                "and this needs updating")
+    # One facade, so a spelling that moved between versions is fixed in
+    # bindiff.ida rather than here. Checked up front: finding out halfway
+    # through that the frame API has moved leaves half a database renamed.
+    api = ida.api()
+    for name in ("calc_stkvar_struc_offset", "get_func_frame",
+                 "STRMEM_OFFSET", "udm_t", "insn_t", "decode_insn"):
+        ida.first_available(name)
 
     result = StackNameResult()
     by_function: Dict[int, List[StackNamePort]] = {}
@@ -116,20 +98,18 @@ def apply_stack_names(ports: Sequence[StackNamePort]) -> StackNameResult:
         by_function.setdefault(port.function, []).append(port)
 
     for entry, group in by_function.items():
-        function = ida_funcs.get_func(entry)
+        function = api.get_func(entry)
         if function is None:
             result.unresolved += len(group)
             continue
-        frame = ida_typeinf.tinfo_t()
-        if not ida_frame.get_func_frame(frame, function):
+        frame = ida.frame_of(function)
+        if frame is None:
             result.unresolved += len(group)
             continue
 
-        frame_size = frame.get_size()
         done: Set[int] = set()
         for port in group:
-            offset = _stack_offset(ida_ua, ida_frame, function, port,
-                                   frame_size)
+            offset = _stack_offset(api, ida, function, port)
             if offset is None:
                 result.unresolved += 1
                 continue
@@ -137,9 +117,9 @@ def apply_stack_names(ports: Sequence[StackNamePort]) -> StackNameResult:
                 result.unchanged += 1
                 continue
 
-            member = ida_typeinf.udm_t()
+            member = api.udm_t()
             member.offset = offset * 8
-            index = frame.find_udm(member, ida_typeinf.STRMEM_OFFSET)
+            index = frame.find_udm(member, api.STRMEM_OFFSET)
             if index < 0:
                 result.unresolved += 1
                 continue
@@ -161,26 +141,17 @@ def apply_stack_names(ports: Sequence[StackNamePort]) -> StackNameResult:
     return result
 
 
-def _stack_offset(ida_ua, ida_frame, function, port: StackNamePort,
-                  frame_size: int) -> Optional[int]:
+def _stack_offset(api, ida, function, port: StackNamePort) -> Optional[int]:
     """The frame offset the operand refers to, or None if it refers to none.
 
     Decoded here rather than trusted from the export: the export says what
-    the *other* binary's operand meant.
+    the *other* binary's operand meant. The offset itself, and the rules for
+    refusing one, live in bindiff.ida -- both builds return values outside
+    the frame and the guard belongs with the call.
     """
-    instruction = ida_ua.insn_t()
-    if ida_ua.decode_insn(instruction, port.address) <= 0:
+    instruction = api.insn_t()
+    if api.decode_insn(instruction, port.address) <= 0:
         return None
     if port.operand_index >= len(instruction.ops):
         return None
-    try:
-        offset = ida_frame.calc_stkvar_struc_offset(
-            function, instruction, port.operand_index)
-    except Exception:
-        return None
-    if offset == _NOT_A_STACK_VARIABLE:
-        return None
-    # An offset outside the frame is not a member of it, whatever it means.
-    if not 0 <= offset < frame_size:
-        return None
-    return offset
+    return ida.stack_offset(function, instruction, port.operand_index)

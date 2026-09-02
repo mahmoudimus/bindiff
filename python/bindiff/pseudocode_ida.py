@@ -17,22 +17,14 @@ from bindiff.pseudocode import PseudocodeComment
 
 
 def decompiler() -> Optional[object]:
-    """ida_hexrays, initialised, or None when there is no decompiler.
+    """The IDA facade with Hex-Rays initialised, or None when there is none.
 
-    init_hexrays_plugin() is what says whether it is *usable*, as against
-    importable: the module imports in an install without a licence and every
-    call then fails.
+    Kept as a name here because this module's callers ask for "the
+    decompiler"; the version handling is in bindiff.ida with the rest.
     """
-    try:
-        import ida_hexrays
-    except ImportError:
-        return None
-    try:
-        if not ida_hexrays.init_hexrays_plugin():
-            return None
-    except Exception:
-        return None
-    return ida_hexrays
+    from bindiff.ida import decompiler as _decompiler
+
+    return _decompiler()
 
 
 def read_pseudocode_comments(entries: Optional[Sequence[int]] = None
@@ -48,17 +40,16 @@ def read_pseudocode_comments(entries: Optional[Sequence[int]] = None
     hexrays = decompiler()
     if hexrays is None:
         return []
-    import ida_funcs
+    from bindiff import ida
 
     if entries is None:
-        entries = [ida_funcs.get_func_ea_by_num(i)
-                   if hasattr(ida_funcs, "get_func_ea_by_num")
-                   else ida_funcs.getn_func(i).start_ea
-                   for i in range(ida_funcs.get_func_qty())]
+        # 9.4 deprecates getn_func for get_func_ea_by_num, which 9.1 does not
+        # have. Which one answers is bindiff.ida's problem, not this one's.
+        entries = ida.entry_points()
 
     out: List[PseudocodeComment] = []
     for entry in entries:
-        if entry is None or entry == 0xFFFFFFFFFFFFFFFF:
+        if entry is None:
             continue
         try:
             stored = hexrays.restore_user_cmts(entry)

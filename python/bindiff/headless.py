@@ -202,10 +202,11 @@ def _invoke_binexport(output_path: str) -> None:
     C++ BinDiff plugin calls. Going through IDC rather than the plugin's run()
     is deliberate: run() shows UI, the IDC function takes the output path.
     """
-    import ida_expr
+    from bindiff.ida import api
 
+    idaapi = api()
     escaped = output_path.replace("\\", "\\\\").replace('"', '\\"')
-    error = ida_expr.eval_idc_expr(
+    error = idaapi.eval_idc_expr(
         None, 0, f'BinExportBinary("{escaped}");')
     if error:
         raise RuntimeError(
@@ -544,14 +545,15 @@ def _run_import(result_path: str, limit: Optional[int]) -> dict:
             else:
                 defined = failed = 0
 
-            import ida_funcs
+            from bindiff.ida import api
 
+            idaapi = api()
             applied, rejected, not_a_function = [], [], 0
             for address, declaration, name in ports:
                 # Counted apart from a rejection: refusing to type something
                 # that is not a function is the guard working, not a failure
                 # to apply a prototype.
-                if ida_funcs.get_func(address) is None:
+                if idaapi.get_func(address) is None:
                     not_a_function += 1
                     continue
                 if apply_prototype(address, declaration):

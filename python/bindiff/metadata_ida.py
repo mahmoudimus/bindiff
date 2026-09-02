@@ -161,16 +161,19 @@ class IdaSource:
     """
 
     def __init__(self):
-        import ida_frame
-        import ida_funcs
-        import ida_nalt
-        import ida_typeinf
-        import idautils
+        from bindiff.ida import api, module
 
-        self._funcs = ida_funcs
-        self._frame = ida_frame
-        self._nalt = ida_nalt
-        self._typeinf = ida_typeinf
+        # One facade for the API, and bindiff.ida.module for idautils, which
+        # is a separate helper package rather than part of it. Both are
+        # guarded the same way: reaching for IDA before its kernel is up is
+        # fatal to the process, not an exception.
+        idaapi = api()
+        idautils = module("idautils")
+
+        self._funcs = idaapi
+        self._frame = idaapi
+        self._nalt = idaapi
+        self._typeinf = idaapi
         self._idautils = idautils
         self._pointer_size = _pointer_size()
 

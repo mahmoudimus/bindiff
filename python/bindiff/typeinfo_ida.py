@@ -22,12 +22,17 @@ from typing import Callable, List, Optional, Sequence, Tuple
 from bindiff.typeinfo import FunctionType, TypeDeclaration
 
 
-class Unavailable(Exception):
-    """This IDA does not expose an API this needs."""
+from bindiff.ida import Unavailable  # noqa: F401  (re-exported for callers)
 
 
 def _first_available(module, *names) -> Callable:
-    """The first of `names` this build has, or a readable failure."""
+    """The first of `names` this build has, or a readable failure.
+
+    Takes the module rather than going through bindiff.ida.first_available
+    because these are looked up on `ida_typeinf` specifically -- the facade
+    carries them too, and either would do, but naming the module keeps the
+    failure message pointing at the thing that moved.
+    """
     for name in names:
         found = getattr(module, name, None)
         if found is not None:
@@ -206,7 +211,9 @@ def parse_declarations(statements: Sequence[str]) -> Tuple[int, int]:
     accepts them. Turning on "No IDA specific extensions" makes IDA unable to
     read back what IDA wrote.
     """
-    import idaapi
+    from bindiff.ida import api
+
+    idaapi = api()
 
     parsed = errors = 0
     for statement in statements:
