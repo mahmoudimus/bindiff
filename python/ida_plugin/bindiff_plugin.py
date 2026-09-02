@@ -513,30 +513,41 @@ if IDA_AVAILABLE:
                 return
             self._report("saved")
 
-        def _close(self) -> None:
-            """Closes the result, asking only when that would lose something.
+        def _confirm_discard(self, verb: str) -> bool:
+            """Whether it is all right to drop the open result now.
 
-            The one confirmation in the interface. Everything else here is
-            either reversible or reported; unsaved edits are neither, so the
-            question names how many there are rather than asking whether the
-            user is sure.
+            The one question in the interface, asked wherever a result goes
+            away with edits in it. Closing is the obvious place; replacing is
+            the same event under another name -- open_result calls
+            controller.open_database, which closes the connection and rolls
+            back everything uncommitted -- so "Open result..." and a finished
+            comparison ask it too. Everything else here is either reversible
+            or reported; unsaved edits are neither, so the question names how
+            many there are rather than asking whether the user is sure.
+
+            True whenever nothing would be lost, so a caller can ask
+            unconditionally.
             """
+            if self.session.state is not State.OPEN_EDITED:
+                return True
+            return ida_kernwin.ask_yn(
+                ida_kernwin.ASKBTN_NO,
+                f"{verb} with {self.session.edits} unsaved edit(s)?"
+                "\n\nSave first to keep them.") == ida_kernwin.ASKBTN_YES
+
+        def _close(self) -> None:
+            """Closes the result, asking only when that would lose something."""
             if not self._allowed(actions.CLOSE):
                 return
-            if self.session.state is State.OPEN_EDITED:
-                if ida_kernwin.ask_yn(
-                        ida_kernwin.ASKBTN_NO,
-                        f"Close with {self.session.edits} unsaved edit(s)?"
-                        "\n\nSave first to keep them."
-                ) != ida_kernwin.ASKBTN_YES:
-                    return
+            if not self._confirm_discard("Close"):
+                return
             self.session.close_result()
             self._report("closed")
 
         # -- porting --------------------------------------------------------
 
         def _port(self, threshold: float, ids, *,
-                  floors_for_comments=None) -> Optional[PortLedger]:
+                  ignore_floors: bool = False) -> Optional[PortLedger]:
             """Names and comments for these matches, at this threshold.
 
             The preview decides; the ledger records; the session tells the
@@ -546,6 +557,13 @@ if IDA_AVAILABLE:
             when nothing is picked, which is the flagship path and has no
             selection by definition. What has to be true is that there is a
             result and something to write to.
+
+            `ignore_floors` is the inspector's "I have read this pair and I
+            want it": the block-coverage floor is that same judgement made in
+            bulk, so it goes too. It is a keyword rather than a threshold of
+            0.0 because the footer's slider reaches 0.00, and reading intent
+            out of a number the user can dial made the footer's preview and
+            the port it confirmed disagree at exactly that end of the range.
             """
             from ida_plugin.porting import (apply_comment_ports, apply_symbol_ports,
                                             build_ledger, preview_symbol_ports)
@@ -557,13 +575,11 @@ if IDA_AVAILABLE:
                                                     else "nothing is selected"))
                 return None
 
-            # A threshold of 0.0 is the inspector's "I have read this pair and
-            # I want it": the block-coverage floor is the same judgement made
-            # in bulk, so it goes too. Both the preview and the comments read
-            # the one number, or they disagree about the same pair.
-            confidence = (floors_for_comments if floors_for_comments is not None
-                          else (0.0 if threshold == 0.0
-                                else DEFAULT_PORT_MIN_CONFIDENCE))
+            # One number for the preview and for the comments, or they
+            # disagree about the same pair. It never depends on the
+            # threshold, so the footer -- which previews with the constant --
+            # counts what this will write at every slider position.
+            confidence = 0.0 if ignore_floors else DEFAULT_PORT_MIN_CONFIDENCE
             controller = self.session.controller
             matches = controller.matches_for(ids)
             preview = preview_symbol_ports(matches, min_similarity=threshold,
@@ -667,8 +683,19 @@ if IDA_AVAILABLE:
             self._apply_stack_names(ids)
 
         def _restore_name(self) -> None:
-            """Puts back the name this session replaced, one row at a time."""
-            from ida_plugin.porting import apply_symbol_ports
+            """Puts back the name this session replaced, one row at a time.
+
+            IDA's answer decides. set_name refuses by returning False, so a
+            restore that reported success regardless would forget the ledger
+            entry -- the only record of what the old name was -- leave the row
+            reading "imported", and write into the .BinDiff a name the
+            database does not have. Nothing is forgotten until the rename
+            landed, so a refused restore can be tried again.
+
+            restoring_rename handles the generated case: the reverse of a
+            port over sub_XXXX is to clear the name, not to write the string.
+            """
+            from ida_plugin.porting import apply_symbol_ports, restoring_rename
 
             if not self._allowed(actions.RESTORE_NAME):
                 return
@@ -676,7 +703,11 @@ if IDA_AVAILABLE:
             reverse = self.session.ledger.reversal(match_id)
             if reverse is None:
                 return
-            apply_symbol_ports([reverse])
+            result = apply_symbol_ports([reverse], rename=restoring_rename())
+            if result.applied != 1:
+                self._report(f"IDA refused to restore {reverse.new_name} at "
+                             f"0x{reverse.address:X}")
+                return
             self.session.controller.record_ported_names([reverse])
             self.session.forget_port(match_id)
             self._report(f"restored {reverse.new_name}")
@@ -1167,6 +1198,14 @@ if IDA_AVAILABLE:
             if not output:
                 return
 
+            # Asked here, before the export begins, and not again when the
+            # diff finishes: a question that arrives minutes later, over a
+            # result the reader has stopped thinking about, is not a
+            # confirmation of anything. What finishes replaces what is open,
+            # which is a close with the edits still in it.
+            if not self._confirm_discard("Replace the open result"):
+                return
+
             title = panel_title(primary)
             workbench = self._the_workbench()
             workbench.show_scope("matches")
@@ -1314,7 +1353,22 @@ if IDA_AVAILABLE:
                 # as the whole picture.
                 result = self._last_result
                 partial = bool(result.details.get("cancelled")) if result else False
-                self.session.open_result(path, exports, partial=partial)
+                try:
+                    self.session.open_result(path, exports, partial=partial)
+                except Exception as exc:
+                    # Same treatment as "Open result...": a .BinDiff the
+                    # worker wrote but sqlite refuses is a message, not a
+                    # traceback. This runs inside execute_sync, where an
+                    # exception reaches nobody who could report it -- and it
+                    # would also skip the outcome line DiffRun.finish prints
+                    # after this call. Nothing was opened, and finish_compare
+                    # ran before this (DiffRun.finish calls panel.finish, then
+                    # load), so the session has already settled back on
+                    # whatever was open before the comparison.
+                    ida_kernwin.warning(f"Could not open {path}:\n{exc}")
+                    self._report(f"the comparison finished but {path} could "
+                                 f"not be opened: {exc}")
+                    return
                 workbench = self._the_workbench()
                 # A fresh result is something to read before it is something
                 # to port from, so it opens on the audit lens.
@@ -1364,6 +1418,11 @@ if IDA_AVAILABLE:
         def _load_results(self) -> None:
             path = _ask_for_database()
             if path is None:
+                return
+            # After the file is picked, not before: a question about losing
+            # edits is worth asking only once there is really another result
+            # to put in their place.
+            if not self._confirm_discard("Replace the open result"):
                 return
             try:
                 meta = self.session.open_result(path)

@@ -234,10 +234,13 @@ if IDA_AVAILABLE:
         def _buttons(self, view, match_id):
             """The four things there are to do to one pair.
 
-            Port is the only one that writes, and it writes at threshold 0.0
-            on purpose: a row somebody opened and read is the judgement the
-            floor stands in for, so applying the floor again here would
-            refuse exactly the match the reader just decided about.
+            Port is the only one that writes, and it writes with both floors
+            off on purpose: a row somebody opened and read is the judgement
+            the floors stand in for, so applying them again here would refuse
+            exactly the match the reader just decided about. Said with a
+            keyword rather than by passing a threshold the handler has to
+            read intent into -- the footer's slider reaches 0.00 too, and
+            there it means the threshold and nothing else.
             """
             box = QtWidgets.QWidget()
             row = QtWidgets.QHBoxLayout(box)
@@ -248,7 +251,8 @@ if IDA_AVAILABLE:
                             and self._session.can(actions.PORT))
             port.setToolTip("Writes this pair, whatever the threshold says.")
             port.clicked.connect(
-                lambda _c=False: self._handlers["port"](0.0, [match_id]))
+                lambda _c=False: self._handlers["port"](0.0, [match_id],
+                                                        ignore_floors=True))
             row.addWidget(port)
 
             for label, action, key in (

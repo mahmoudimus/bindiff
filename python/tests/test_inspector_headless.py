@@ -19,8 +19,16 @@ def test_no_stylesheet_colours():
 
 
 def test_the_inspector_ports_a_single_row_without_a_floor():
-    """A hand-picked row is the judgement the floor stands in for; the
-    inspector's button must call the port handler with threshold 0.0."""
+    """A hand-picked row is the judgement the floors stand in for; the
+    inspector's button must call the port handler with threshold 0.0 and say
+    so about the floors as well.
+
+    The keyword is the point: the handler used to read "no floors" out of a
+    threshold of 0.0, and the footer's slider reaches 0.00 too -- where it
+    means the threshold and nothing else, so the footer's preview and the
+    port it confirmed disagreed at that end of the range.
+    """
     import ida_plugin.inspector as inspector
     source = Path(inspector.__file__).read_text(encoding="utf-8")
     assert '"port"](0.0' in source
+    assert "ignore_floors=True" in source

@@ -585,6 +585,33 @@ def plan_stack_name_ports(database, names_by_operand, match_ids=None,
     return ports
 
 
+def restoring_rename(rename: Optional[Callable[[int, str], bool]] = None,
+                     clear: Optional[Callable[[int], bool]] = None
+                     ) -> Callable[[int, str], bool]:
+    """The rename `apply_symbol_ports` should use to *undo* a port.
+
+    Undoing differs from porting in one case, and it is the flagship one: a
+    name ported over IDA's own `sub_13000E870`. Writing that string back
+    would give the address a user-defined name that merely looks generated --
+    IDA would keep it through a rebase or a re-analysis, and the function
+    would no longer count as unnamed anywhere IDA itself decides. Clearing
+    the name hands the address back to IDA, which regenerates the same
+    `sub_` from the address.
+
+    Both callables are injectable so the choice is testable without IDA;
+    `apply_symbol_ports` keeps its two-argument `rename` contract.
+    """
+    do_rename = _ida_rename if rename is None else rename
+    do_clear = _ida_clear_name if clear is None else clear
+
+    def restore(address: int, name: str) -> bool:
+        if _is_generated_name(name):
+            return do_clear(address)
+        return do_rename(address, name)
+
+    return restore
+
+
 def apply_comment_ports(ports: Sequence[CommentPort],
                         set_comment: Optional[Callable[..., bool]] = None
                         ) -> PortResult:
@@ -690,6 +717,21 @@ def _ida_rename(address: int, name: str) -> bool:
     return bool(idaapi.set_name(
         address, name,
         idaapi.SN_NOWARN | idaapi.SN_NOCHECK | idaapi.SN_FORCE))
+
+
+def _ida_clear_name(address: int) -> bool:
+    """Removes the user-defined name, leaving IDA to regenerate its own.
+
+    SN_NOCHECK for the same reason _ida_rename uses it, and no SN_FORCE:
+    there is no name to collide with. Guarded on an open database the same
+    way, and a refusal is a False return here too.
+    """
+    if not database_is_open():
+        raise RuntimeError("renaming requires a running IDA database")
+    from bindiff.ida import api
+
+    idaapi = api()
+    return bool(idaapi.set_name(address, "", idaapi.SN_NOCHECK))
 
 
 def _ida_set_comment(address: int, text: str,

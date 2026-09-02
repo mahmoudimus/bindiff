@@ -517,6 +517,18 @@ if IDA_AVAILABLE:
             self._size_columns_once()
             if selected:
                 self.select_ids(selected)
+            # Announced unconditionally, because both halves of the restore
+            # can be silent. The model reset clears Qt's selection through
+            # QItemSelectionModel::reset(), which emits nothing, and the
+            # select() above changes nothing -- and so emits nothing -- when
+            # none of the old ids are among the new rows. Without this the
+            # session would keep ids that are not on screen: the status bar
+            # would say "0 selected" while Unmatch deleted a row nobody could
+            # see. The handler routes to DiffSession.set_selection, which
+            # returns early when the tuple is unchanged, so a refresh that
+            # kept the selection costs one comparison.
+            if self.on_selection_changed is not None:
+                self.on_selection_changed(self.selected_ids())
 
         def set_annotations(self, column: str, values: dict) -> None:
             self._model.set_annotations(column, values)

@@ -18,6 +18,20 @@ def test_the_forms_are_gone():
         assert not hasattr(panels, name), f"{name} should have been deleted"
 
 
+def test_set_rows_announces_the_selection_it_ended_up_with():
+    """Both halves of the restore can be silent: the model reset clears Qt's
+    selection through QItemSelectionModel::reset(), which emits nothing, and
+    the select() that follows changes nothing -- and so emits nothing -- when
+    none of the old ids are among the new rows. Without the announcement the
+    session keeps ids that are not on screen, and Unmatch deletes a row
+    nobody can see."""
+    source = Path(panels.__file__).read_text(encoding="utf-8")
+    # The table's set_rows, not the model's: both are named that, and only
+    # the view owns a selection.
+    body = source.split("def set_rows(")[2].split("def set_annotations(")[0]
+    assert "self.on_selection_changed(self.selected_ids())" in body
+
+
 def test_the_source_declares_no_colour():
     source = Path(panels.__file__).read_text(encoding="utf-8")
     assert "setStyleSheet" not in source

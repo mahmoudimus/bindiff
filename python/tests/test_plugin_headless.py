@@ -42,6 +42,41 @@ def test_the_old_forms_are_not_referenced():
         assert name not in source, name
 
 
+def test_the_port_floors_are_not_read_out_of_the_threshold():
+    """The footer previews with the constant coverage floor, and its slider
+    reaches 0.00. A handler that dropped the floor whenever the threshold was
+    0.0 made the footer undercount what the same click would write -- by
+    exactly the low-coverage pairs it said it would skip."""
+    source = Path(plugin.__file__).read_text(encoding="utf-8")
+    assert "floors_for_comments" not in source
+    assert "0.0 if ignore_floors else DEFAULT_PORT_MIN_CONFIDENCE" in source
+
+
+def test_a_restore_reports_what_ida_answered():
+    """set_name refuses by returning False. A restore that forgot the ledger
+    entry regardless would lose the only record of the old name."""
+    source = Path(plugin.__file__).read_text(encoding="utf-8")
+    assert "result.applied != 1" in source
+    assert "refused to restore" in source
+    assert "restoring_rename" in source
+
+
+def test_every_way_of_losing_a_result_asks_the_same_question():
+    """Replacing an edited result is closing it: open_result reopens the
+    connection, and what was not committed is gone. Close, Open result... and
+    a finished comparison all go through the one question."""
+    source = Path(plugin.__file__).read_text(encoding="utf-8")
+    assert '_confirm_discard("Close")' in source
+    assert source.count('_confirm_discard("Replace the open result")') == 2
+
+
+def test_a_result_that_will_not_open_is_a_message_either_way():
+    """Both paths that open a .BinDiff warn with the path. The one inside the
+    comparison runs in execute_sync, where a traceback reaches nobody."""
+    source = Path(plugin.__file__).read_text(encoding="utf-8")
+    assert source.count('f"Could not open {path}:\\n{exc}"') == 2
+
+
 def test_every_handler_the_workbench_calls_is_supplied():
     """The handlers dict is the contract between the plugin and its two
     forms; a missing key is a click that does nothing, quietly."""

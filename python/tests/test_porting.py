@@ -14,6 +14,7 @@ from ida_plugin.porting import (
     apply_symbol_ports,
     plan_comment_ports,
     plan_symbol_ports,
+    restoring_rename,
 )
 
 
@@ -193,6 +194,53 @@ class TestApplying:
         """Headless, the defaults must raise rather than pretend to work."""
         result = apply_symbol_ports([SymbolPort(0x1, "a", "sub_1", 1)])
         assert result.failed == 1 and result.applied == 0
+
+
+class TestRestoring:
+    """Undoing a port is not porting the old name back.
+
+    The flagship port replaces IDA's own sub_XXXX; writing that string back
+    would leave a user-defined name that only looks generated, which IDA
+    keeps through a re-analysis and never regenerates.
+    """
+
+    def _calls(self):
+        renamed, cleared = [], []
+        return renamed, cleared, restoring_rename(
+            rename=lambda ea, name: renamed.append((ea, name)) or True,
+            clear=lambda ea: cleared.append(ea) or True)
+
+    def test_a_generated_old_name_is_cleared_not_written(self):
+        renamed, cleared, restore = self._calls()
+        # new_name is what the restore writes: the name that was there first.
+        port = SymbolPort(0x401000, "sub_401000", "encrypt", 1)
+
+        result = apply_symbol_ports([port], rename=restore)
+
+        assert cleared == [0x401000]
+        assert renamed == []
+        assert result.applied == 1
+
+    def test_a_real_old_name_is_written_back(self):
+        renamed, cleared, restore = self._calls()
+        port = SymbolPort(0x401000, "my_parser", "encrypt", 1)
+
+        result = apply_symbol_ports([port], rename=restore)
+
+        assert renamed == [(0x401000, "my_parser")]
+        assert cleared == []
+        assert result.applied == 1
+
+    def test_a_refused_clear_is_counted_as_failed(self):
+        """IDA answers False rather than raising, and a restore that reported
+        success anyway would forget the only record of the old name."""
+        restore = restoring_rename(rename=lambda ea, name: True,
+                                   clear=lambda ea: False)
+
+        result = apply_symbol_ports(
+            [SymbolPort(0x401000, "sub_401000", "encrypt", 1)], rename=restore)
+
+        assert result.applied == 0 and result.failed == 1
 
 
 class TestExplainingSkips:
