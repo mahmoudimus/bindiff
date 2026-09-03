@@ -599,14 +599,23 @@ if IDA_AVAILABLE:
                     comments = apply_comment_ports(planned)
             ledger = build_ledger(preview, symbols, comments)
             self.session.note_ports(ledger)
+            # One line per kind of thing written. Crammed into one sentence it
+            # read as "names: Ported 0 · 30 already named, skipped; comments:
+            # 37 of 37 written (11 function, 26 instruction)" -- leading with
+            # a zero, and the question it was asked to answer (did the
+            # comments go across?) buried at the end.
             message = "names: " + ledger.summary()
-            if comments is not None:
-                message += "; comments: " + _describe_comments(planned, comments)
             if preview.below_threshold:
                 message += (f"; {len(preview.below_threshold)} below the "
                             f"{threshold:.2f} threshold -- drag the footer slider or "
                             f"port one from the inspector")
             self._report(message + "; not yet saved")
+            if comments is not None:
+                # The same sentence _port_comments prints. Two wordings for
+                # one action read as two different things having happened.
+                self._report("comments: "
+                             + _describe_comments(planned, comments)
+                             + "; not yet saved")
             # Both write into IDA rather than into the .BinDiff, so they are
             # outside the ledger: there is no port outcome to record and
             # nothing for the table to show. Each reports its own line and
