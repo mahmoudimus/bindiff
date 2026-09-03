@@ -33,6 +33,11 @@ while [ $# -gt 0 ]; do
 done
 
 BINEXPORT_DIR="${BINDIFF_BINEXPORT_DIR:-$(cd "$REPO_ROOT/.." && pwd)/binexport}"
+# Where run_tests_docker.sh leaves the extension. A shared named volume, so
+# this container imports the build that one made rather than needing a Linux
+# .so swapped into the checkout for the duration of the run -- which worked,
+# but left the host's extension replaced if the run died in the middle.
+EXT_DIR="/opt/bindiff-ext/${SERVICE}"
 REPORT_HOST="$REPO_ROOT/.tmp/gui-report.json"
 mkdir -p "$REPO_ROOT/.tmp"
 rm -f "$REPORT_HOST"
@@ -52,6 +57,24 @@ if [ ! -f /tmp/.bindiff-gui-deps ]; then
   apt-get update -qq
   apt-get install -y -qq --no-install-recommends xvfb >/dev/null
   touch /tmp/.bindiff-gui-deps
+fi
+
+# Self-healing rather than a documented ordering rule: a GUI run that
+# silently imported no extension is exactly the failure this is fixing.
+if [ ! -d "$BINDIFF_PACKAGE_DIR/bindiff" ]; then
+  echo "[gui] no extension in $BINDIFF_PACKAGE_DIR -- building it"
+  mkdir -p "$BINDIFF_PACKAGE_DIR"
+  ( cd /work/python && /app/ida/.venv/bin/python3 setup.py build_ext \
+      --build-lib "$BINDIFF_PACKAGE_DIR" \
+      --build-temp "${BINDIFF_PACKAGE_DIR/bindiff-ext/bindiff-obj}" )
+  for entry in /work/python/bindiff/*; do
+    name=$(basename "$entry")
+    [ -e "$BINDIFF_PACKAGE_DIR/bindiff/$name" ] || \
+      ln -s "$entry" "$BINDIFF_PACKAGE_DIR/bindiff/$name"
+  done
+  ln -sfn /work/python/ida_plugin "$BINDIFF_PACKAGE_DIR/ida_plugin"
+else
+  echo "[gui] using the extension in $BINDIFF_PACKAGE_DIR"
 fi
 
 echo "[gui] building a sample binary to open"
@@ -79,7 +102,7 @@ export MODE=x11
 export LIBGL_ALWAYS_SOFTWARE=1
 export QT_QPA_PLATFORM=xcb
 export BINDIFF_GUI_REPORT=/tmp/gui-report.json
-export PYTHONPATH=/work/python:/app/ida/python
+export PYTHONPATH="$BINDIFF_PACKAGE_DIR:/work/python:/app/ida/python"
 
 rm -f /tmp/gui-report.json
 echo "[gui] launching IDA"
@@ -112,6 +135,7 @@ CONTAINER
 
 docker compose run --rm -T \
   -v "$BINEXPORT_DIR:/binexport" \
+  -e "BINDIFF_PACKAGE_DIR=$EXT_DIR" \
   --entrypoint bash "$SERVICE" -lc "$SCRIPT"
 
 if [ ! -f "$REPORT_HOST" ]; then

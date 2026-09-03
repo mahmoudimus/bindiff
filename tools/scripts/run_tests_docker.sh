@@ -75,8 +75,10 @@ CONTAINER_BUILD_DIR="/work/build/docker-${SERVICE}"
 # the plugin unable to import in a real IDA. These live in the container, and
 # die with it -- the object files are the only slow part and the container is
 # reused, so nothing is paid twice.
-CONTAINER_EXT_DIR="/opt/bindiff-ext"
-CONTAINER_OBJ_DIR="/opt/bindiff-obj"
+# Scoped by service: the extension links against the C++ archives from that
+# service's build tree, and the two images are not the same IDA.
+CONTAINER_EXT_DIR="/opt/bindiff-ext/${SERVICE}"
+CONTAINER_OBJ_DIR="/opt/bindiff-obj/${SERVICE}"
 IDA_PYTHON="/app/ida/.venv/bin/python3"
 
 CMD="${1:-}"
@@ -107,8 +109,8 @@ while [ $# -gt 0 ]; do
 done
 
 CONTAINER_BUILD_DIR="/work/build/docker-${SERVICE}"
-CONTAINER_EXT_DIR="/opt/bindiff-ext"
-CONTAINER_OBJ_DIR="/opt/bindiff-obj"
+CONTAINER_EXT_DIR="/opt/bindiff-ext/${SERVICE}"
+CONTAINER_OBJ_DIR="/opt/bindiff-obj/${SERVICE}"
 
 # BinExport is a source dependency: BinDiff add_subdirectory()s it and takes
 # Abseil, Protobuf, GoogleTest and the IDA SDK handling from it.
@@ -191,6 +193,7 @@ echo "[build] building the Cython extension against IDA's interpreter"
 # nothing said so, because the file has the same name on both platforms.
 # --build-temp keeps the object files out too, and keeps them between runs.
 rm -rf "$CONTAINER_EXT_DIR"
+mkdir -p "$CONTAINER_EXT_DIR"
 cd /work/python && $IDA_PYTHON setup.py build_ext \
   --build-lib "$CONTAINER_EXT_DIR" --build-temp "$CONTAINER_OBJ_DIR"
 

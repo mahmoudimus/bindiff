@@ -22,6 +22,16 @@ services:
             # ida_plugin/bindiff_plugin.py (the entry point) both live here.
             - ./python/:/root/.idapro/plugins:ro
             - ./:/work
+            # The built extension and its objects, per service, kept out of
+            # the checkout. A Python extension has the same filename on every
+            # platform, so building into the mount replaces the host's and
+            # leaves the plugin unable to import in a real IDA. Named volumes
+            # rather than container-local directories because two scripts need
+            # the same build: run_tests_docker.sh makes it, and
+            # run_gui_tests_docker.sh runs a *separate* container that has to
+            # import it.
+            - bindiff-ext:/opt/bindiff-ext
+            - bindiff-obj:/opt/bindiff-obj
 
     # IDA 9.1 -- compatibility leg.
     idapro-tests-9.1:
@@ -43,6 +53,18 @@ services:
         volumes:
             - ./python/:/root/.idapro/plugins:ro
             - ./:/work
+            # The built extension and its objects, per service, kept out of
+            # the checkout. A Python extension has the same filename on every
+            # platform, so building into the mount replaces the host's and
+            # leaves the plugin unable to import in a real IDA. Named volumes
+            # rather than container-local directories because two scripts need
+            # the same build: run_tests_docker.sh makes it, and
+            # run_gui_tests_docker.sh runs a *separate* container that has to
+            # import it.
+            - bindiff-ext:/opt/bindiff-ext
+            - bindiff-obj:/opt/bindiff-obj
 
 volumes:
     idausr:
+    bindiff-ext:
+    bindiff-obj:

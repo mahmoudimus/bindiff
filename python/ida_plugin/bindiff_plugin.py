@@ -39,6 +39,20 @@ _PACKAGE_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PACKAGE_ROOT not in sys.path:
     sys.path.insert(0, _PACKAGE_ROOT)
 
+# ...unless a package directory has been named, which is how the test harness
+# runs. It builds the compiled extension outside the checkout, because a
+# Python extension has the same filename on every platform and building it
+# into a bind-mounted checkout replaces whatever the host built. The insert
+# above then defeats that: it puts the checkout at position 0, so the very
+# next line imports the host's extension and IDA reports "invalid ELF header"
+# from inside plugin loading, where there is no obvious connection to a test
+# harness. Same three lines as tests/conftest.py, for the same reason.
+_PACKAGE_DIR = os.environ.get("BINDIFF_PACKAGE_DIR")
+if _PACKAGE_DIR and os.path.isdir(_PACKAGE_DIR):
+    if _PACKAGE_DIR in sys.path:
+        sys.path.remove(_PACKAGE_DIR)
+    sys.path.insert(0, _PACKAGE_DIR)
+
 from bindiff.ida_env import qt_widgets_usable
 
 # The plugin's UI only makes sense in the GUI. Detection never probe-imports an

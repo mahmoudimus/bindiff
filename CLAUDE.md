@@ -101,6 +101,21 @@ The leg is narrow on purpose: anything importing `bindiff.*` pulls in the Cython
 
 9.4 is the primary leg (BinExport pins the IDA SDK to 9.4); 9.1 is a compatibility leg. Images come from `docker-compose.yml`, overridable via `BINDIFF_TEST_IMAGE_94` / `BINDIFF_TEST_IMAGE_91`. Container deps live in `.github/docker-apt-deps.txt` (cmake, ninja — the images ship gcc but no generator) and `.github/docker-deps.txt` (Cython, pytest); CI hashes both for its image cache key.
 
+**Both harnesses share one built extension.** `run_tests_docker.sh` makes it
+and `run_gui_tests_docker.sh` runs a *separate* container that has to import
+it, so `/opt/bindiff-ext/<service>` is a named volume rather than a
+container-local directory (objects in `/opt/bindiff-obj/<service>`, scoped by
+service because the extension links against that service's C++ archives). The
+GUI script builds it if the test harness has not, so it stands alone.
+
+`BINDIFF_PACKAGE_DIR` names it, and **three entry points have to honour it,
+because each of them puts the checkout on `sys.path` for its own good
+reason**: `tests/conftest.py`, `gui_driver.run_checks`, and
+`bindiff_plugin.py` -- which inserts its own parent at position 0 so IDA can
+load it as a top-level script. Any one of them getting there first makes IDA
+report `invalid ELF header` from inside plugin loading, with nothing pointing
+at the harness.
+
 **The container does not build into the checkout.** `/work` is a bind mount and
 a Python extension has the same filename on every platform, so
 `build_ext --inplace` there left a Linux `core.abi3.so` in `python/bindiff/`,

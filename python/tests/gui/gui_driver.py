@@ -36,6 +36,18 @@ import ida_pro
 
 REPORT_PATH = os.environ.get("BINDIFF_GUI_REPORT", "/tmp/gui-report.json")
 
+# The same rule conftest.py follows, for the same reason. The harness builds
+# the extension outside the checkout -- a Python extension has one filename on
+# every platform, so building it into the bind mount replaces the host's. IDA
+# inserts its own plugin directory into sys.path at load time, and that
+# directory *is* the checkout, so PYTHONPATH order alone is not enough: this
+# has to be put in front after IDA has had its say.
+_PACKAGE_DIR = os.environ.get("BINDIFF_PACKAGE_DIR")
+if _PACKAGE_DIR and os.path.isdir(_PACKAGE_DIR):
+    if _PACKAGE_DIR in sys.path:
+        sys.path.remove(_PACKAGE_DIR)
+    sys.path.insert(0, _PACKAGE_DIR)
+
 results = []
 failures = []
 
@@ -135,7 +147,13 @@ def collect_functions(limit: int = 5):
 
 
 def run_checks() -> None:
-    sys.path.insert(0, "/work/python")
+    # Appended, not inserted at 0. The checkout has to be reachable for
+    # tests/, but BINDIFF_PACKAGE_DIR -- set when the harness builds the
+    # extension outside the checkout -- must stay in front of it: /work/python
+    # carries the *host's* extension, and IDA reports that as "invalid ELF
+    # header" from inside plugin loading, where nothing points at this line.
+    if "/work/python" not in sys.path:
+        sys.path.append("/work/python")
 
     from ida_plugin import panels
     from ida_plugin.bindiff_plugin import BinDiffPlugin
