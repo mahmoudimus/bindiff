@@ -519,6 +519,38 @@ whether something exists is never the thing that brings the process down.
 The UI modules keep their own `ida_kernwin` imports. They only ever run with
 the kernel up, and the drift this guards against is in the database API.
 
+**Filter rules** (`ida_plugin/filters.py`) reproduce IDA's per-column filtering
+over our own table. The chooser carries that natively and there is no API to
+borrow it -- the quick filter, "Modify filters..." and the column picker
+belong to the chooser widget. An embedded chooser *would* bring them along
+(`Choose(..., embedded=True)` returns a TWidget that `TWidgetToPyQtWidget`
+puts in a Qt layout -- verified in a live IDA), but `chooser_item_attrs_t`
+colours a **row**, not a cell, and the Trust column is a per-cell tint; its
+columns are also fixed at construction, which the lenses change.
+
+Rules match `cell_values`, so what you filter on is what you can see, and a
+hidden column still filters. A row survives when it matches at least one
+enabled include (or there are none) and **no** enabled exclude -- excludes
+always win, which makes "everything except the CRT" one rule.
+
+`RuleSet` compiles once: patterns built at construction, column names resolved
+to indices, and a plain case-insensitive "(any) contains" -- the rule almost
+everyone writes -- answered against one lowered haystack per row rather than
+seven `lower()` calls. Against the same semantics evaluated per row, on 10,163
+matches: **8.3ms → 2.3ms** for one rule, **15.4 → 3.8** for three. The first
+attempt was 2.6x *slower* than the naive version, because it lowered every
+cell for every rule; the benchmark asserts both paths return identical results,
+which is what caught it.
+
+`narrows()` returns True only when the rule lists are identical. Adding an
+*include* widens -- a second include admits rows the first refused -- so
+"more rules means fewer rows" is false, and a cache built on it hides rows
+with no way to tell.
+
+The dialog reports a bad pattern **inline, not in a QMessageBox**: a modal
+interrupts the editing it is complaining about, and it hung the GUI harness
+for a full timeout with nobody to dismiss it.
+
 **Stack variable names** (`stack_names.py`, `stack_names_ida.py`) — upstream
 issue #13. BinExport2 has no locals table, which is why this looks impossible;
 the names are there anyway, because a stack operand is an `IMMEDIATE_INT`

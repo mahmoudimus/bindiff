@@ -230,6 +230,63 @@ def run_checks() -> None:
     bench._search.setText("")
     bench._apply_search()
 
+    # Per-column filter rules -- the "Modify filters..." shape. None of this
+    # is reachable headlessly: the rule evaluation is, but the dialog that
+    # builds a rule and the menu that opens it are Qt.
+    from ida_plugin import workbench
+    from ida_plugin.filters import EXCLUDE, RuleSet, Rule
+
+    before = bench._table.model().rowCount()
+    bench._rules = RuleSet([Rule("zzz_matches_nothing")])
+    bench._refresh_rows()
+    check("an include rule narrows the table",
+          bench._table.model().rowCount() == 0,
+          f"{bench._table.model().rowCount()} rows survived")
+
+    name = rows[0].this_database
+    bench._rules = RuleSet([Rule(name, column="this_database")])
+    bench._refresh_rows()
+    check("a column-scoped rule keeps its row",
+          bench._table.model().rowCount() >= 1)
+
+    bench._rules = RuleSet([Rule(name, column="this_database",
+                                 action=EXCLUDE)])
+    bench._refresh_rows()
+    check("an exclude rule removes it",
+          all(bench._table.model().index(r, 1).data() != name
+              for r in range(bench._table.model().rowCount())))
+
+    bench._reset_filters()
+    check("reset restores every row",
+          bench._table.model().rowCount() == before,
+          f"{bench._table.model().rowCount()} of {before}")
+
+    dialog = workbench.FilterDialog(RuleSet(), bench._table)
+    dialog._value.setText("memcpy")
+    dialog._add()
+    check("the dialog builds a rule", len(dialog.rules.rules) == 1)
+    dialog._value.setText("(unclosed")
+    dialog._regex.setChecked(True)
+    dialog._add()
+    check("a bad pattern is refused, not silently added",
+          len(dialog.rules.rules) == 1)
+    # isHidden(), not isVisible(): a child of a window Xvfb never activated
+    # is never "visible", but isHidden() reflects the explicit setVisible.
+    check("and says why, in the dialog rather than a modal",
+          not dialog._error.isHidden() and "pattern" in dialog._error.text(),
+          f"error label: hidden={dialog._error.isHidden()} "
+          f"text={dialog._error.text()!r}")
+    dialog._reset()
+    check("the dialog resets", not dialog.rules)
+    dialog.close()
+
+    bench._focus_search()
+    # focusWidget() of the containing window, not hasFocus(): keyboard focus
+    # needs an active window and nothing activates one under Xvfb.
+    check("quick filter focuses the search field",
+          bench._search.window().focusWidget() is bench._search,
+          f"focus is on {bench._search.window().focusWidget()!r}")
+
     bench._table.select_ids([rows[0].match_id])
     check("selection reaches the session",
           plugin.session.selected_ids == (rows[0].match_id,),

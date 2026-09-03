@@ -23,6 +23,7 @@ from ida_plugin.lenses import (LENSES, READY_TO_PORT, apply_lens, lens_by_key,
 from ida_plugin.porting import (DEFAULT_PORT_MIN_CONFIDENCE,
                                 DEFAULT_PORT_MIN_SIMILARITY,
                                 preview_symbol_ports)
+from ida_plugin.filters import RuleSet
 from ida_plugin.query import Query, parse_query
 from ida_plugin.session import DiffSession, State
 from ida_plugin.ui_logic import (DiffProgress, IncrementalFilter,
@@ -38,7 +39,8 @@ ida_kernwin = ida_kernwin_if_loaded()
 AUTOSAVE_SECONDS = 60
 
 if IDA_AVAILABLE:
-    from bindiff.qt_shim import Qt, QtCore, QtWidgets, exec_widget
+    from bindiff.qt_shim import (Qt, QtCore, QtGui, QtWidgets,
+                                 exec_widget)
     from ida_plugin.panels import (MatchTable, UnmatchedTable,
                                    _no_edit_triggers, _set_interactive,
                                    debounced)
@@ -70,6 +72,145 @@ if IDA_AVAILABLE:
 
     def _plural(count: int, word: str) -> str:
         return f"{count:,} {word}" + ("" if count == 1 else "s")
+
+    class FilterDialog(QtWidgets.QDialog):
+        """"Modify filters...", rebuilt over our own table.
+
+        Laid out as IDA's is, because the point is that it is already
+        familiar: the editor row reads as a sentence, Add appends to a list,
+        and the list shows what is in force with a checkbox to suspend a rule
+        without losing it.
+        """
+
+        def __init__(self, rules, parent=None) -> None:
+            super().__init__(parent)
+            from ida_plugin.filters import (ACTIONS, ANY_COLUMN, CONDITIONS,
+                                            Rule, RuleSet, Unusable)
+            from ida_plugin.ui_logic import COLUMNS
+
+            self._Rule, self._RuleSet, self._Unusable = Rule, RuleSet, Unusable
+            self.rules = rules
+            self.setWindowTitle("Modify filters")
+
+            self._column = QtWidgets.QComboBox()
+            self._column.addItem("(any)", ANY_COLUMN)
+            for key, label in COLUMNS:
+                self._column.addItem(label, key)
+            self._condition = QtWidgets.QComboBox()
+            self._condition.addItems(CONDITIONS)
+            self._value = QtWidgets.QLineEdit()
+            self._action = QtWidgets.QComboBox()
+            self._action.addItems(ACTIONS)
+
+            row = QtWidgets.QHBoxLayout()
+            for widget in (QtWidgets.QLabel("If column"), self._column,
+                           self._condition, self._value,
+                           QtWidgets.QLabel("then"), self._action):
+                row.addWidget(widget, 1 if widget is self._value else 0)
+
+            self._match_case = QtWidgets.QCheckBox("Match case")
+            self._whole_words = QtWidgets.QCheckBox("Whole words")
+            self._regex = QtWidgets.QCheckBox("Regular expression")
+            # Regex replaces the condition rather than refining it, which is
+            # how the dialog behaves and why the dropdown goes grey.
+            self._regex.toggled.connect(
+                lambda on: self._condition.setEnabled(not on))
+
+            flags = QtWidgets.QHBoxLayout()
+            for box in (self._match_case, self._whole_words, self._regex):
+                flags.addWidget(box)
+            flags.addStretch(1)
+            add = QtWidgets.QPushButton("Add")
+            add.setDefault(True)
+            add.clicked.connect(self._add)
+            reset = QtWidgets.QPushButton("Reset")
+            reset.clicked.connect(self._reset)
+            close = QtWidgets.QPushButton("Close")
+            close.clicked.connect(self.accept)
+            for button in (add, reset, close):
+                flags.addWidget(button)
+
+            self._error = QtWidgets.QLabel()
+            self._error.setWordWrap(True)
+            self._error.setVisible(False)
+
+            self._list = QtWidgets.QTableWidget(0, 5)
+            self._list.setHorizontalHeaderLabels(
+                ["", "Column", "Condition", "Value", "Action"])
+            self._list.horizontalHeader().setStretchLastSection(True)
+            self._list.verticalHeader().setVisible(False)
+            self._list.itemChanged.connect(self._toggled)
+
+            layout = QtWidgets.QVBoxLayout(self)
+            layout.addLayout(row)
+            layout.addLayout(flags)
+            layout.addWidget(self._error)
+            layout.addWidget(QtWidgets.QLabel("Filter list"))
+            layout.addWidget(self._list)
+            self._repopulate()
+            self._value.setFocus()
+
+        def _add(self) -> None:
+            text = self._value.text()
+            if not text:
+                return
+            rule = self._Rule(
+                value=text, column=self._column.currentData(),
+                condition=self._condition.currentText(),
+                action=self._action.currentText(),
+                match_case=self._match_case.isChecked(),
+                whole_words=self._whole_words.isChecked(),
+                regex=self._regex.isChecked())
+            try:
+                candidate = self.rules.with_rule(rule)
+            except self._Unusable as exc:
+                # Said in the dialog, not in a modal box. A pattern that does
+                # not parse must not be swallowed -- it would read as a filter
+                # matching nothing -- but a modal here interrupts the editing
+                # it is complaining about, and blocks anything driving the
+                # dialog without a hand on the mouse.
+                self._error.setText(str(exc))
+                self._error.setVisible(True)
+                return
+            self._error.setVisible(False)
+            self.rules = candidate
+            self._value.clear()
+            self._repopulate()
+
+        def _reset(self) -> None:
+            self.rules = self._RuleSet()
+            self._repopulate()
+
+        def _toggled(self, item) -> None:
+            if item.column() != 0:
+                return
+            enabled = item.checkState() == Qt.CheckState.Checked
+            index = item.row()
+            if index < len(self.rules.rules) and \
+                    self.rules.rules[index].enabled != enabled:
+                self.rules = self.rules.toggled(index, enabled)
+
+        def _repopulate(self) -> None:
+            self._list.blockSignals(True)
+            self._list.setRowCount(len(self.rules.rules))
+            for index, rule in enumerate(self.rules.rules):
+                check = QtWidgets.QTableWidgetItem()
+                check.setFlags(Qt.ItemFlag.ItemIsUserCheckable
+                               | Qt.ItemFlag.ItemIsEnabled)
+                check.setCheckState(Qt.CheckState.Checked if rule.enabled
+                                    else Qt.CheckState.Unchecked)
+                self._list.setItem(index, 0, check)
+                column = "*" if rule.column == "*" else rule.column
+                for position, text in enumerate(
+                        (column,
+                         "matches" if rule.regex else rule.condition,
+                         rule.value, rule.action), start=1):
+                    cell = QtWidgets.QTableWidgetItem(text)
+                    cell.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                    self._list.setItem(index, position, cell)
+            self._list.resizeColumnsToContents()
+            self._list.blockSignals(False)
+
 
     class RunStrip(QtWidgets.QWidget):
         """The next comparison and the current one, in two rows.
@@ -615,6 +756,7 @@ if IDA_AVAILABLE:
             self.run_strip: Optional[RunStrip] = None
             self._lens = LENSES[0]
             self._query: Query = Query()
+            self._rules = RuleSet()
             self._sort: Optional[Tuple[str, bool]] = None
             self._threshold = DEFAULT_PORT_MIN_SIMILARITY
             self._preview = None
@@ -919,7 +1061,8 @@ if IDA_AVAILABLE:
         # -- the shown set ---------------------------------------------------
 
         def _key(self) -> tuple:
-            return (self._lens.key, self._threshold, self._sort, self._query)
+            return (self._lens.key, self._threshold, self._sort, self._query,
+                    self._rules)
 
         @staticmethod
         def _narrows(previous: tuple, current: tuple) -> bool:
@@ -927,17 +1070,18 @@ if IDA_AVAILABLE:
             selects. The lens and the threshold decide membership, so both
             must be unchanged; the sort only decides order, and apply_lens
             re-sorts whatever it is given."""
-            was_lens, was_threshold, _was_sort, was_query = previous
-            lens, threshold, _sort, query = current
+            was_lens, was_threshold, _was_sort, was_query, was_rules = previous
+            lens, threshold, _sort, query, rules = current
             return (lens == was_lens and threshold == was_threshold
-                    and query.narrows(was_query))
+                    and query.narrows(was_query) and rules.narrows(was_rules))
 
         @staticmethod
         def _select(rows: Sequence, key: tuple) -> list:
-            lens, threshold, sort, query = key
+            lens, threshold, sort, query, rules = key
             column, descending = sort if sort else (None, None)
             return apply_lens(rows, lens_by_key(lens), query, threshold,
-                              sort_column=column, sort_descending=descending)
+                              sort_column=column, sort_descending=descending,
+                              rules=rules)
 
         # -- the search field ------------------------------------------------
 
@@ -1001,6 +1145,7 @@ if IDA_AVAILABLE:
                 ("Copy address there", actions.COPY,
                  lambda: self._handlers["copy_there"]()),
             )
+            filters = QtWidgets.QMenu("Filters", menu)
             for entry in entries:
                 if entry is None:
                     menu.addSeparator()
@@ -1009,7 +1154,43 @@ if IDA_AVAILABLE:
                 item = menu.addAction(label)
                 item.setEnabled(can(action))
                 item.triggered.connect(lambda _checked=False, fn=callback: fn())
+
+            # Always available: filtering is about the list, not about what
+            # is selected in it, so it is never greyed out.
+            menu.addSeparator()
+            quick = menu.addAction("Quick filter")
+            quick.setShortcut(QtGui.QKeySequence.StandardKey.Find)
+            quick.triggered.connect(lambda _checked=False: self._focus_search())
+            modify = menu.addAction("Modify filters…")
+            modify.triggered.connect(lambda _checked=False: self._edit_filters())
+            reset = menu.addAction("Reset filters")
+            reset.setEnabled(bool(self._rules))
+            reset.triggered.connect(lambda _checked=False: self._reset_filters())
             exec_widget(menu, self._table.viewport().mapToGlobal(position))
+
+        def _edit_filters(self) -> None:
+            """IDA's "Modify filters..." over our own table.
+
+            Deliberately the same shape as the chooser's: one row that reads
+            "If column <c> <condition> <value> then <action>", an Add button,
+            and a list of what is in force. The rules are ours -- a chooser
+            would bring its own but cannot tint a cell, which is what the
+            whole Trust column rests on.
+            """
+            dialog = FilterDialog(self._rules, self._table)
+            if exec_widget(dialog) and dialog.rules != self._rules:
+                self._rules = dialog.rules
+                self._refresh_rows()
+
+        def _reset_filters(self) -> None:
+            if self._rules:
+                self._rules = RuleSet()
+                self._refresh_rows()
+
+        def _focus_search(self) -> None:
+            """Quick filter, where IDA puts it."""
+            self._search.setFocus()
+            self._search.selectAll()
 
         def _port_label(self) -> str:
             ids = self.selected_ids()
