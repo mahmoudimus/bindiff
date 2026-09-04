@@ -44,6 +44,47 @@ def main():
         ok("diff callable", callable(bindiff.diff))
     except Exception as exc:
         ok("import bindiff", f"FAILED: {exc}", good=False)
+
+    # The bindings are stamped by the protoc the CMake build produces; IDA
+    # ships its own interpreter with its own protobuf, and nothing makes the
+    # two agree. pyproject's floor governs a pip install, which a plugin
+    # loaded from a directory never performs -- so this is only ever visible
+    # from in here, which is what this script is for.
+    print("\n=== protobuf, which only IDA's interpreter can answer for ===")
+    try:
+        from google.protobuf import __version__ as runtime
+    except Exception as exc:
+        ok("runtime", f"not installed: {exc}", good=False)
+        runtime = None
+    else:
+        ok("runtime", runtime)
+    try:
+        from bindiff.binexport import _gencode_version
+
+        stamp = _gencode_version()
+        ok("bindings stamped by protoc", stamp or "unreadable", good=bool(stamp))
+        if runtime and stamp:
+            def parts(text):
+                return tuple(int(n) for n in text.split(".")[:3]
+                             if n.isdigit())
+
+            good = parts(runtime) >= parts(stamp)
+            ok("runtime >= bindings", "yes" if good else
+               f"NO -- install 'protobuf>={stamp}' into {sys.executable}",
+               good=good)
+    except Exception as exc:
+        ok("bindings", f"could not be read: {exc}", good=False)
+
+    # Reading a .BinExport is the thing that actually fails when they
+    # disagree, and it fails with a VersionError that is not an ImportError.
+    try:
+        from bindiff.binexport import _load_pb2
+
+        _load_pb2()
+        ok("binexport2_pb2 loads", "yes")
+    except Exception as exc:
+        ok("binexport2_pb2 loads", f"NO -- {str(exc).splitlines()[0]}",
+           good=False)
         return
 
     print("\n=== what would be exported for the primary side ===")

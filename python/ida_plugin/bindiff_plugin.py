@@ -1304,11 +1304,18 @@ if IDA_AVAILABLE:
             # in the overview as "bindiff-primary-oa1ywul8.primary". It also
             # defeated finding the exports again later, since that works from
             # the names.
+            # copy_database, not copyfile: an .i64 is only self-contained
+            # when IDA packed it. A database that has never been packed keeps
+            # its content in the companions beside it -- .id0, .id1, .id2,
+            # .nam, .til -- and copying the .i64 alone hands the worker a stub.
+            # The two other places that copy a database for a worker have
+            # always done this; this one, the one every diff goes through,
+            # did not.
+            from bindiff.headless import copy_database
+
             holder = tempfile.mkdtemp(prefix="bindiff-snapshot-")
-            target = str(Path(holder) / source.name)
             try:
-                shutil.copyfile(source, target)
-                yield target
+                yield copy_database(source, holder)
             finally:
                 # A leftover copy of someone's database is not a small
                 # mess, so it goes even if the diff raised.

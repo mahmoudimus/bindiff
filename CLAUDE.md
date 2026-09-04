@@ -519,6 +519,28 @@ whether something exists is never the thing that brings the process down.
 The UI modules keep their own `ida_kernwin` imports. They only ever run with
 the kernel up, and the drift this guards against is in the database API.
 
+**Copying a database for a worker** goes through
+`bindiff.headless.copy_database`. An `.i64` is only self-contained when IDA
+packed it; a database that has never been packed keeps its content in the
+companions beside it (`.id0`, `.id1`, `.id2`, `.nam`, `.til`), and copying the
+`.i64` alone hands the worker a stub. Three places do this -- `dump_types`,
+`try_import`, and the plugin's `_snapshot` that **every diff goes through** --
+and the third was the one that did not. The suffixes are named rather than
+globbed on the stem: `hexx64.dll.*` also matches
+`hexx64.dll.primary.BinExport` and its `.types.json`, so globbing copied 22 MB
+of export beside every 12 MB database, on every diff.
+
+**protobuf in IDA's interpreter** is the other half of the floor
+`check_protobuf_floor.py` guards. That floor governs a **pip install**, which a
+plugin loaded from a directory never performs -- so IDA can carry a runtime
+older than the protoc that stamped the bindings, and `_load_pb2` did not
+catch it: protobuf's `VersionError` derives from `Exception`, not
+`ImportError`, so the actionable-error handler never saw it and the reader got
+a raw traceback pointing at `bindiff._pb`. It now names the running
+interpreter, the gencode stamp read from the generated module, and the pip
+line to type. `ida_preflight.py` reports the same three facts, which is the
+only place they can be observed.
+
 **Filter rules** (`ida_plugin/filters.py`) reproduce IDA's per-column filtering
 over our own table. The chooser carries that natively and there is no API to
 borrow it -- the quick filter, "Modify filters..." and the column picker

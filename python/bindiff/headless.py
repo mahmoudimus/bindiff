@@ -214,6 +214,36 @@ def _invoke_binexport(output_path: str) -> None:
             f"installed for this IDA?")
 
 
+# What IDA keeps beside a database. An .i64 is only self-contained when IDA
+# packed it; a database that has never been packed -- which is what "Save"
+# without packing leaves, and what an open one looks like -- keeps its content
+# in these, and copying the .i64 alone hands the worker a stub that opens
+# empty or not at all.
+#
+# Named rather than globbed on the stem. "hexx64-9.4.dll.*" also matches
+# hexx64-9.4.dll.primary.BinExport and its .types.json sidecar, so globbing
+# copied 22 MB of export beside every 12 MB database, on every diff.
+IDA_COMPANION_SUFFIXES = frozenset(
+    {".id0", ".id1", ".id2", ".id3", ".nam", ".til", ".seg"})
+
+
+def copy_database(source, holder) -> str:
+    """Copies a database and its companions into `holder`, keeping the name.
+
+    Returns the copy's path. The real filename is preserved because
+    BinExport records the name it was given: a temporary name ends up in the
+    .BinExport, in the .BinDiff's file table, and on screen.
+    """
+    source = Path(source)
+    target = Path(holder) / source.name
+    shutil.copyfile(source, target)
+    for companion in source.parent.glob(f"{source.stem}.*"):
+        if (companion != source and companion.is_file()
+                and companion.suffix.lower() in IDA_COMPANION_SUFFIXES):
+            shutil.copyfile(companion, Path(holder) / companion.name)
+    return str(target)
+
+
 def dump_types(input_path: str, output_path: str) -> StageResult:
     """Opens a database with idalib and writes its types beside it.
 
@@ -242,14 +272,8 @@ def dump_types(input_path: str, output_path: str) -> StageResult:
     # writing.
     source = Path(input_path)
     holder = tempfile.mkdtemp(prefix="bindiff-types-")
-    working = str(Path(holder) / source.name)
     try:
-        shutil.copyfile(source, working)
-        # An .i64 is not self-contained for a database IDA has not packed; the
-        # companion files sit beside it under the same stem.
-        for companion in source.parent.glob(f"{source.stem}.*"):
-            if companion != source and companion.is_file():
-                shutil.copyfile(companion, str(Path(holder) / companion.name))
+        working = copy_database(source, holder)
     except OSError as exc:
         shutil.rmtree(holder, ignore_errors=True)
         return StageResult(ok=False, stage="types",
@@ -413,12 +437,8 @@ def try_import(primary_database: str, result_path: str,
                            message=f"no such database: {primary_database}")
 
     holder = tempfile.mkdtemp(prefix="bindiff-import-")
-    working = str(Path(holder) / source.name)
     try:
-        shutil.copyfile(source, working)
-        for companion in source.parent.glob(f"{source.stem}.*"):
-            if companion != source and companion.is_file():
-                shutil.copyfile(companion, str(Path(holder) / companion.name))
+        working = copy_database(source, holder)
     except OSError as exc:
         shutil.rmtree(holder, ignore_errors=True)
         return StageResult(ok=False, stage="import",

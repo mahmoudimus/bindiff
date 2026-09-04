@@ -113,3 +113,49 @@ class TestCheck:
     def test_an_unbounded_dependency_fails(self):
         with pytest.raises(Mismatch, match="no >= floor"):
             check([("a_pb2.py", generated(7, 35, 1))], pyproject("protobuf"))
+
+
+class TestTheRuntimeBeingOlderThanTheGencode:
+    """protobuf's VersionError derives from Exception, not ImportError, so
+    _load_pb2's actionable-error handler never saw it: the reader got a raw
+    traceback pointing at bindiff._pb.
+
+    It bites in IDA specifically. The bindings are stamped by the protoc the
+    CMake build produces; IDA ships its own interpreter with its own
+    protobuf, and nothing makes the two agree. The floor in pyproject governs
+    a pip install, which a plugin loaded from a directory never performs.
+    """
+
+    def test_version_error_is_not_an_import_error(self):
+        """The premise. If protobuf ever changes this, the handler that
+        catches it can be narrowed again."""
+        rv = pytest.importorskip("google.protobuf.runtime_version")
+        assert not issubclass(rv.VersionError, ImportError)
+
+    def test_the_gencode_stamp_is_read_from_the_module(self):
+        """Read from the generated source rather than parsed out of the
+        exception text, which protobuf is free to reword."""
+        pytest.importorskip("google.protobuf")
+        from bindiff.binexport import _gencode_version
+
+        stamp = _gencode_version()
+        assert stamp and all(part.isdigit() for part in stamp.split("."))
+
+    def test_the_message_says_which_interpreter(self):
+        """Inside IDA the one to upgrade is IDA's, not whichever python is on
+        the PATH, and installing into the wrong one is the obvious next
+        mistake."""
+        import sys
+
+        from bindiff.binexport import _explain_protobuf
+
+        text = _explain_protobuf(Exception("gencode 7.35.1 runtime 6.33.1."))
+        assert sys.executable in text
+        assert "pip install" in text
+        assert "IDA's own interpreter" in text
+
+    def test_the_message_carries_the_original(self):
+        from bindiff.binexport import _explain_protobuf
+
+        assert "runtime 6.33.1" in _explain_protobuf(
+            Exception("gencode 7.35.1 runtime 6.33.1."))
